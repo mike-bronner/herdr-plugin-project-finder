@@ -1,8 +1,8 @@
-id = "mikebronner.workbench"
-name = "Workbench"
-version = "0.1.0"
+id = "mikebronner.project-picker"
+name = "Project Picker"
+version = "0.2.0"
 min_herdr_version = "0.8.0"
-description = "Project picker and most-recently-used workspace ordering"
+description = "Fuzzy-pick git repos and open them as workspaces"
 platforms = ["macos", "linux"]
 
 # Fuzzy-pick a git repo under ~/Developer and open it as a workspace.
@@ -11,8 +11,3 @@ id = "pick-project"
 title = "Pick project"
 contexts = ["workspace"]
 command = ["python3", "bin/pick-project"]
-
-# Promote a workspace toward the top once it has been dwelled in.
-[[events]]
-on = "workspace.focused"
-command = ["python3", "bin/mru-sort"]

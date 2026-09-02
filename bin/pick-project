@@ -7,7 +7,7 @@ see checked is exactly what is loaded. On Enter the selection becomes the
 truth: deselected projects are closed, newly selected ones are created, and an
 empty selection closes every project so only home remains. Esc changes nothing.
 
-The home workspace (label "~", override with HERDR_MRU_PIN) is never listed
+The home workspace (label "~", override with HERDR_PICKER_HOME) is never listed
 and never closed.
 
 Each new workspace opens one tab named "agent", split 50/50: Claude on the
@@ -18,7 +18,7 @@ after a server restart, so the picker does not pass --continue itself.
 import glob, json, os, re, shutil, subprocess, sys, time
 
 DEV = os.environ.get("HERDR_PICKER_ROOT", os.path.expanduser("~/Developer"))
-HOME_LABEL = os.environ.get("HERDR_MRU_PIN", "~")
+HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 
 # fzf prints the line under the cursor when Enter is hit with nothing selected.
 # The enter binding queues this sentinel in that case so an intentionally empty
