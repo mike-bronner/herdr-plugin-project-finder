@@ -2,7 +2,7 @@
 
 Run: python3 -m unittest discover tests
 """
-import importlib.machinery, importlib.util, os, unittest
+import importlib.machinery, importlib.util, os, tempfile, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -145,6 +145,113 @@ class CreateWorkspace(unittest.TestCase):
     def test_create_failure_dies(self):
         with self.assertRaises(SystemExit):
             self.run_create(None)
+
+
+class LoadEnv(unittest.TestCase):
+    def load(self, body, env=None):
+        """Write `body` to a .env, load it over `env`, return the resulting environ."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            with mock.patch.dict(os.environ, env or {}, clear=True):
+                pp.load_env(path)
+                return dict(os.environ)
+
+    def test_file_values_are_applied(self):
+        env = self.load("HERDR_PICKER_ROOT=/x/code\nHERDR_PICKER_HOME=base\n")
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/x/code")
+        self.assertEqual(env["HERDR_PICKER_HOME"], "base")
+
+    def test_real_env_overrides_the_file(self):
+        env = self.load("HERDR_PICKER_ROOT=/from/file\n",
+                        {"HERDR_PICKER_ROOT": "/from/env"})
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env")
+
+    def test_missing_file_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                pp.load_env(os.path.join(d, ".env"))   # never created
+                self.assertEqual(dict(os.environ), {})
+
+    def test_unreadable_path_is_a_noop(self):
+        # A directory where a file is expected: OSError, not a crash.
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                pp.load_env(d)
+                self.assertEqual(dict(os.environ), {})
+
+    def test_comments_and_blank_lines_are_skipped(self):
+        # Asserts the whole environ: a commented line that still contains "="
+        # would otherwise land as the junk key "# HERDR_PICKER_ROOT", which a
+        # bare assertNotIn("HERDR_PICKER_ROOT") would not catch.
+        env = self.load("# HERDR_PICKER_ROOT=/commented\n\n"
+                        "   # indented comment\n"
+                        "HERDR_PICKER_HOME=base\n")
+        self.assertEqual(env, {"HERDR_PICKER_HOME": "base"})
+
+    def test_quotes_are_stripped_but_only_matching_pairs(self):
+        env = self.load('A="/x/one"\nB=\'/x/two\'\nC="/x/three\nD=""\n')
+        self.assertEqual(env["A"], "/x/one")
+        self.assertEqual(env["B"], "/x/two")
+        self.assertEqual(env["C"], '"/x/three')   # unbalanced: left alone
+        self.assertEqual(env["D"], "")
+
+    def test_hash_inside_a_value_is_not_a_comment(self):
+        self.assertEqual(self.load("A=/x/a#b\n")["A"], "/x/a#b")
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        self.assertEqual(self.load("  A = /x/a  \n")["A"], "/x/a")
+
+    def test_first_equals_wins_so_values_may_contain_one(self):
+        self.assertEqual(self.load("A=k=v\n")["A"], "k=v")
+
+    def test_malformed_line_is_skipped_and_later_lines_still_apply(self):
+        # Whole-environ again: without the "=" check the typo'd line becomes the
+        # key "HERDR_PICKER_ROOT /x/typo" rather than being dropped.
+        env = self.load("HERDR_PICKER_ROOT /x/typo\nHERDR_PICKER_HOME=base\n")
+        self.assertEqual(env, {"HERDR_PICKER_HOME": "base"})
+
+    def test_empty_key_is_skipped(self):
+        self.assertEqual(self.load("=/x/a\nA=/x/b\n"), {"A": "/x/b"})
+
+
+class ResolveRoot(unittest.TestCase):
+    def test_existing_configured_root_is_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"HERDR_PICKER_ROOT": d}, clear=True):
+                self.assertEqual(pp.resolve_root(), d)
+
+    def test_nonexistent_root_falls_back_to_home(self):
+        with mock.patch.dict(os.environ, {"HERDR_PICKER_ROOT": "/x/does/not/exist"},
+                             clear=True):
+            self.assertEqual(pp.resolve_root(), os.path.expanduser("~"))
+
+    def test_unset_uses_the_home_folder(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(pp.resolve_root(), os.path.expanduser("~"))
+
+    def test_empty_root_is_treated_as_unset(self):
+        with mock.patch.dict(os.environ, {"HERDR_PICKER_ROOT": ""}, clear=True):
+            self.assertEqual(pp.resolve_root(), os.path.expanduser("~"))
+
+    def test_tilde_is_expanded(self):
+        # .env values are never shell-expanded, so "~/x" arrives literally.
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "Code")
+            os.mkdir(sub)
+            with mock.patch.dict(os.environ, {"HOME": d, "HERDR_PICKER_ROOT": "~/Code"},
+                                 clear=True):
+                self.assertEqual(pp.resolve_root(), sub)
+
+    def test_unexpanded_tilde_would_not_be_a_directory_and_falls_back(self):
+        # Guards the expansion above: without it "~/Code" is a relative path
+        # that does not exist, so the result would be home, not the real dir.
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "Code"))
+            with mock.patch.dict(os.environ, {"HOME": d, "HERDR_PICKER_ROOT": "~/Nope"},
+                                 clear=True):
+                self.assertEqual(pp.resolve_root(), d)
 
 
 if __name__ == "__main__":

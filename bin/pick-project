@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fuzzy-pick git repos under ~/Developer and make them the open Herdr workspaces.
+"""Fuzzy-pick git repos under a root folder and make them the open Herdr workspaces.
 
 The list is the desired set of open projects. Everything already open (other
 than the pinned home workspace) is listed first and pre-selected, so what you
@@ -7,8 +7,12 @@ see checked is exactly what is loaded. On Enter the selection becomes the
 truth: deselected projects are closed, newly selected ones are created, and an
 empty selection closes every project so only home remains. Esc changes nothing.
 
-The home workspace (label "~", override with HERDR_PICKER_HOME) is never listed
-and never closed.
+The search root is HERDR_PICKER_ROOT, defaulting to the home folder. The home
+workspace (label "~", override with HERDR_PICKER_HOME) is never listed and
+never closed.
+
+Both settings may also come from a .env file under HERDR_PLUGIN_CONFIG_DIR;
+real environment variables take precedence over that file.
 
 Each new workspace opens one tab named "agent", split 50/50: Claude on the
 left, a shell on the right. Claude is started plain — Herdr's own [session]
@@ -17,7 +21,48 @@ after a server restart, so the picker does not pass --continue itself.
 """
 import glob, json, os, re, shutil, subprocess, sys, time
 
-DEV = os.environ.get("HERDR_PICKER_ROOT", os.path.expanduser("~/Developer"))
+
+def load_env(path):
+    """Apply KEY=VALUE lines from `path` to os.environ. Real env vars win.
+
+    Blank lines and lines starting with "#" are skipped, and so is any line
+    without an "=". The skip is deliberate: the file is optional user config,
+    so a typo must never stop the picker from opening.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def resolve_root():
+    """Where to look for repos: HERDR_PICKER_ROOT, else the home folder.
+
+    A leading "~" is expanded, since .env values are not shell-expanded. A root
+    that is not an existing directory falls back to the home folder rather than
+    dying, so a stale override still leaves the picker usable.
+    """
+    root = os.path.expanduser(os.environ.get("HERDR_PICKER_ROOT") or "~")
+    return root if os.path.isdir(root) else os.path.expanduser("~")
+
+
+# User-editable config lives in the plugin's config dir, per the Herdr docs.
+# Loaded before the settings below so the file can supply them.
+if os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
+    load_env(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], ".env"))
+
+DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 
 # fzf prints the line under the cursor when Enter is hit with nothing selected.
@@ -58,12 +103,12 @@ def herdr(*args):
 
 
 def repos():
-    """Every git repo up to 2 levels under ~/Developer.
+    """Every git repo up to 2 levels under the configured root.
 
     Deliberately not hardcoded to any grouping folder: repos live both directly
-    under ~/Developer and inside grouping dirs (Sites, Insight, ...), and those
-    groupings get reorganised. Anything nested inside a repo is skipped so
-    submodules and worktrees do not show up as separate projects.
+    under the root and inside grouping dirs, and those groupings get
+    reorganised. Anything nested inside a repo is skipped so submodules and
+    worktrees do not show up as separate projects.
     """
     out = []
     for depth in ("*", "*/*"):
