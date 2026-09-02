@@ -82,6 +82,15 @@ class ParseSelection(unittest.TestCase):
     def test_no_match_without_sentinel_is_cancel(self):
         self.assertIsNone(pp.parse_selection(1, ""))
 
+    def test_heading_line_is_never_a_path(self):
+        # --header-lines keeps fzf from returning it, but a line whose path
+        # field is empty must never become a workspace even if one slips out.
+        self.assertIsNone(pp.parse_selection(0, pp.HEADING + "\n"))
+
+    def test_heading_alongside_real_rows_is_dropped(self):
+        out = pp.HEADING + "\na  1m ago \t/x/a\n"
+        self.assertEqual(pp.parse_selection(0, out), ["/x/a"])
+
 
 class Plan(unittest.TestCase):
     def test_deselected_closed_new_created_kept_untouched(self):
@@ -252,6 +261,54 @@ class ResolveRoot(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HOME": d, "HERDR_PICKER_ROOT": "~/Nope"},
                                  clear=True):
                 self.assertEqual(pp.resolve_root(), d)
+
+
+class Heading(unittest.TestCase):
+    """The column heading fzf consumes via --header-lines=1."""
+
+    def test_is_exactly_one_line(self):
+        # --header-lines=1 consumes one line; a second would become a project.
+        self.assertNotIn("\n", pp.HEADING)
+
+    def test_path_field_is_empty(self):
+        # Keeps the heading from parsing as a selectable repo path.
+        self.assertTrue(pp.HEADING.endswith("\t"))
+
+    def test_columns_line_up_with_a_row(self):
+        # Guards against the heading being rewritten as a hand-padded literal.
+        # Match the full label, not "STATUS": that substring also occurs inside
+        # "AGENT STATUS" and would report the wrong column offset.
+        row = pp.ROW.format("proj", "3m ago", "\u25cf idle", "/x/proj")
+        self.assertEqual(pp.HEADING.index("TOUCHED"), row.index("3m ago"))
+        self.assertEqual(pp.HEADING.index("AGENT STATUS"), row.index("\u25cf idle"))
+
+    def test_labels_are_in_column_order(self):
+        visible = pp.HEADING.split("\t")[0]
+        self.assertLess(visible.index("PROJECT"), visible.index("TOUCHED"))
+        self.assertLess(visible.index("TOUCHED"), visible.index("AGENT STATUS"))
+
+
+class KeyBindings(unittest.TestCase):
+    """What the picker binds, and what the legend claims it binds."""
+
+    def test_space_is_not_bound(self):
+        # Space is fzf's AND separator between query terms. Binding it toggles
+        # rows while you type a multi-word filter, which silently changes the
+        # selection and can close a workspace on enter.
+        self.assertNotIn("space:", pp.KEYS)
+
+    def test_select_all_and_none_stay_bound(self):
+        self.assertIn("ctrl-a:select-all", pp.KEYS)
+        self.assertIn("ctrl-d:deselect-all", pp.KEYS)
+
+    def test_legend_agrees_with_the_bindings_about_space(self):
+        # Doc-drift guard: re-binding space without updating the legend, or
+        # advertising it without binding it, both fail here.
+        self.assertEqual("space" in pp.KEYS, "space" in pp.HEADER)
+
+    def test_legend_names_every_bound_key(self):
+        for key in ("ctrl-a", "ctrl-d"):
+            self.assertIn(key, pp.HEADER)
 
 
 if __name__ == "__main__":

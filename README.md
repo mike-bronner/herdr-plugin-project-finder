@@ -1,4 +1,4 @@
-# Project Picker — a Herdr plugin
+# Project Finder — a Herdr plugin
 
 Fuzzy-pick git repos and open them as workspaces in
 [Herdr](https://herdr.dev), the agent-aware terminal multiplexer.
@@ -23,14 +23,14 @@ which keeps the sidebar in most-recently-used order.
 ## Install
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-picker
+herdr plugin install mike-bronner/herdr-plugin-project-finder
 ```
 
 To work on the plugin instead, clone it and link the checkout:
 
 ```sh
-git clone git@github.com:mike-bronner/herdr-plugin-project-picker.git
-herdr plugin link /absolute/path/to/herdr-plugin-project-picker
+git clone git@github.com:mike-bronner/herdr-plugin-project-finder.git
+herdr plugin link /absolute/path/to/herdr-plugin-project-finder
 ```
 
 Bind the picker pane in `~/.config/herdr/config.toml`:
@@ -39,13 +39,39 @@ Bind the picker pane in `~/.config/herdr/config.toml`:
 [[keys.command]]
 key = "prefix+f"
 type = "shell"
-command = "\"$HERDR_BIN_PATH\" plugin pane open --plugin mikebronner.project-picker --entrypoint picker"
-description = "pick project"
+command = "\"$HERDR_BIN_PATH\" plugin pane open --plugin mikebronner.project-finder --entrypoint picker"
+description = "find projects"
 ```
 
 There is no keybinding type that opens a plugin pane directly, so the binding
 shells out to the CLI. `$HERDR_BIN_PATH` is injected into command keybindings,
 so no absolute path is needed.
+
+## Open on launch
+
+Attaching blocks the shell, so the picker cannot usefully run before it: at a
+cold start there is no server yet to open a pane on. Wrap the command in
+`~/.zshrc` instead and let a detached waiter poll for the server, then ask
+Herdr to open the pane:
+
+```sh
+herdr() {
+  if [[ $# -eq 0 && -z "$HERDR_NO_PICKER" && -t 0 ]]; then
+    (
+      for _ in {1..40}; do
+        sleep 0.25
+        command herdr status server 2>/dev/null | grep -q 'status: running' || continue
+        command herdr plugin pane open --plugin mikebronner.project-finder --entrypoint picker >/dev/null 2>&1 && exit 0
+      done
+    ) &!
+  fi
+  command herdr "$@"
+}
+```
+
+The waiter gives the server up to ten seconds, so cold and warm starts behave
+the same. `HERDR_NO_PICKER=1 herdr` skips it, and Esc in the picker changes
+nothing.
 
 ## Configure
 
@@ -53,7 +79,7 @@ Both settings are optional. To change one, create a `.env` file in the plugin's
 config directory:
 
 ```sh
-$EDITOR "$(herdr plugin config-dir mikebronner.project-picker)/.env"
+$EDITOR "$(herdr plugin config-dir mikebronner.project-finder)/.env"
 ```
 
 ```sh

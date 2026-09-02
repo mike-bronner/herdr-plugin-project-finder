@@ -65,6 +65,21 @@ if os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
 DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 
+# Column layout for the list. The heading is built from the same format string
+# as every row, so the two cannot drift out of alignment. Field 2 (after the
+# tab) is the repo path: --with-nth=1 hides it, and the preview reads it.
+ROW = "{:<34} {:<9} {:<12}\t{}"
+HEADING = ROW.format("PROJECT", "TOUCHED", "AGENT STATUS", "")
+
+# Key bindings and the legend above the list. Space is deliberately NOT bound:
+# it is fzf's AND separator between query terms, so binding it to toggle flips
+# rows while you type a multi-word filter. Tab is fzf's own toggle key and is
+# left at its default. The legend must keep agreeing with what is bound here.
+KEYS = "ctrl-a:select-all,ctrl-d:deselect-all"
+HEADER = ("enter apply  ·  tab toggle  ·  ctrl-a all  ·  ctrl-d none  ·  esc cancel\n"
+          "checked = open  ·  unchecked open projects are closed on enter\n"
+          " ")   # fzf trims a trailing empty line; a space survives
+
 # fzf prints the line under the cursor when Enter is hit with nothing selected.
 # The enter binding queues this sentinel in that case so an intentionally empty
 # selection can be told apart from "open the highlighted project".
@@ -194,7 +209,10 @@ def preselect_bind(n):
     """fzf --bind that marks the first n rows selected once the list is loaded.
 
     Must be the load event: start fires before any rows exist, so pos+select
-    there is a silent no-op (verified against fzf 0.74 in a pty)."""
+    there is a silent no-op (verified against fzf 0.74 in a pty). load fires
+    exactly once for a static list and does not re-fire when the query changes,
+    so the positional selects cannot leak onto filtered rows (counted with
+    execute-silent in a pty on 0.74.3)."""
     if n <= 0:
         return []
     chain = "+".join(f"pos({i})+select" for i in range(1, n + 1))
@@ -210,7 +228,7 @@ def parse_selection(returncode, stdout):
     if EMPTY in lines:
         return []
     paths = [l.split("\t", 1)[1] for l in lines if "\t" in l]
-    return paths or None
+    return [p for p in paths if p] or None
 
 
 def plan(selected_labels, open_ws):
@@ -290,21 +308,26 @@ def main():
     lines = []
     for label, p in head + rest:
         mark = f"● {status[label]}" if label in status else ""
-        lines.append(f"{label:<34} {human_age(touched_at(p), now):<9} {mark:<10}\t{p}")
+        lines.append(ROW.format(label, human_age(touched_at(p), now), mark, p))
 
     sel = subprocess.run(
         ["fzf", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
-         "--multi", "--prompt=project > ",
-         "--header=enter apply  ·  space/tab toggle  ·  ctrl-a all  ·  ctrl-d none  ·  esc cancel\n"
-                  "checked = open  ·  unchecked open projects are closed on enter",
-         "--bind", "space:toggle+down,ctrl-a:select-all,ctrl-d:deselect-all",
+         "--multi", "--prompt=filter projects > ",
+         "--header=" + HEADER,
+         "--bind", KEYS,
          "--bind", f"enter:transform:[ \"$FZF_SELECT_COUNT\" -eq 0 ] "
                    f"&& echo 'print({EMPTY})+accept' || echo accept",
          *preselect_bind(len(head)),
-         "--height=100%", "--border", "--info=inline",
+         "--header-lines=1",
+         # No pointer glyph: the whole current row is highlighted instead.
+         # Selected rows get a green check; fzf has no unselected marker, so
+         # that column is simply blank on the rest.
+         "--marker=\u2713 ", "--color=marker:green",
+         "--pointer= ", "--gutter= ", "--highlight-line",
+         "--height=100%", "--info=inline",
          "--preview", "git -C {2} log --oneline -8 2>/dev/null || ls -1 {2}",
          "--preview-window=right:52%:wrap"],
-        input="\n".join(lines), capture_output=True, text=True)
+        input="\n".join([HEADING] + lines), capture_output=True, text=True)
 
     chosen = parse_selection(sel.returncode, sel.stdout)
     if chosen is None:
