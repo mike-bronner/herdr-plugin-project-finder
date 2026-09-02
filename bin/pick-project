@@ -10,10 +10,10 @@ empty selection closes every project so only home remains. Esc changes nothing.
 The home workspace (label "~", override with HERDR_MRU_PIN) is never listed
 and never closed.
 
-Each new workspace opens tab 1 split 50/50: Claude on the left, a shell on the
-right. Claude is started plain — Herdr's own [session] resume_agents_on_restore
-(on by default) handles bringing conversations back after a server restart, so
-the picker does not pass --continue itself.
+Each new workspace opens one tab named "agent", split 50/50: Claude on the
+left, a shell on the right. Claude is started plain — Herdr's own [session]
+resume_agents_on_restore (on by default) handles bringing conversations back
+after a server restart, so the picker does not pass --continue itself.
 """
 import glob, json, os, re, shutil, subprocess, sys, time
 
@@ -32,6 +32,9 @@ for d in ("/opt/homebrew/bin", "/usr/local/bin"):
         os.environ["PATH"] = d + ":" + os.environ["PATH"]
 
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
+
+# Name of the first tab in every workspace the picker opens.
+TAB_LABEL = "agent"
 
 
 def die(msg):
@@ -184,6 +187,36 @@ def pick_focus(created_ids, closed_ids, focused_id, surviving_ids, home_id):
     return None
 
 
+def create_workspace(label, path, live):
+    """Open a workspace for `path` with the agent layout; return its workspace id.
+
+    The first tab arrives with the workspace and cannot be labelled at creation
+    (`workspace create --label` names the workspace), so it is renamed to
+    TAB_LABEL right after. It is then split Claude (left) | shell (right).
+    """
+    res = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
+    if not res:
+        die(f"failed to create workspace for {path}")
+
+    tab = res.get("tab", {}).get("tab_id")
+    if tab:
+        herdr("tab", "rename", tab, TAB_LABEL)
+
+    pane = res.get("root_pane", {}).get("pane_id")
+    if pane:
+        herdr("pane", "split", "--pane", pane,
+              "--direction", "right", "--ratio", "0.5", "--cwd", path)
+        # Fire and forget. `agent start` blocks until the agent is ready
+        # (default 30s), which would stall the picker on a multi-select —
+        # detaching makes that wait free. Note --timeout has a 3000ms
+        # MINIMUM, so a short value is rejected outright; omit it instead.
+        subprocess.Popen([HERDR, "agent", "start", agent_name(label, live),
+                          "--kind", "claude", "--pane", pane],
+                         start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return res["workspace"]["workspace_id"]
+
+
 def main():
     if not HERDR:
         die("herdr not found on PATH")
@@ -244,27 +277,7 @@ def main():
             closed.append(w["workspace_id"])
 
     live = {a.get("name") for a in (herdr("agent", "list") or {}).get("agents", [])}
-    created = []
-    for label in to_create:
-        path = path_of[label]
-        res = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
-        if not res:
-            die(f"failed to create workspace for {path}")
-        created.append(res["workspace"]["workspace_id"])
-
-        pane = res.get("root_pane", {}).get("pane_id")
-        if pane:
-            # Tab 1 becomes Claude (left) | shell (right).
-            herdr("pane", "split", "--pane", pane,
-                  "--direction", "right", "--ratio", "0.5", "--cwd", path)
-            # Fire and forget. `agent start` blocks until the agent is ready
-            # (default 30s), which would stall the picker on a multi-select —
-            # detaching makes that wait free. Note --timeout has a 3000ms
-            # MINIMUM, so a short value is rejected outright; omit it instead.
-            subprocess.Popen([HERDR, "agent", "start", agent_name(label, live),
-                              "--kind", "claude", "--pane", pane],
-                             start_new_session=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    created = [create_workspace(label, path_of[label], live) for label in to_create]
 
     focused = next((w["workspace_id"] for w in open_ws if w.get("focused")), None)
     surviving = [w["workspace_id"] for w in open_ws

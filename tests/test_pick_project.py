@@ -115,5 +115,37 @@ class PickFocus(unittest.TestCase):
         self.assertIsNone(pp.pick_focus([], ["w2"], "w1", ["w1"], "h"))
 
 
+
+class CreateWorkspace(unittest.TestCase):
+    RES = {"workspace": {"workspace_id": "w9"}, "tab": {"tab_id": "w9:t1"},
+           "root_pane": {"pane_id": "p1"}}
+
+    def run_create(self, res):
+        with mock.patch.object(pp, "herdr", return_value=res) as h, \
+             mock.patch.object(pp.subprocess, "Popen"), \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            wid = pp.create_workspace("proj", "/x/proj", set())
+        return wid, [c.args for c in h.call_args_list]
+
+    def test_first_tab_is_renamed_agent(self):
+        wid, calls = self.run_create(self.RES)
+        self.assertEqual(wid, "w9")
+        self.assertIn(("tab", "rename", "w9:t1", "agent"), calls)
+        # Rename happens before the split so the tab is named as it appears.
+        self.assertLess(calls.index(("tab", "rename", "w9:t1", "agent")),
+                        next(i for i, c in enumerate(calls) if c[:2] == ("pane", "split")))
+
+    def test_no_tab_id_skips_rename_but_still_builds_layout(self):
+        res = {k: v for k, v in self.RES.items() if k != "tab"}
+        wid, calls = self.run_create(res)
+        self.assertEqual(wid, "w9")
+        self.assertFalse(any(c[:2] == ("tab", "rename") for c in calls))
+        self.assertTrue(any(c[:2] == ("pane", "split") for c in calls))
+
+    def test_create_failure_dies(self):
+        with self.assertRaises(SystemExit):
+            self.run_create(None)
+
+
 if __name__ == "__main__":
     unittest.main()

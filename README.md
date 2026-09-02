@@ -9,9 +9,9 @@ Project picker and most-recently-used workspace ordering for
   levels under `~/Developer` (`HERDR_PICKER_ROOT` to override). Open
   workspaces are listed first and pre-selected, so what is checked is exactly
   what is loaded. On Enter the selection becomes the truth: unchecked open
-  projects are closed, newly checked ones are created with Claude on the left
-  and a shell on the right, and an empty selection closes everything except
-  the home workspace. Esc changes nothing.
+  projects are closed, newly checked ones are created with a tab named `agent`
+  holding Claude on the left and a shell on the right, and an empty selection
+  closes everything except the home workspace. Esc changes nothing.
 - **`bin/mru-sort`** — a `workspace.focused` hook that promotes the focused
   workspace toward the top of the sidebar after a dwell (`HERDR_MRU_DWELL`,
   default 10s). The home workspace (`HERDR_MRU_PIN`, default `~`) stays
