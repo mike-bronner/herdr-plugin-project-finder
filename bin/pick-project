@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Fuzzy-pick git repos under ~/Developer and make them the open Herdr workspaces.
+
+The list is the desired set of open projects. Everything already open (other
+than the pinned home workspace) is listed first and pre-selected, so what you
+see checked is exactly what is loaded. On Enter the selection becomes the
+truth: deselected projects are closed, newly selected ones are created, and an
+empty selection closes every project so only home remains. Esc changes nothing.
+
+The home workspace (label "~", override with HERDR_MRU_PIN) is never listed
+and never closed.
+
+Each new workspace opens tab 1 split 50/50: Claude on the left, a shell on the
+right. Claude is started plain — Herdr's own [session] resume_agents_on_restore
+(on by default) handles bringing conversations back after a server restart, so
+the picker does not pass --continue itself.
+"""
+import glob, json, os, re, shutil, subprocess, sys, time
+
+DEV = os.environ.get("HERDR_PICKER_ROOT", os.path.expanduser("~/Developer"))
+HOME_LABEL = os.environ.get("HERDR_MRU_PIN", "~")
+
+# fzf prints the line under the cursor when Enter is hit with nothing selected.
+# The enter binding queues this sentinel in that case so an intentionally empty
+# selection can be told apart from "open the highlighted project".
+EMPTY = "__pick_project_empty__"
+
+# Popups do not load ~/.zshrc, and /opt/homebrew/bin is absent from the system
+# default PATH, so Homebrew binaries are otherwise unfindable here.
+for d in ("/opt/homebrew/bin", "/usr/local/bin"):
+    if os.path.isdir(d) and d not in os.environ["PATH"].split(":"):
+        os.environ["PATH"] = d + ":" + os.environ["PATH"]
+
+HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
+
+
+def die(msg):
+    sys.stderr.write(f"\n\033[31merror:\033[0m {msg}\n\nPress enter to close...")
+    try:
+        input()
+    except Exception:
+        time.sleep(5)
+    sys.exit(1)
+
+
+def herdr(*args):
+    """Run a herdr CLI command and return its parsed JSON result."""
+    r = subprocess.run([HERDR, *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout).get("result")
+    except Exception:
+        return None
+
+
+def repos():
+    """Every git repo up to 2 levels under ~/Developer.
+
+    Deliberately not hardcoded to any grouping folder: repos live both directly
+    under ~/Developer and inside grouping dirs (Sites, Insight, ...), and those
+    groupings get reorganised. Anything nested inside a repo is skipped so
+    submodules and worktrees do not show up as separate projects.
+    """
+    out = []
+    for depth in ("*", "*/*"):
+        for g in sorted(glob.glob(os.path.join(DEV, depth, ".git"))):
+            p = os.path.dirname(g)
+            if any(p.startswith(o + os.sep) for o in out):
+                continue          # nested inside a repo we already have
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def touched_at(path):
+    """Newest of the git index and the newest working-tree file (depth 2)."""
+    newest = 0
+    try:
+        newest = os.path.getmtime(os.path.join(path, ".git", "index"))
+    except OSError:
+        pass
+    skip = {"node_modules", "vendor", ".git"}
+    for root, dirs, files in os.walk(path):
+        depth = root[len(path):].count(os.sep)
+        if depth >= 2:
+            dirs[:] = []
+        dirs[:] = [d for d in dirs if d not in skip]
+        for f in files:
+            try:
+                m = os.path.getmtime(os.path.join(root, f))
+                if m > newest:
+                    newest = m
+            except OSError:
+                pass
+    return newest
+
+
+def human_age(ts, now):
+    if not ts:
+        return "-"
+    d = now - ts
+    for cutoff, div, unit in ((3600, 60, "m"), (86400, 3600, "h"),
+                              (604800, 86400, "d")):
+        if d < cutoff:
+            return f"{int(d // div)}{unit} ago"
+    return f"{int(d // 604800)}w ago"
+
+
+def agent_name(label, taken):
+    """Herdr agent names: [a-z][a-z0-9_-]{0,31}, unique among live agents."""
+    n = re.sub(r"[^a-z0-9_-]", "-", label.lower()).strip("-") or "agent"
+    if not n[0].isalpha():
+        n = "a" + n
+    n = n[:32]
+    base, i = n, 2
+    while n in taken:
+        suffix = f"-{i}"
+        n = base[:32 - len(suffix)] + suffix
+        i += 1
+    taken.add(n)
+    return n
+
+
+def open_workspaces():
+    """(home, others): the pinned home workspace (or None) and every other open
+    workspace in sidebar order."""
+    ws = (herdr("workspace", "list") or {}).get("workspaces", [])
+    home = next((w for w in ws if w.get("label") == HOME_LABEL), None)
+    return home, [w for w in ws if w is not home]
+
+
+def order_rows(labelled, open_ws):
+    """(label, path) rows: open projects first in sidebar order, then the rest
+    by most recently touched. Open workspaces with no matching repo are not
+    listed (they still get closed on accept, since they cannot be selected)."""
+    by_label = dict(labelled)
+    head = [(w["label"], by_label[w["label"]]) for w in open_ws if w["label"] in by_label]
+    listed = {l for l, _ in head}
+    rest = sorted(((touched_at(p), l, p) for l, p in labelled if l not in listed),
+                  key=lambda r: -r[0])
+    return head, [(l, p) for _, l, p in rest]
+
+
+def preselect_bind(n):
+    """fzf --bind that marks the first n rows selected once the list is loaded.
+
+    Must be the load event: start fires before any rows exist, so pos+select
+    there is a silent no-op (verified against fzf 0.74 in a pty)."""
+    if n <= 0:
+        return []
+    chain = "+".join(f"pos({i})+select" for i in range(1, n + 1))
+    return ["--bind", f"load:{chain}+pos(1)"]
+
+
+def parse_selection(returncode, stdout):
+    """None = cancelled (leave everything alone). [] = deliberately empty.
+    Otherwise the chosen repo paths."""
+    if returncode == 130:
+        return None
+    lines = stdout.splitlines()
+    if EMPTY in lines:
+        return []
+    paths = [l.split("\t", 1)[1] for l in lines if "\t" in l]
+    return paths or None
+
+
+def plan(selected_labels, open_ws):
+    """What to close and what to create so open == selected."""
+    keep = set(selected_labels)
+    to_close = [w for w in open_ws if w["label"] not in keep]
+    open_labels = {w["label"] for w in open_ws}
+    to_create = [l for l in selected_labels if l not in open_labels]
+    return to_close, to_create
+
+
+def pick_focus(created_ids, closed_ids, focused_id, surviving_ids, home_id):
+    """Newly created wins. If the focused workspace was closed, fall back to the
+    first surviving selection, then home. Otherwise leave focus alone."""
+    if created_ids:
+        return created_ids[-1]
+    if focused_id in closed_ids:
+        return surviving_ids[0] if surviving_ids else home_id
+    return None
+
+
+def main():
+    if not HERDR:
+        die("herdr not found on PATH")
+    if not shutil.which("fzf"):
+        die("fzf not found on PATH")
+
+    paths = repos()
+    if not paths:
+        die(f"No git repositories found under {DEV}")
+
+    # Basenames appearing more than once get a parent prefix to stay unique.
+    seen, dupes = set(), set()
+    for p in paths:
+        b = os.path.basename(p)
+        (dupes if b in seen else seen).add(b)
+
+    def label_for(p):
+        b = os.path.basename(p)
+        return f"{os.path.basename(os.path.dirname(p))}/{b}" if b in dupes else b
+
+    _, open_ws = open_workspaces()
+    status = {w["label"]: w.get("agent_status", "") for w in open_ws}
+    head, rest = order_rows([(label_for(p), p) for p in paths], open_ws)
+
+    now = time.time()
+    lines = []
+    for label, p in head + rest:
+        mark = f"● {status[label]}" if label in status else ""
+        lines.append(f"{label:<34} {human_age(touched_at(p), now):<9} {mark:<10}\t{p}")
+
+    sel = subprocess.run(
+        ["fzf", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
+         "--multi", "--prompt=project > ",
+         "--header=enter apply  ·  space/tab toggle  ·  ctrl-a all  ·  ctrl-d none  ·  esc cancel\n"
+                  "checked = open  ·  unchecked open projects are closed on enter",
+         "--bind", "space:toggle+down,ctrl-a:select-all,ctrl-d:deselect-all",
+         "--bind", f"enter:transform:[ \"$FZF_SELECT_COUNT\" -eq 0 ] "
+                   f"&& echo 'print({EMPTY})+accept' || echo accept",
+         *preselect_bind(len(head)),
+         "--height=100%", "--border", "--info=inline",
+         "--preview", "git -C {2} log --oneline -8 2>/dev/null || ls -1 {2}",
+         "--preview-window=right:52%:wrap"],
+        input="\n".join(lines), capture_output=True, text=True)
+
+    chosen = parse_selection(sel.returncode, sel.stdout)
+    if chosen is None:
+        return
+
+    # Re-read: the list may have changed while the picker was open.
+    home, open_ws = open_workspaces()
+    selected = [label_for(p) for p in chosen]
+    to_close, to_create = plan(selected, open_ws)
+    path_of = {label_for(p): p for p in chosen}
+
+    closed = []
+    for w in to_close:
+        if herdr("workspace", "close", w["workspace_id"]) is not None:
+            closed.append(w["workspace_id"])
+
+    live = {a.get("name") for a in (herdr("agent", "list") or {}).get("agents", [])}
+    created = []
+    for label in to_create:
+        path = path_of[label]
+        res = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
+        if not res:
+            die(f"failed to create workspace for {path}")
+        created.append(res["workspace"]["workspace_id"])
+
+        pane = res.get("root_pane", {}).get("pane_id")
+        if pane:
+            # Tab 1 becomes Claude (left) | shell (right).
+            herdr("pane", "split", "--pane", pane,
+                  "--direction", "right", "--ratio", "0.5", "--cwd", path)
+            # Fire and forget. `agent start` blocks until the agent is ready
+            # (default 30s), which would stall the picker on a multi-select —
+            # detaching makes that wait free. Note --timeout has a 3000ms
+            # MINIMUM, so a short value is rejected outright; omit it instead.
+            subprocess.Popen([HERDR, "agent", "start", agent_name(label, live),
+                              "--kind", "claude", "--pane", pane],
+                             start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    focused = next((w["workspace_id"] for w in open_ws if w.get("focused")), None)
+    surviving = [w["workspace_id"] for w in open_ws
+                 if w["label"] in set(selected) and w["workspace_id"] not in closed]
+    target = pick_focus(created, closed, focused, surviving,
+                        home["workspace_id"] if home else None)
+    if target:
+        subprocess.run([HERDR, "workspace", "focus", target], capture_output=True)
+
+
+if __name__ == "__main__":
+    main()
