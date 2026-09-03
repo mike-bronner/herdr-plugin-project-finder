@@ -79,6 +79,12 @@ class ParseSelection(unittest.TestCase):
         out = "a  1m ago \t/x/a\nb  2m ago \t/x/b\n"
         self.assertEqual(pp.parse_selection(0, out), ["/x/a", "/x/b"])
 
+    def test_trailing_label_field_is_not_glued_onto_the_path(self):
+        # Rows carry a third field (the untruncated label) after the path. A
+        # maxsplit=1 split would yield "/x/a\ta-very-long-name" as the path.
+        out = "a-very-long-na…  repo  1m ago \t/x/a\ta-very-long-name\n"
+        self.assertEqual(pp.parse_selection(0, out), ["/x/a"])
+
     def test_no_match_without_sentinel_is_cancel(self):
         self.assertIsNone(pp.parse_selection(1, ""))
 
@@ -296,6 +302,56 @@ class Kind(unittest.TestCase):
         self.assertEqual(self.kind_of(lambda g: None), "repo")
 
 
+class Elide(unittest.TestCase):
+    """Long labels are cut so they cannot shift the columns after them."""
+
+    def test_short_text_is_untouched(self):
+        self.assertEqual(pp.elide("proj", 10), "proj")
+
+    def test_text_exactly_at_the_width_is_untouched(self):
+        # Off-by-one guard: cutting here would spend a column on an ellipsis
+        # that hides nothing.
+        self.assertEqual(pp.elide("0123456789", 10), "0123456789")
+
+    def test_longer_text_is_cut_to_the_width_and_marked(self):
+        self.assertEqual(pp.elide("0123456789x", 10), "012345678\u2026")
+
+    def test_result_never_exceeds_the_width(self):
+        for n in range(1, 60):
+            self.assertLessEqual(len(pp.elide("x" * n, 10)), 10)
+
+    def test_the_front_is_kept_not_the_tail(self):
+        # Dupe labels carry a "parent/" prefix that makes them unique, so the
+        # head is the one part that must survive.
+        self.assertTrue(pp.elide("Sites/very-long-project", 12).startswith("Sites/"))
+
+
+class Row(unittest.TestCase):
+    """The row format and the label width must stay in step."""
+
+    def test_label_field_is_padded_to_label_width(self):
+        # elide() trims to LABEL_WIDTH, so a ROW whose first field is padded to
+        # some other width would either clip early or still let rows overflow.
+        # Field 1 spans columns 0..W-1, a separating space sits at W, so the
+        # second field starts at W+1.
+        row = pp.ROW.format("x", "KIND", "", "", "", "")
+        self.assertEqual(row.index("KIND"), pp.LABEL_WIDTH + 1)
+
+    def test_a_max_width_label_does_not_shift_later_columns(self):
+        short = pp.ROW.format(pp.elide("x", pp.LABEL_WIDTH),
+                              "repo", "3m ago", "", "/x", "x")
+        long = pp.ROW.format(pp.elide("y" * 200, pp.LABEL_WIDTH),
+                             "repo", "3m ago", "", "/y", "y" * 200)
+        self.assertEqual(short.index("repo"), long.index("repo"))
+        self.assertEqual(short.index("3m ago"), long.index("3m ago"))
+
+    def test_hidden_fields_are_path_then_untruncated_label(self):
+        fields = pp.ROW.format("proj\u2026", "repo", "3m ago", "",
+                               "/x/project-long", "project-long").split("\t")
+        self.assertEqual(fields[1], "/x/project-long")
+        self.assertEqual(fields[2], "project-long")
+
+
 class Heading(unittest.TestCase):
     """The column heading fzf consumes via --header-lines=1."""
 
@@ -303,15 +359,16 @@ class Heading(unittest.TestCase):
         # --header-lines=1 consumes one line; a second would become a project.
         self.assertNotIn("\n", pp.HEADING)
 
-    def test_path_field_is_empty(self):
+    def test_hidden_fields_are_empty(self):
         # Keeps the heading from parsing as a selectable repo path.
-        self.assertTrue(pp.HEADING.endswith("\t"))
+        self.assertEqual(pp.HEADING.split("\t")[1:], ["", ""])
 
     def test_columns_line_up_with_a_row(self):
         # Guards against the heading being rewritten as a hand-padded literal.
         # Match the full label, not "STATUS": that substring also occurs inside
         # "AGENT STATUS" and would report the wrong column offset.
-        row = pp.ROW.format("proj", "worktree", "3m ago", "\u25cf idle", "/x/proj")
+        row = pp.ROW.format("proj", "worktree", "3m ago", "\u25cf idle",
+                            "/x/proj", "proj")
         self.assertEqual(pp.HEADING.index("KIND"), row.index("worktree"))
         self.assertEqual(pp.HEADING.index("TOUCHED"), row.index("3m ago"))
         self.assertEqual(pp.HEADING.index("AGENT STATUS"), row.index("\u25cf idle"))
@@ -319,9 +376,10 @@ class Heading(unittest.TestCase):
     def test_kind_column_fits_its_widest_value(self):
         # "worktree" is 8 chars; a narrower column would shove TOUCHED right on
         # worktree rows only, which the fixed-width test above would not see.
-        row = pp.ROW.format("proj", "worktree", "3m ago", "", "/x/proj")
+        row = pp.ROW.format("proj", "worktree", "3m ago", "", "/x/proj", "proj")
         self.assertEqual(row.index("3m ago"),
-                         pp.ROW.format("proj", "repo", "3m ago", "", "/x").index("3m ago"))
+                         pp.ROW.format("proj", "repo", "3m ago", "", "/x", "proj")
+                           .index("3m ago"))
 
     def test_labels_are_in_column_order(self):
         visible = pp.HEADING.split("\t")[0]

@@ -21,6 +21,11 @@ A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
 kept beside its parent is recognisable at a glance. The filter searches the
 whole visible row, so typing `worktree` narrows the list to worktrees.
 
+A project name longer than 34 characters is cut with a `…` so it cannot push
+the columns after it out of alignment. The preview pane shows the full name
+above the git log. Note that the filter can only match what is displayed —
+fzf does not search hidden fields — so text past the ellipsis will not match.
+
 Pairs well with [herdr-plugin-recent-spaces](https://github.com/mike-bronner/herdr-plugin-recent-spaces),
 which keeps the sidebar in most-recently-used order.
 
