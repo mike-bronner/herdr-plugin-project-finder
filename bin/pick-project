@@ -66,12 +66,22 @@ DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 
 # Column layout for the list. The heading is built from the same format string
-# as every row, so the two cannot drift out of alignment. Field 2 (after the
-# tab) is the repo path: --with-nth=1 hides it, and the preview reads it.
-# KIND is spelled out rather than iconified because fzf searches the whole
-# visible field (--nth=1), so typing "worktree" filters the list to worktrees.
-ROW = "{:<34} {:<9} {:<9} {:<12}\t{}"
-HEADING = ROW.format("PROJECT", "KIND", "TOUCHED", "AGENT STATUS", "")
+# as every row, so the two cannot drift out of alignment. Only field 1 is shown
+# (--with-nth=1); the two tab-separated fields after it are hidden payload that
+# the preview reads — field 2 is the repo path, field 3 the untruncated label.
+#
+# Field 3 exists for the preview alone, NOT for filtering. fzf calculates --nth
+# against the transformed line, so a hidden field cannot be searched at all:
+# "fzf doesn't allow searching against the hidden fields" (fzf(1), --nth). The
+# preview is the exception, and reads fields from the original line. So a label
+# elide() cuts is unmatchable past the ellipsis, and the preview showing it in
+# full is the compensation.
+#
+# KIND is spelled out rather than iconified because fzf searches the visible
+# field, so typing "worktree" filters the list to worktrees.
+LABEL_WIDTH = 34
+ROW = f"{{:<{LABEL_WIDTH}}} {{:<9}} {{:<9}} {{:<12}}\t{{}}\t{{}}"
+HEADING = ROW.format("PROJECT", "KIND", "TOUCHED", "AGENT STATUS", "", "")
 
 # Key bindings and the legend above the list. Space is deliberately NOT bound:
 # it is fzf's AND separator between query terms, so binding it to toggle flips
@@ -138,6 +148,18 @@ def repos():
             if p not in out:
                 out.append(p)
     return out
+
+
+def elide(text, width):
+    """`text` cut to `width` columns, ending in "…" when anything was removed.
+
+    The tail goes rather than the head: these labels are identified by their
+    front ("jetstream-profile-picture…"), and a dupe label carries its parent
+    dir as a prefix, which head-truncation would be the one thing to destroy.
+    The result is never wider than `width`, so a long label cannot push the
+    columns after it out of alignment.
+    """
+    return text if len(text) <= width else text[:width - 1] + "…"
 
 
 def kind(path):
@@ -243,8 +265,10 @@ def parse_selection(returncode, stdout):
     lines = stdout.splitlines()
     if EMPTY in lines:
         return []
-    paths = [l.split("\t", 1)[1] for l in lines if "\t" in l]
-    return [p for p in paths if p] or None
+    # Split on every tab, not just the first: field 3 (the untruncated label)
+    # follows the path, and a maxsplit of 1 would hand back "path\tlabel".
+    paths = [f[1] for f in (l.split("\t") for l in lines) if len(f) > 1 and f[1]]
+    return paths or None
 
 
 def plan(selected_labels, open_ws):
@@ -324,8 +348,8 @@ def main():
     lines = []
     for label, p in head + rest:
         mark = f"● {status[label]}" if label in status else ""
-        lines.append(ROW.format(label, kind(p), human_age(touched_at(p), now),
-                                mark, p))
+        lines.append(ROW.format(elide(label, LABEL_WIDTH), kind(p),
+                                human_age(touched_at(p), now), mark, p, label))
 
     sel = subprocess.run(
         ["fzf", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
@@ -342,7 +366,11 @@ def main():
          "--marker=\u2713 ", "--color=marker:green",
          "--pointer= ", "--gutter= ", "--highlight-line",
          "--height=100%", "--info=inline",
-         "--preview", "git -C {2} log --oneline -8 2>/dev/null || ls -1 {2}",
+         # The label heads the preview because field 1 may be elided: this is
+         # the only place a truncated name can be read in full. fzf quotes {3}
+         # and {2} for the shell, so no quoting is needed around them here.
+         "--preview", "printf '%s\\n\\n' {3}; "
+                      "git -C {2} log --oneline -8 2>/dev/null || ls -1 {2}",
          "--preview-window=right:52%:wrap"],
         input="\n".join([HEADING] + lines), capture_output=True, text=True)
 
