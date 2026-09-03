@@ -109,7 +109,33 @@ the home folder instead of failing.
 
 ## Requires
 
-`fzf` and `python3` on the PATH.
+[`fzf`](https://github.com/junegunn/fzf) and `python3` on the PATH.
+
+Herdr's manifest has no dependency field, so the requirement is declared as a
+`[[build]]` step that runs `python3 bin/pick-project --check-deps` at install
+time. When fzf is missing the check exits non-zero and prints the install
+command for the platform it detects:
+
+```
+project-finder requires fzf, which is not on the PATH.
+Install it with:
+
+    brew install fzf
+```
+
+If the plugin is already installed and fzf is not, the picker offers to
+install it on first run:
+
+```
+fzf is required and not installed.
+Install it now with `brew install fzf`? [y/N]
+```
+
+Only a privilege-free installer is ever run for you, which in practice means
+Homebrew. A command needing `sudo` (`apt-get`, `dnf`, `pacman`) is printed for
+you to run yourself: a popup pane is a bad place to ask for a password, and
+installing system packages without asking is not a plugin's business. Decline,
+and nothing is installed.
 
 ## Tests
 

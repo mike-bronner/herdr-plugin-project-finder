@@ -2,7 +2,7 @@
 
 Run: python3 -m unittest discover tests
 """
-import importlib.machinery, importlib.util, os, sys, tempfile, unittest
+import importlib.machinery, importlib.util, io, os, sys, tempfile, unittest
 from unittest import mock
 
 # Must be set before the loader below runs. A .pyc is treated as valid while
@@ -361,6 +361,168 @@ class Row(unittest.TestCase):
                                "/x/project-long", "project-long").split("\t")
         self.assertEqual(fields[1], "/x/project-long")
         self.assertEqual(fields[2], "project-long")
+
+
+class FzfInstaller(unittest.TestCase):
+    """Which installer to use here, and whether it is ours to run."""
+
+    def which(self, *present):
+        return mock.patch.object(pp.shutil, "which",
+                                 side_effect=lambda b: f"/bin/{b}" if b in present else None)
+
+    def test_homebrew_is_preferred_and_runnable(self):
+        with self.which("brew", "apt-get"):
+            self.assertEqual(pp.fzf_installer(), (["brew", "install", "fzf"], True))
+
+    def test_apt_is_found_but_not_runnable(self):
+        # sudo cannot prompt sensibly from a popup pane, so we only advise.
+        with self.which("apt-get"):
+            argv, runnable = pp.fzf_installer()
+        self.assertIn("apt-get", argv)
+        self.assertEqual(argv[0], "sudo")
+        self.assertFalse(runnable)
+
+    def test_dnf_and_pacman_are_recognised_but_not_runnable(self):
+        for mgr in ("dnf", "pacman"):
+            with self.subTest(mgr=mgr), self.which(mgr):
+                argv, runnable = pp.fzf_installer()
+                self.assertIn(mgr, argv)
+                self.assertFalse(runnable)
+
+    def test_no_package_manager_yields_no_command(self):
+        with self.which():
+            self.assertEqual(pp.fzf_installer(), (None, False))
+
+    def test_advice_names_the_command_when_there_is_one(self):
+        self.assertIn("brew install fzf", pp.install_advice(["brew", "install", "fzf"]))
+
+    def test_advice_falls_back_to_the_upstream_url(self):
+        self.assertIn("github.com/junegunn/fzf", pp.install_advice(None))
+
+
+class CheckDeps(unittest.TestCase):
+    """The --check-deps preflight the manifest's [[build]] step runs."""
+
+    def run_check(self, fzf, brew=False):
+        def which(b):
+            return "/bin/fzf" if (b == "fzf" and fzf) else ("/bin/brew" if (b == "brew" and brew) else None)
+        out = io.StringIO()
+        with mock.patch.object(pp.shutil, "which", side_effect=which):
+            return pp.check_deps(out), out.getvalue()
+
+    def test_present_fzf_exits_zero(self):
+        code, text = self.run_check(fzf=True)
+        self.assertEqual(code, 0)
+        self.assertIn("/bin/fzf", text)
+
+    def test_missing_fzf_exits_non_zero(self):
+        # A zero exit would let an unusable plugin install cleanly.
+        code, _ = self.run_check(fzf=False)
+        self.assertEqual(code, 1)
+
+    def test_missing_fzf_reports_how_to_install_it(self):
+        _, text = self.run_check(fzf=False, brew=True)
+        self.assertIn("brew install fzf", text)
+
+    def test_missing_fzf_with_no_package_manager_still_advises(self):
+        _, text = self.run_check(fzf=False)
+        self.assertIn("github.com/junegunn/fzf", text)
+
+    def test_it_never_prompts(self):
+        # A build step has no terminal; a prompt here would hang the install.
+        with mock.patch("builtins.input", side_effect=AssertionError("prompted")):
+            self.run_check(fzf=False)
+
+
+class EnsureFzf(unittest.TestCase):
+    """First-run install offer. Anything short of a working fzf must die()."""
+
+    def run_ensure(self, answer, fzf_after=False, brew=True, rc=0):
+        calls = {"which": 0}
+
+        def which(b):
+            if b == "brew":
+                return "/bin/brew" if brew else None
+            if b == "fzf":
+                calls["which"] += 1
+                return "/bin/fzf" if (calls["which"] > 1 and fzf_after) else None
+            return None
+
+        run = mock.Mock(return_value=mock.Mock(returncode=rc))
+        with mock.patch.object(pp.shutil, "which", side_effect=which), \
+             mock.patch.object(pp.subprocess, "run", run), \
+             mock.patch.object(pp.sys, "stderr", io.StringIO()), \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            try:
+                return pp.ensure_fzf(ask=lambda _: answer), run
+            except SystemExit:
+                return None, run
+
+    def test_already_installed_is_a_noop(self):
+        with mock.patch.object(pp.shutil, "which", return_value="/bin/fzf"), \
+             mock.patch.object(pp.subprocess, "run",
+                               side_effect=AssertionError("installed anyway")):
+            self.assertTrue(pp.ensure_fzf())
+
+    def test_yes_installs_and_continues(self):
+        ok, run = self.run_ensure("y", fzf_after=True)
+        self.assertTrue(ok)
+        self.assertEqual(run.call_args.args[0], ["brew", "install", "fzf"])
+
+    def test_yes_spelled_out_and_padded_is_accepted(self):
+        self.assertTrue(self.run_ensure("  YES  ", fzf_after=True)[0])
+
+    def test_declining_dies_without_installing(self):
+        ok, run = self.run_ensure("n")
+        self.assertIsNone(ok)
+        run.assert_not_called()
+
+    def test_empty_answer_is_a_decline(self):
+        # The prompt is [y/N]: bare Enter must not install anything.
+        ok, run = self.run_ensure("")
+        self.assertIsNone(ok)
+        run.assert_not_called()
+
+    def test_a_failed_install_dies_rather_than_starting_the_picker(self):
+        self.assertIsNone(self.run_ensure("y", fzf_after=True, rc=1)[0])
+
+    def test_an_install_that_reports_success_but_produces_no_fzf_dies(self):
+        self.assertIsNone(self.run_ensure("y", fzf_after=False, rc=0)[0])
+
+    def test_a_sudo_installer_is_never_run_only_advised(self):
+        # `input` is asserted un-called rather than made to raise: ensure_fzf()
+        # catches Exception around the prompt and treats it as a decline, so a
+        # raising stub would be swallowed and this would pass on a regression.
+        # The die() message is checked too, since the not-runnable branch and
+        # the declined branch both end in SystemExit but say different things.
+        def which(b):
+            return "/bin/apt-get" if b == "apt-get" else None
+        run = mock.Mock()
+        with mock.patch.object(pp.shutil, "which", side_effect=which), \
+             mock.patch.object(pp.subprocess, "run", run), \
+             mock.patch.object(pp, "die", side_effect=SystemExit) as died, \
+             mock.patch("builtins.input") as asked:
+            with self.assertRaises(SystemExit):
+                pp.ensure_fzf()
+        asked.assert_not_called()
+        run.assert_not_called()
+        msg = died.call_args.args[0]
+        self.assertIn("not installed", msg)
+        self.assertIn("apt-get", msg)
+
+    def test_ask_is_resolved_at_call_time_not_bound_at_definition(self):
+        # Guards the `ask = ask or input` line. A signature default would
+        # capture the real builtin, and a regression that reaches the prompt
+        # would block the suite on stdin instead of failing it.
+        with mock.patch.object(pp.shutil, "which", return_value=None), \
+             mock.patch.object(pp.sys, "stderr", io.StringIO()), \
+             mock.patch("builtins.input", return_value="n") as patched, \
+             mock.patch.object(pp, "fzf_installer",
+                               return_value=(["brew", "install", "fzf"], True)), \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                pp.ensure_fzf()
+        patched.assert_called_once()
 
 
 class BytecodeCache(unittest.TestCase):
