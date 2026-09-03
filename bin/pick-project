@@ -68,8 +68,10 @@ HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 # Column layout for the list. The heading is built from the same format string
 # as every row, so the two cannot drift out of alignment. Field 2 (after the
 # tab) is the repo path: --with-nth=1 hides it, and the preview reads it.
-ROW = "{:<34} {:<9} {:<12}\t{}"
-HEADING = ROW.format("PROJECT", "TOUCHED", "AGENT STATUS", "")
+# KIND is spelled out rather than iconified because fzf searches the whole
+# visible field (--nth=1), so typing "worktree" filters the list to worktrees.
+ROW = "{:<34} {:<9} {:<9} {:<12}\t{}"
+HEADING = ROW.format("PROJECT", "KIND", "TOUCHED", "AGENT STATUS", "")
 
 # Key bindings and the legend above the list. Space is deliberately NOT bound:
 # it is fzf's AND separator between query terms, so binding it to toggle flips
@@ -122,8 +124,10 @@ def repos():
 
     Deliberately not hardcoded to any grouping folder: repos live both directly
     under the root and inside grouping dirs, and those groupings get
-    reorganised. Anything nested inside a repo is skipped so submodules and
-    worktrees do not show up as separate projects.
+    reorganised. Anything nested inside a repo is skipped, so a submodule or a
+    worktree placed inside its parent is not listed twice. A worktree kept
+    beside its parent is a project in its own right and is listed, tagged
+    "worktree" by kind().
     """
     out = []
     for depth in ("*", "*/*"):
@@ -134,6 +138,18 @@ def repos():
             if p not in out:
                 out.append(p)
     return out
+
+
+def kind(path):
+    """"worktree" for a linked git worktree, otherwise "repo".
+
+    A worktree's .git is a FILE holding a "gitdir:" pointer at the parent
+    repo's admin dir, where an ordinary repo's .git is a directory. Telling
+    them apart is therefore one stat per row instead of a git subprocess, and
+    it still classifies a worktree whose parent repo has been deleted — git
+    itself errors out on those.
+    """
+    return "worktree" if os.path.isfile(os.path.join(path, ".git")) else "repo"
 
 
 def touched_at(path):
@@ -308,7 +324,8 @@ def main():
     lines = []
     for label, p in head + rest:
         mark = f"● {status[label]}" if label in status else ""
-        lines.append(ROW.format(label, human_age(touched_at(p), now), mark, p))
+        lines.append(ROW.format(label, kind(p), human_age(touched_at(p), now),
+                                mark, p))
 
     sel = subprocess.run(
         ["fzf", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",

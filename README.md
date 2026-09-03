@@ -17,6 +17,10 @@ the home workspace. Esc changes nothing.
 The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
 
+A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
+kept beside its parent is recognisable at a glance. The filter searches the
+whole visible row, so typing `worktree` narrows the list to worktrees.
+
 Pairs well with [herdr-plugin-recent-spaces](https://github.com/mike-bronner/herdr-plugin-recent-spaces),
 which keeps the sidebar in most-recently-used order.
 
