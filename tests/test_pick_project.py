@@ -263,6 +263,39 @@ class ResolveRoot(unittest.TestCase):
                 self.assertEqual(pp.resolve_root(), d)
 
 
+class Kind(unittest.TestCase):
+    """Repo vs. linked worktree, decided by the shape of .git."""
+
+    def kind_of(self, make):
+        """Build a project dir, run `make` on its .git path, classify it."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "proj")
+            os.mkdir(p)
+            make(os.path.join(p, ".git"))
+            return pp.kind(p)
+
+    def test_directory_dot_git_is_a_repo(self):
+        self.assertEqual(self.kind_of(os.mkdir), "repo")
+
+    def test_file_dot_git_is_a_worktree(self):
+        def write_pointer(g):
+            with open(g, "w", encoding="utf-8") as f:
+                f.write("gitdir: /x/parent/.git/worktrees/proj\n")
+        self.assertEqual(self.kind_of(write_pointer), "worktree")
+
+    def test_worktree_with_a_deleted_parent_still_classifies(self):
+        # `git -C` fails outright on these, which is why kind() only stats.
+        def dangling(g):
+            with open(g, "w", encoding="utf-8") as f:
+                f.write("gitdir: /x/deleted/.git/worktrees/proj\n")
+        self.assertEqual(self.kind_of(dangling), "worktree")
+
+    def test_absent_dot_git_reads_as_a_repo(self):
+        # repos() only ever yields paths that have a .git, so this is
+        # unreachable today. Pinned so a future caller sees the fallback.
+        self.assertEqual(self.kind_of(lambda g: None), "repo")
+
+
 class Heading(unittest.TestCase):
     """The column heading fzf consumes via --header-lines=1."""
 
@@ -278,13 +311,22 @@ class Heading(unittest.TestCase):
         # Guards against the heading being rewritten as a hand-padded literal.
         # Match the full label, not "STATUS": that substring also occurs inside
         # "AGENT STATUS" and would report the wrong column offset.
-        row = pp.ROW.format("proj", "3m ago", "\u25cf idle", "/x/proj")
+        row = pp.ROW.format("proj", "worktree", "3m ago", "\u25cf idle", "/x/proj")
+        self.assertEqual(pp.HEADING.index("KIND"), row.index("worktree"))
         self.assertEqual(pp.HEADING.index("TOUCHED"), row.index("3m ago"))
         self.assertEqual(pp.HEADING.index("AGENT STATUS"), row.index("\u25cf idle"))
 
+    def test_kind_column_fits_its_widest_value(self):
+        # "worktree" is 8 chars; a narrower column would shove TOUCHED right on
+        # worktree rows only, which the fixed-width test above would not see.
+        row = pp.ROW.format("proj", "worktree", "3m ago", "", "/x/proj")
+        self.assertEqual(row.index("3m ago"),
+                         pp.ROW.format("proj", "repo", "3m ago", "", "/x").index("3m ago"))
+
     def test_labels_are_in_column_order(self):
         visible = pp.HEADING.split("\t")[0]
-        self.assertLess(visible.index("PROJECT"), visible.index("TOUCHED"))
+        self.assertLess(visible.index("PROJECT"), visible.index("KIND"))
+        self.assertLess(visible.index("KIND"), visible.index("TOUCHED"))
         self.assertLess(visible.index("TOUCHED"), visible.index("AGENT STATUS"))
 
 
