@@ -2,8 +2,19 @@
 
 Run: python3 -m unittest discover tests
 """
-import importlib.machinery, importlib.util, os, tempfile, unittest
+import importlib.machinery, importlib.util, os, sys, tempfile, unittest
 from unittest import mock
+
+# Must be set before the loader below runs. A .pyc is treated as valid while
+# the source's (mtime truncated to whole seconds, byte size) is unchanged, so
+# editing the script to a same-size version inside one second makes this suite
+# silently execute the PREVIOUS code. macOS system python3 hides the evidence:
+# it sets sys.pycache_prefix to ~/Library/Caches/com.apple.python, so the cache
+# lives outside the repo and `find . -name '*.pyc'` reports nothing. Writing no
+# cache at all removes the failure mode; recompiling costs about a millisecond.
+# A cache written before this line existed is still read until the source mtime
+# next advances, so delete any stale one once under sys.pycache_prefix.
+sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "bin", "pick-project")
@@ -350,6 +361,103 @@ class Row(unittest.TestCase):
                                "/x/project-long", "project-long").split("\t")
         self.assertEqual(fields[1], "/x/project-long")
         self.assertEqual(fields[2], "project-long")
+
+
+class BytecodeCache(unittest.TestCase):
+    """Guards the sys.dont_write_bytecode line at the top of this module."""
+
+    def test_bytecode_writing_stays_disabled(self):
+        # Removal guard, not a behavior test. Without the flag, a same-size
+        # edit within one second makes this suite run the previous version of
+        # bin/pick-project and report failures against code that is correct.
+        self.assertTrue(sys.dont_write_bytecode)
+
+    def test_no_cache_was_written_for_the_script(self):
+        # The real behavior. The cache path is mirrored under pycache_prefix
+        # when set (macOS system python), or a sibling __pycache__ otherwise.
+        stem = os.path.splitext(os.path.basename(SCRIPT))[0]
+        if sys.pycache_prefix:
+            d = sys.pycache_prefix + os.path.dirname(os.path.abspath(SCRIPT))
+        else:
+            d = os.path.join(os.path.dirname(os.path.abspath(SCRIPT)), "__pycache__")
+        stale = [f for f in (os.listdir(d) if os.path.isdir(d) else [])
+                 if f.startswith(stem) and f.endswith(".pyc")]
+        self.assertEqual(stale, [], f"stale bytecode in {d}: {stale}")
+
+
+class BuildLines(unittest.TestCase):
+    """Assembling one fzf input line per row.
+
+    kind() and touched_at() both hit the filesystem, so they are stubbed here
+    per path: these tests are about which value lands in which field, not about
+    how either is derived.
+    """
+
+    def build(self, rows, status=None, kinds=None, touched=None):
+        with mock.patch.object(pp, "kind",
+                               side_effect=lambda p: (kinds or {}).get(p, "repo")), \
+             mock.patch.object(pp, "touched_at",
+                               side_effect=lambda p: (touched or {}).get(p, 0)):
+            return pp.build_lines(rows, status or {}, 100)
+
+    def fields(self, rows, **kw):
+        return [l.split("\t") for l in self.build(rows, **kw)]
+
+    def test_one_line_per_row_in_the_order_given(self):
+        lines = self.build([("b", "/x/b"), ("a", "/x/a")])
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("b"))
+        self.assertTrue(lines[1].startswith("a"))
+
+    def test_no_rows_is_no_lines(self):
+        self.assertEqual(self.build([]), [])
+
+    def test_kind_comes_from_kind_not_a_constant(self):
+        # The whole point of the extraction: a hardcoded "repo" here would make
+        # every worktree invisible, and nothing else in the suite would notice.
+        visible = [f[0] for f in self.fields([("w", "/x/w"), ("r", "/x/r")],
+                                             kinds={"/x/w": "worktree"})]
+        self.assertIn("worktree", visible[0])
+        self.assertIn("repo", visible[1])
+        self.assertNotIn("worktree", visible[1])
+
+    def test_age_comes_from_touched_at(self):
+        # now=100 and touched=40 is 60s, which human_age renders as "1m ago".
+        self.assertIn("1m ago",
+                      self.fields([("a", "/x/a")], touched={"/x/a": 40})[0][0])
+
+    def test_hidden_fields_are_path_then_untruncated_label(self):
+        f = self.fields([("proj", "/x/proj")])[0]
+        self.assertEqual(f[1], "/x/proj")
+        self.assertEqual(f[2], "proj")
+
+    def test_long_label_is_elided_on_screen_but_whole_in_field_3(self):
+        long = "z" * (pp.LABEL_WIDTH + 20)
+        f = self.fields([(long, "/x/z")])[0]
+        self.assertTrue(f[0].startswith("z" * (pp.LABEL_WIDTH - 1) + "…"))
+        self.assertEqual(f[2], long)
+
+    def test_a_long_label_does_not_shift_the_columns(self):
+        rows = [("short", "/x/s"), ("y" * 200, "/x/y")]
+        visible = [f[0] for f in self.fields(rows)]
+        self.assertEqual(len(visible[0]), len(visible[1]))
+        self.assertEqual(visible[0].index("repo"), visible[1].index("repo"))
+
+    def test_open_rows_get_their_agent_status(self):
+        f = self.fields([("a", "/x/a")], status={"a": "idle"})[0]
+        self.assertIn("● idle", f[0])
+
+    def test_rows_that_are_not_open_get_a_blank_status(self):
+        f = self.fields([("a", "/x/a"), ("b", "/x/b")], status={"a": "idle"})
+        self.assertIn("● idle", f[0][0])
+        self.assertNotIn("●", f[1][0])
+
+    def test_status_is_matched_on_the_full_label_not_the_elided_one(self):
+        # The elided label is what gets displayed, but `status` is keyed by the
+        # real workspace label, so a truncated name must still find its agent.
+        long = "w" * (pp.LABEL_WIDTH + 20)
+        f = self.fields([(long, "/x/w")], status={long: "busy"})[0]
+        self.assertIn("● busy", f[0])
 
 
 class Heading(unittest.TestCase):

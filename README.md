@@ -116,3 +116,16 @@ the home folder instead of failing.
 ```sh
 python3 -m unittest discover tests
 ```
+
+The suite loads `bin/pick-project` as a module and sets
+`sys.dont_write_bytecode`, because a `.pyc` stays valid while the source keeps
+the same size and whole-second mtime. Without that, editing the script to a
+same-size version inside one second makes the suite run the previous code and
+report failures against source that is correct. On macOS the system `python3`
+puts the cache under `sys.pycache_prefix`
+(`~/Library/Caches/com.apple.python`), outside the repo, so `find . -name
+'*.pyc'` does not reveal it.
+
+The test module cannot protect its own compilation this way, since the flag
+runs after it. Prefix the command with `PYTHONDONTWRITEBYTECODE=1` if you are
+making rapid same-size edits to the tests themselves.

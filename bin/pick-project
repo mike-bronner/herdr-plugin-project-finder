@@ -290,6 +290,26 @@ def pick_focus(created_ids, closed_ids, focused_id, surviving_ids, home_id):
     return None
 
 
+def build_lines(rows, status, now):
+    """One fzf input line per (label, path) row, in the order given.
+
+    Field 1 holds the visible columns, with the label elided so a long name
+    cannot push the columns after it out of alignment. Fields 2 and 3 are
+    hidden payload the preview reads: the repo path, then the label again,
+    untruncated, since field 1 may have lost the end of it.
+
+    `status` maps an open workspace's label to its agent status; a row absent
+    from it is not open and gets a blank AGENT STATUS column.
+    """
+    lines = []
+    for label, path in rows:
+        mark = f"● {status[label]}" if label in status else ""
+        lines.append(ROW.format(elide(label, LABEL_WIDTH), kind(path),
+                                human_age(touched_at(path), now), mark,
+                                path, label))
+    return lines
+
+
 def create_workspace(label, path, live):
     """Open a workspace for `path` with the agent layout; return its workspace id.
 
@@ -344,12 +364,7 @@ def main():
     status = {w["label"]: w.get("agent_status", "") for w in open_ws}
     head, rest = order_rows([(label_for(p), p) for p in paths], open_ws)
 
-    now = time.time()
-    lines = []
-    for label, p in head + rest:
-        mark = f"● {status[label]}" if label in status else ""
-        lines.append(ROW.format(elide(label, LABEL_WIDTH), kind(p),
-                                human_age(touched_at(p), now), mark, p, label))
+    lines = build_lines(head + rest, status, time.time())
 
     sel = subprocess.run(
         ["fzf", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
