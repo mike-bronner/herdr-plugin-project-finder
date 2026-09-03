@@ -118,6 +118,78 @@ def die(msg):
     sys.exit(1)
 
 
+def fzf_installer():
+    """(argv, may_we_run_it) for installing fzf here, or (None, False).
+
+    Only a privilege-free installer is ours to run. Asking for a sudo password
+    from a popup pane is both hostile and unreliable, so a command that needs
+    one is printed for the user to run themselves instead.
+    """
+    if shutil.which("brew"):
+        return ["brew", "install", "fzf"], True
+    for mgr, argv in (("apt-get", ["sudo", "apt-get", "install", "-y", "fzf"]),
+                      ("dnf", ["sudo", "dnf", "install", "-y", "fzf"]),
+                      ("pacman", ["sudo", "pacman", "-S", "--noconfirm", "fzf"])):
+        if shutil.which(mgr):
+            return argv, False
+    return None, False
+
+
+def install_advice(argv):
+    """What to tell someone who has to install fzf by hand."""
+    if argv:
+        return "Install it with:\n\n    " + " ".join(argv) + "\n"
+    return "See https://github.com/junegunn/fzf#installation\n"
+
+
+def check_deps(out=None):
+    """`--check-deps`: the preflight the manifest's [[build]] step runs.
+
+    Returns a process exit code, 0 when every prerequisite is present. Kept
+    non-interactive: a build step has no terminal to prompt at, so it only
+    reports. The picker itself offers to install, see ensure_fzf().
+    """
+    out = out or sys.stderr
+    found = shutil.which("fzf")
+    if found:
+        out.write(f"project-finder: fzf found at {found}\n")
+        return 0
+    argv, _ = fzf_installer()
+    out.write("project-finder requires fzf, which is not on the PATH.\n"
+              + install_advice(argv))
+    return 1
+
+
+def ensure_fzf(ask=None):
+    """True when fzf is usable, offering to install it when it is not.
+
+    Declining, an installer we may not run, and a failed install all fall
+    through to die(), so the picker never starts without its dependency.
+
+    `ask` is resolved here rather than defaulting to `input` in the signature:
+    a default is bound once at definition, which would capture the real
+    builtin and leave a test that patches `builtins.input` blocking on stdin
+    instead of failing.
+    """
+    ask = ask or input
+    if shutil.which("fzf"):
+        return True
+    argv, runnable = fzf_installer()
+    if not runnable:
+        die("fzf is required but not installed.\n\n" + install_advice(argv))
+    prompt = f"fzf is required and not installed.\nInstall it now with `{' '.join(argv)}`? [y/N] "
+    try:
+        answer = ask(prompt)
+    except Exception:
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        die("fzf is required.\n\n" + install_advice(argv))
+    sys.stderr.write(f"\nRunning {' '.join(argv)}...\n\n")
+    if subprocess.run(argv).returncode != 0 or not shutil.which("fzf"):
+        die("installing fzf failed.\n\n" + install_advice(argv))
+    return True
+
+
 def herdr(*args):
     """Run a herdr CLI command and return its parsed JSON result."""
     r = subprocess.run([HERDR, *args], capture_output=True, text=True)
@@ -343,8 +415,7 @@ def create_workspace(label, path, live):
 def main():
     if not HERDR:
         die("herdr not found on PATH")
-    if not shutil.which("fzf"):
-        die("fzf not found on PATH")
+    ensure_fzf()
 
     paths = repos()
     if not paths:
@@ -417,4 +488,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # --check-deps is the manifest's [[build]] entry point. It must never open
+    # the picker: a build step has no terminal to draw one in.
+    if "--check-deps" in sys.argv[1:]:
+        sys.exit(check_deps())
     main()
