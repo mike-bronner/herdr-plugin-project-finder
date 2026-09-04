@@ -52,17 +52,35 @@ class OrderRows(unittest.TestCase):
     def test_open_first_in_sidebar_order_then_by_touch(self):
         labelled = [("a", "/a"), ("b", "/b"), ("c", "/c"), ("d", "/d")]
         open_ws = [ws("c", "w1"), ws("a", "w2"), ws("ghost", "w3")]
-        touched = {"/b": 10, "/d": 20}
+        touched = {"/a": 30, "/b": 10, "/c": 40, "/d": 20}
         with mock.patch.object(pp, "touched_at", side_effect=lambda p: touched[p]):
             head, rest = pp.order_rows(labelled, open_ws)
-        self.assertEqual(head, [("c", "/c"), ("a", "/a")])   # sidebar order, ghost skipped
-        self.assertEqual(rest, [("d", "/d"), ("b", "/b")])   # newest first
+        # Sidebar order, ghost skipped. Note /a is newer than /c yet stays
+        # second: open rows are never re-sorted by touch time.
+        self.assertEqual(head, [("c", "/c", 40), ("a", "/a", 30)])
+        self.assertEqual(rest, [("d", "/d", 20), ("b", "/b", 10)])   # newest first
 
     def test_nothing_open(self):
         with mock.patch.object(pp, "touched_at", return_value=0):
             head, rest = pp.order_rows([("a", "/a")], [])
         self.assertEqual(head, [])
-        self.assertEqual(rest, [("a", "/a")])
+        self.assertEqual(rest, [("a", "/a", 0)])
+
+    def test_equal_touch_times_keep_input_order(self):
+        # The sort key is the timestamp alone, so ties fall back to the order
+        # repos() yielded. A key including the label or path would reorder them.
+        labelled = [("b", "/b"), ("a", "/a")]
+        with mock.patch.object(pp, "touched_at", return_value=7):
+            _, rest = pp.order_rows(labelled, [])
+        self.assertEqual([l for l, _, _ in rest], ["b", "a"])
+
+    def test_open_rows_carry_their_touch_time(self):
+        # An open row's timestamp is not needed for the ordering, only for the
+        # TOUCHED column. Returning 0 or None here would blank that column for
+        # exactly the projects the user is most likely looking at.
+        with mock.patch.object(pp, "touched_at", return_value=99):
+            head, _ = pp.order_rows([("a", "/a")], [ws("a", "w1")])
+        self.assertEqual(head, [("a", "/a", 99)])
 
 
 class PreselectBind(unittest.TestCase):
@@ -550,17 +568,24 @@ class BytecodeCache(unittest.TestCase):
 class BuildLines(unittest.TestCase):
     """Assembling one fzf input line per row.
 
-    kind() and touched_at() both hit the filesystem, so they are stubbed here
-    per path: these tests are about which value lands in which field, not about
-    how either is derived.
+    kind() hits the filesystem, so it is stubbed per path: these tests are about
+    which value lands in which field, not about how it is derived.
+
+    touched_at() is stubbed to RAISE. The touch time reaches build_lines on the
+    row, computed once by order_rows; a build_lines that reaches for the
+    filesystem instead walks every working tree a second time. Every test in
+    this class therefore doubles as the guard on that.
     """
 
     def build(self, rows, status=None, kinds=None, touched=None):
+        """`rows` are (label, path) pairs here; the touch time is attached from
+        `touched` (keyed by path, default 0) to keep the fixtures readable."""
+        triples = [(l, p, (touched or {}).get(p, 0)) for l, p in rows]
         with mock.patch.object(pp, "kind",
                                side_effect=lambda p: (kinds or {}).get(p, "repo")), \
              mock.patch.object(pp, "touched_at",
-                               side_effect=lambda p: (touched or {}).get(p, 0)):
-            return pp.build_lines(rows, status or {}, 100)
+                               side_effect=AssertionError("build_lines walked the tree")):
+            return pp.build_lines(triples, status or {}, 100)
 
     def fields(self, rows, **kw):
         return [l.split("\t") for l in self.build(rows, **kw)]
@@ -583,10 +608,19 @@ class BuildLines(unittest.TestCase):
         self.assertIn("repo", visible[1])
         self.assertNotIn("worktree", visible[1])
 
-    def test_age_comes_from_touched_at(self):
+    def test_age_comes_from_the_row_touch_time(self):
         # now=100 and touched=40 is 60s, which human_age renders as "1m ago".
         self.assertIn("1m ago",
                       self.fields([("a", "/x/a")], touched={"/x/a": 40})[0][0])
+
+    def test_the_touch_time_is_read_per_row_not_once_for_all(self):
+        # Guards against the third element being read from the first row and
+        # reused: two rows with different times must render different ages.
+        # now=100, so 40 is "1m ago" and 99 is "0m ago".
+        ages = [f[0] for f in self.fields([("a", "/x/a"), ("b", "/x/b")],
+                                          touched={"/x/a": 40, "/x/b": 99})]
+        self.assertIn("1m ago", ages[0])
+        self.assertIn("0m ago", ages[1])
 
     def test_hidden_fields_are_path_then_untruncated_label(self):
         f = self.fields([("proj", "/x/proj")])[0]
@@ -605,12 +639,14 @@ class BuildLines(unittest.TestCase):
         self.assertEqual(len(visible[0]), len(visible[1]))
         self.assertEqual(visible[0].index("repo"), visible[1].index("repo"))
 
-    def test_open_rows_get_their_agent_status(self):
-        f = self.fields([("a", "/x/a")], status={"a": "idle"})[0]
+    def test_open_rows_get_their_rendered_status_cell(self):
+        # `status` holds cells status_cell() already rendered, so build_lines
+        # places the string verbatim and adds no marker of its own.
+        f = self.fields([("a", "/x/a")], status={"a": "● idle"})[0]
         self.assertIn("● idle", f[0])
 
     def test_rows_that_are_not_open_get_a_blank_status(self):
-        f = self.fields([("a", "/x/a"), ("b", "/x/b")], status={"a": "idle"})
+        f = self.fields([("a", "/x/a"), ("b", "/x/b")], status={"a": "● idle"})
         self.assertIn("● idle", f[0][0])
         self.assertNotIn("●", f[1][0])
 
@@ -618,8 +654,470 @@ class BuildLines(unittest.TestCase):
         # The elided label is what gets displayed, but `status` is keyed by the
         # real workspace label, so a truncated name must still find its agent.
         long = "w" * (pp.LABEL_WIDTH + 20)
-        f = self.fields([(long, "/x/w")], status={long: "busy"})[0]
+        f = self.fields([(long, "/x/w")], status={long: "● busy"})[0]
         self.assertIn("● busy", f[0])
+
+
+class TouchTimeIsComputedOncePerRun(unittest.TestCase):
+    """The startup cost this pair of functions is arranged to avoid.
+
+    touched_at() walks each repo's working tree two levels deep and dominates
+    the wait before the picker paints. order_rows() computes it and build_lines()
+    consumes it, so the whole run must walk every repo exactly once. Measured on
+    27 repos: the second walk cost 65 ms of a 194 ms startup.
+    """
+
+    def walk_counts(self, labelled, open_ws):
+        """Every path touched_at() is called on, across the real call sequence."""
+        calls = []
+
+        def counted(path):
+            calls.append(path)
+            return 0
+
+        with mock.patch.object(pp, "touched_at", side_effect=counted), \
+             mock.patch.object(pp, "kind", return_value="repo"):
+            head, rest = pp.order_rows(labelled, open_ws)
+            pp.build_lines(head + rest, {}, 100)
+        return calls
+
+    def test_each_repo_is_walked_exactly_once(self):
+        labelled = [("a", "/x/a"), ("b", "/x/b"), ("c", "/x/c")]
+        calls = self.walk_counts(labelled, [ws("a", "w1")])
+        # sorted() rather than a set: a set hides a repeat, which is the defect.
+        self.assertEqual(sorted(calls), ["/x/a", "/x/b", "/x/c"])
+
+    def test_open_repos_are_not_walked_twice(self):
+        # The open rows are the specific regression: they skip the sort's walk,
+        # so a build_lines that recomputes shows up here first.
+        calls = self.walk_counts([("a", "/x/a")], [ws("a", "w1")])
+        self.assertEqual(calls, ["/x/a"])
+
+    def test_a_repo_with_no_open_workspace_is_walked_once(self):
+        calls = self.walk_counts([("a", "/x/a")], [])
+        self.assertEqual(calls, ["/x/a"])
+
+
+class ReadToml(unittest.TestCase):
+    """The TOML subset reader. Only scalars under [table] headers."""
+
+    WANTED = frozenset(["ui.status_indicators", "theme.name", "theme.custom.red"])
+
+    def read(self, body, wanted=None):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.toml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            return pp.read_toml(path, wanted or self.WANTED)
+
+    def test_scalar_under_its_table(self):
+        self.assertEqual(self.read('[theme]\nname = "dracula"\n'),
+                         {"theme.name": "dracula"})
+
+    def test_the_same_key_in_two_tables_does_not_collide(self):
+        # Keys are qualified by table: a bare-key match would let [ui] name
+        # answer for [theme] name.
+        got = self.read('[ui]\nname = "wrong"\n\n[theme]\nname = "nord"\n')
+        self.assertEqual(got, {"theme.name": "nord"})
+
+    def test_nested_table_headers_are_kept_whole(self):
+        self.assertEqual(self.read('[theme.custom]\nred = "#ff0000"\n'),
+                         {"theme.custom.red": "#ff0000"})
+
+    def test_keys_before_any_table_header_are_not_claimed(self):
+        # A root-level key belongs to table "", so it must not answer for a
+        # qualified name. onboarding = false sits above [ui] in a real config.
+        self.assertEqual(self.read('name = "root"\n[theme]\nname = "nord"\n'),
+                         {"theme.name": "nord"})
+
+    def test_unwanted_keys_are_ignored(self):
+        self.assertEqual(self.read('[theme]\nauto_switch = true\n'), {})
+
+    def test_comments_and_blank_lines_are_skipped(self):
+        self.assertEqual(self.read('# [theme]\n# name = "commented"\n\n'
+                                   '[theme]\nname = "nord"\n'),
+                         {"theme.name": "nord"})
+
+    def test_trailing_comment_is_stripped_from_a_bare_value(self):
+        self.assertEqual(self.read('[ui]\nstatus_indicators = symbols # why\n'),
+                         {"ui.status_indicators": "symbols"})
+
+    def test_a_quoted_value_ends_at_its_closing_quote(self):
+        # A "#" inside quotes is a hex colour, not a comment. Stripping from the
+        # first "#" would leave the empty string and silently drop the override.
+        self.assertEqual(self.read('[theme.custom]\nred = "#ff8800"  # accent\n'),
+                         {"theme.custom.red": "#ff8800"})
+
+    def test_single_quotes_work_too(self):
+        self.assertEqual(self.read("[theme]\nname = 'nord'\n"),
+                         {"theme.name": "nord"})
+
+    def test_arrays_and_inline_tables_are_skipped_not_half_parsed(self):
+        got = self.read('[theme]\nname = ["a", "b"]\n', frozenset(["theme.name"]))
+        self.assertEqual(got, {})
+
+    def test_first_value_wins_on_a_duplicate_key(self):
+        self.assertEqual(self.read('[theme]\nname = "nord"\nname = "dracula"\n'),
+                         {"theme.name": "nord"})
+
+    def test_a_missing_file_is_empty_not_an_error(self):
+        # Herdr's config is optional; the picker must still open without one.
+        self.assertEqual(pp.read_toml("/x/does/not/exist.toml", self.WANTED), {})
+
+    def test_an_unreadable_path_is_empty_not_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(pp.read_toml(d, self.WANTED), {})
+
+
+class HerdrConfigPath(unittest.TestCase):
+    """Which config.toml the picker reads Herdr's theme out of."""
+
+    def test_the_documented_override_wins(self):
+        with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": "/x/other.toml"},
+                             clear=True):
+            self.assertEqual(pp.herdr_config_path(), "/x/other.toml")
+
+    def test_the_override_beats_the_plugin_config_dir(self):
+        # The server is reading whatever HERDR_CONFIG_PATH names, so deriving a
+        # different path from the plugin dir would read a file nobody is using.
+        with tempfile.TemporaryDirectory() as d:
+            plugin_dir = os.path.join(d, "plugins", "config", "x.y")
+            os.makedirs(plugin_dir)
+            open(os.path.join(d, "config.toml"), "w").close()
+            with mock.patch.dict(os.environ,
+                                 {"HERDR_CONFIG_PATH": "/x/other.toml",
+                                  "HERDR_PLUGIN_CONFIG_DIR": plugin_dir}, clear=True):
+                self.assertEqual(pp.herdr_config_path(), "/x/other.toml")
+
+    def test_the_override_is_tilde_expanded(self):
+        with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": "~/c.toml"}, clear=True):
+            self.assertEqual(pp.herdr_config_path(),
+                             os.path.expanduser("~/c.toml"))
+
+    def test_derived_from_the_plugin_config_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            plugin_dir = os.path.join(d, "plugins", "config", "x.y")
+            os.makedirs(plugin_dir)
+            expected = os.path.join(d, "config.toml")
+            open(expected, "w").close()
+            with mock.patch.dict(os.environ,
+                                 {"HERDR_PLUGIN_CONFIG_DIR": plugin_dir}, clear=True):
+                self.assertEqual(pp.herdr_config_path(), expected)
+
+    def test_a_trailing_separator_does_not_shift_the_derivation(self):
+        with tempfile.TemporaryDirectory() as d:
+            plugin_dir = os.path.join(d, "plugins", "config", "x.y")
+            os.makedirs(plugin_dir)
+            expected = os.path.join(d, "config.toml")
+            open(expected, "w").close()
+            with mock.patch.dict(os.environ,
+                                 {"HERDR_PLUGIN_CONFIG_DIR": plugin_dir + os.sep},
+                                 clear=True):
+                self.assertEqual(pp.herdr_config_path(), expected)
+
+    def test_a_derivation_that_finds_no_file_falls_back_to_the_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"HERDR_PLUGIN_CONFIG_DIR": d},
+                                 clear=True):
+                self.assertEqual(pp.herdr_config_path(),
+                                 os.path.expanduser("~/.config/herdr/config.toml"))
+
+    def test_nothing_set_uses_the_documented_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(pp.herdr_config_path(),
+                             os.path.expanduser("~/.config/herdr/config.toml"))
+
+
+class HerdrRejectsTheme(unittest.TestCase):
+    """Reading Herdr's own verdict on a theme name out of `config check`."""
+
+    DIAGNOSTIC = ('config: issues found\nunknown theme name theme.name = '
+                  '"monokai"; using "catppuccin"; valid themes: catppuccin, terminal\n')
+
+    def probe(self, field="theme.name", stdout="", stderr="", boom=False):
+        run = mock.Mock(side_effect=OSError) if boom else mock.Mock(
+            return_value=mock.Mock(stdout=stdout, stderr=stderr))
+        with mock.patch.object(pp.subprocess, "run", run):
+            return pp.herdr_rejects_theme(field)
+
+    def test_a_diagnostic_naming_the_field_is_a_rejection(self):
+        self.assertTrue(self.probe(stdout=self.DIAGNOSTIC))
+
+    def test_a_clean_check_is_not_a_rejection(self):
+        self.assertFalse(self.probe(stdout="config: ok\n"))
+
+    def test_a_diagnostic_about_a_different_field_is_not_a_rejection(self):
+        # theme.name and theme.dark_name are diagnosed separately. Matching on
+        # "unknown theme name" alone would let one answer for the other.
+        self.assertFalse(self.probe(field="theme.dark_name",
+                                    stdout=self.DIAGNOSTIC))
+
+    def test_stderr_is_read_too(self):
+        self.assertTrue(self.probe(stderr=self.DIAGNOSTIC))
+
+    def test_an_unrunnable_herdr_is_not_a_rejection(self):
+        # Fail towards UNKNOWN_THEME: a picker that could not ask must not
+        # claim the name was a typo and draw catppuccin over a real theme.
+        self.assertFalse(self.probe(boom=True))
+
+
+class CanonicalTheme(unittest.TestCase):
+    def test_exact_name(self):
+        self.assertEqual(pp.canonical_theme("gruvbox"), "gruvbox")
+
+    def test_case_and_separators_are_folded(self):
+        for spelling in ("Tokyo_Night", "TOKYO NIGHT", "tokyo-night"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(pp.canonical_theme(spelling), "tokyo-night")
+
+    def test_aliases_resolve(self):
+        self.assertEqual(pp.canonical_theme("onedark"), "one-dark")
+        self.assertEqual(pp.canonical_theme("gruvbox-dark"), "gruvbox")
+        self.assertEqual(pp.canonical_theme("dawn"), "rose-pine-dawn")
+
+    def test_unknown_and_empty_are_none(self):
+        self.assertIsNone(pp.canonical_theme("monokai"))
+        self.assertIsNone(pp.canonical_theme(""))
+        self.assertIsNone(pp.canonical_theme(None))
+
+    def test_every_alias_target_is_a_real_palette(self):
+        # A typo in THEME_ALIASES would otherwise make that alias fall back to
+        # the default theme silently.
+        for alias, target in pp.THEME_ALIASES.items():
+            with self.subTest(alias=alias):
+                self.assertIn(target, pp.PALETTES)
+
+    def test_every_palette_has_all_five_roles(self):
+        for name, roles in pp.PALETTES.items():
+            with self.subTest(theme=name):
+                self.assertEqual(len(roles), len(pp.STATUS_ROLE_ORDER))
+
+
+class ParseColor(unittest.TestCase):
+    """Port of Herdr's parse_color. Ints are 256-colour indexes, tuples are Rgb."""
+
+    def test_six_digit_hex(self):
+        self.assertEqual(pp.parse_color("#8899aa"), (0x88, 0x99, 0xaa))
+
+    def test_three_digit_hex_expands_by_seventeen(self):
+        self.assertEqual(pp.parse_color("#f0a"), (255, 0, 170))
+
+    def test_rgb_function(self):
+        self.assertEqual(pp.parse_color("rgb(137, 180, 250)"), (137, 180, 250))
+
+    def test_named_colors_map_to_their_crossterm_index(self):
+        # ratatui Yellow -> crossterm DarkYellow -> 3, LightRed -> Red -> 9.
+        self.assertEqual(pp.parse_color("yellow"), 3)
+        self.assertEqual(pp.parse_color("lightred"), 9)
+        self.assertEqual(pp.parse_color("gray"), 7)
+        self.assertEqual(pp.parse_color("white"), 15)
+
+    def test_case_and_whitespace_are_folded(self):
+        self.assertEqual(pp.parse_color("  LightRed "), 9)
+
+    def test_reset_aliases_are_the_default_foreground(self):
+        for value in ("reset", "default", "none", "transparent"):
+            with self.subTest(value=value):
+                self.assertIsNone(pp.parse_color(value))
+
+    def test_an_unknown_value_is_cyan_matching_herdr(self):
+        # Herdr warns and defaults to cyan rather than failing. Diverging would
+        # colour a typo differently from the sidebar this is matching.
+        self.assertEqual(pp.parse_color("chartreuse"), pp.parse_color("cyan"))
+
+    def test_malformed_hex_falls_through_to_the_named_default(self):
+        self.assertEqual(pp.parse_color("#gg0011"), pp.parse_color("cyan"))
+        self.assertEqual(pp.parse_color("#12345"), pp.parse_color("cyan"))
+
+    def test_out_of_range_rgb_falls_through(self):
+        self.assertEqual(pp.parse_color("rgb(300,0,0)"), pp.parse_color("cyan"))
+
+
+class Paint(unittest.TestCase):
+    def test_an_index_uses_the_256_colour_form_ratatui_writes(self):
+        self.assertEqual(pp.paint("x", 3), "\033[38;5;3mx\033[39m")
+
+    def test_an_rgb_triple_uses_truecolor(self):
+        self.assertEqual(pp.paint("x", (1, 2, 3)), "\033[38;2;1;2;3mx\033[39m")
+
+    def test_none_is_the_default_foreground(self):
+        self.assertEqual(pp.paint("x", None), "\033[39mx\033[39m")
+
+
+class ResolveTheme(unittest.TestCase):
+    """Reading icons and colours out of a Herdr config."""
+
+    def resolve(self, rejects=False, **config):
+        """`rejects` stands in for `herdr config check`: True means Herdr turns
+        the configured theme name down too."""
+        return pp.resolve_theme(config, rejects=lambda field: rejects)
+
+    def test_defaults_are_dots_on_catppuccin(self):
+        # Herdr's own defaults when [ui] and [theme] say nothing.
+        icons, colours = self.resolve()
+        self.assertEqual(icons["working"], "●")
+        self.assertEqual(icons["idle"], "○")
+        self.assertEqual(colours["working"], (249, 226, 175))   # catppuccin yellow
+
+    def test_symbols_style_changes_every_glyph_herdr_changes(self):
+        icons, _ = self.resolve(**{"ui.status_indicators": "symbols"})
+        self.assertEqual(icons["working"], "◐")
+        self.assertEqual(icons["blocked"], "×")
+        self.assertEqual(icons["done"], "✓")
+        self.assertEqual(icons["idle"], "○")
+        self.assertEqual(icons["unknown"], "·")
+
+    def test_an_unknown_indicator_style_falls_back_to_dots(self):
+        icons, _ = self.resolve(**{"ui.status_indicators": "emoji"})
+        self.assertEqual(icons, pp.STATUS_ICONS["dots"])
+
+    def test_the_terminal_theme_yields_ansi_indexes_not_hexes(self):
+        # The whole point of theme = "terminal": indexes 0-15 resolve through
+        # the host terminal profile, exactly as Herdr's own rendering does.
+        _, colours = self.resolve(**{"theme.name": "terminal"})
+        self.assertEqual(colours, {"working": 3, "blocked": 9, "done": 6,
+                                   "idle": 2, "unknown": 7})
+
+    def test_each_status_reads_its_own_role(self):
+        # Guards the STATUS_ROLES wiring: a role swap would still produce five
+        # colours, just the wrong ones on the wrong statuses.
+        _, colours = self.resolve(**{"theme.name": "gruvbox"})
+        self.assertEqual(colours["working"], (250, 189, 47))   # yellow
+        self.assertEqual(colours["blocked"], (251, 73, 52))    # red
+        self.assertEqual(colours["done"], (142, 192, 124))     # teal
+        self.assertEqual(colours["idle"], (184, 187, 38))      # green
+        self.assertEqual(colours["unknown"], (146, 131, 116))  # overlay0
+
+    def test_a_name_herdr_also_rejects_uses_herdrs_own_default(self):
+        # A typo. Herdr's diagnostic says it falls back to catppuccin, so
+        # matching that is exactly right.
+        _, typo = self.resolve(rejects=True, **{"theme.name": "monokai"})
+        _, default = self.resolve()
+        self.assertEqual(typo, default)
+
+    def test_a_name_herdr_accepts_but_this_table_lacks_uses_the_terminal_palette(self):
+        # Herdr gained a theme since PALETTES was copied. Its colours cannot be
+        # read from anywhere at runtime, so fall back to the terminal palette
+        # rather than confidently drawing catppuccin's.
+        _, newer = self.resolve(rejects=False, **{"theme.name": "brand-new-theme"})
+        _, terminal = self.resolve(**{"theme.name": "terminal"})
+        _, default = self.resolve()
+        self.assertEqual(newer, terminal)
+        self.assertNotEqual(newer, default)
+
+    def test_an_unset_name_never_asks_herdr(self):
+        # Unset is not unknown: Herdr documents catppuccin as the default, so
+        # spending a subprocess to confirm it would be waste on the normal path.
+        asked = []
+        pp.resolve_theme({}, rejects=lambda f: asked.append(f) or False)
+        self.assertEqual(asked, [])
+
+    def test_a_known_name_never_asks_herdr(self):
+        asked = []
+        pp.resolve_theme({"theme.name": "gruvbox"},
+                         rejects=lambda f: asked.append(f) or False)
+        self.assertEqual(asked, [])
+
+    def test_the_probe_is_told_which_field_to_look_for(self):
+        # Herdr diagnoses theme.name and theme.dark_name separately, so probing
+        # the wrong field would read as "accepted" and mask a typo.
+        asked = []
+        pp.resolve_theme({"theme.auto_switch": "true", "theme.dark_name": "nope"},
+                         rejects=lambda f: asked.append(f) or False)
+        self.assertEqual(asked, ["theme.dark_name"])
+
+    def test_a_custom_override_replaces_only_its_role(self):
+        _, colours = self.resolve(**{"theme.name": "terminal",
+                                     "theme.custom.red": "#ff8800"})
+        self.assertEqual(colours["blocked"], (255, 136, 0))   # red role
+        self.assertEqual(colours["working"], 3)               # yellow untouched
+
+    def test_every_status_role_is_overridable(self):
+        # with_overrides() covers all five, so a role missing from the override
+        # loop would silently ignore the user's setting.
+        for role, status in (("green", "idle"), ("yellow", "working"),
+                             ("red", "blocked"), ("teal", "done"),
+                             ("overlay0", "unknown")):
+            with self.subTest(role=role):
+                _, colours = self.resolve(**{"theme.name": "terminal",
+                                             f"theme.custom.{role}": "#010203"})
+                self.assertEqual(colours[status], (1, 2, 3))
+
+    def test_auto_switch_uses_dark_name(self):
+        _, colours = self.resolve(**{"theme.name": "terminal",
+                                     "theme.auto_switch": "true",
+                                     "theme.dark_name": "gruvbox"})
+        self.assertEqual(colours["working"], (250, 189, 47))   # gruvbox yellow
+
+    def test_auto_switch_off_ignores_dark_name(self):
+        _, colours = self.resolve(**{"theme.name": "terminal",
+                                     "theme.auto_switch": "false",
+                                     "theme.dark_name": "gruvbox"})
+        self.assertEqual(colours["working"], 3)                # terminal yellow
+
+    def test_mode_overrides_apply_only_under_auto_switch(self):
+        keys = {"theme.name": "terminal", "theme.custom.dark.yellow": "#010203"}
+        _, off = self.resolve(**keys)
+        _, on = self.resolve(**dict(keys, **{"theme.auto_switch": "true"}))
+        self.assertEqual(off["working"], 3)             # ignored while off
+        self.assertEqual(on["working"], (1, 2, 3))      # applied while on
+
+    def test_a_mode_override_beats_the_unqualified_one(self):
+        _, colours = self.resolve(**{"theme.name": "terminal",
+                                     "theme.auto_switch": "true",
+                                     "theme.custom.yellow": "#111111",
+                                     "theme.custom.dark.yellow": "#222222"})
+        self.assertEqual(colours["working"], (0x22, 0x22, 0x22))
+
+    def test_theme_keys_covers_every_key_resolve_theme_reads(self):
+        # THEME_KEYS is the filter read_toml applies, so a key absent from it is
+        # unreachable no matter how the resolver is written.
+        for role in pp.STATUS_ROLE_ORDER:
+            self.assertIn(f"theme.custom.{role}", pp.THEME_KEYS)
+            self.assertIn(f"theme.custom.dark.{role}", pp.THEME_KEYS)
+        for key in ("ui.status_indicators", "theme.name", "theme.auto_switch",
+                    "theme.dark_name"):
+            self.assertIn(key, pp.THEME_KEYS)
+
+
+class StatusCell(unittest.TestCase):
+    ICONS = {"working": "◐", "idle": "○", "unknown": "·"}
+    COLOURS = {"working": 3, "idle": 2, "unknown": 7}
+
+    def cell(self, status, colours=None):
+        return pp.status_cell(status, self.ICONS, colours or self.COLOURS)
+
+    def escape(self, status, colours=None):
+        """The opening SGR escape of a rendered cell."""
+        return self.cell(status, colours).split("m", 1)[0] + "m"
+
+    def test_glyph_word_and_colour_are_all_present(self):
+        self.assertEqual(self.cell("working"),
+                         "\033[38;5;3m" + "◐ working".ljust(pp.STATUS_WIDTH) + "\033[39m")
+
+    def test_the_status_word_is_kept_so_the_filter_can_match_it(self):
+        # fzf searches the visible text; dropping the word to match Herdr's
+        # glyph-only sidebar would make typing "idle" match nothing.
+        self.assertIn("idle", self.cell("idle"))
+
+    def test_visible_text_is_padded_not_the_escaped_string(self):
+        # Padding after the escapes would count them and pad by ~9 too few.
+        import re as _re
+        visible = _re.sub(r"\033\[[0-9;]*m", "", self.cell("idle"))
+        self.assertEqual(len(visible), pp.STATUS_WIDTH)
+
+    def test_an_unrecognised_status_takes_the_unknown_glyph_and_colour(self):
+        # A status Herdr adds later must still render, not raise KeyError. A
+        # colours.get() fallback would hand it the DEFAULT foreground instead of
+        # the unknown role's colour, so both halves are asserted.
+        self.assertIn("·", self.cell("brand-new"))
+        self.assertEqual(self.escape("brand-new"), self.escape("unknown"))
+
+    def test_a_reset_colour_is_kept_distinct_from_a_missing_one(self):
+        # parse_color returns None for "reset", which is a real colour choice.
+        # It must render SGR 39 rather than being treated as an absent status.
+        reset = {"working": 3, "idle": 2, "unknown": None}
+        self.assertEqual(self.escape("unknown", reset), "\033[39m")
 
 
 class Heading(unittest.TestCase):

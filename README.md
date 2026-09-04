@@ -21,6 +21,38 @@ A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
 kept beside its parent is recognisable at a glance. The filter searches the
 whole visible row, so typing `worktree` narrows the list to worktrees.
 
+An `AGENT STATUS` column shows the agent state of every open project, drawn with
+the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
+`~/.config/herdr/config.toml` rather than assumed: `[ui] status_indicators`
+picks `dots` or `symbols`, and `[theme]` plus any `[theme.custom]` override of
+`green`, `yellow`, `red`, `teal`, or `overlay0` decides the colour. All eighteen
+built-in themes are covered, and under `theme.name = "terminal"` the colours are
+ANSI indexes, so the picker follows your terminal profile exactly as Herdr does.
+Herdr shows the glyph alone; the picker keeps the status word beside it because
+fzf searches the visible text, so typing `blocked` narrows the list.
+
+The palette is a copy, because Herdr keeps its own inside the renderer: there is
+no colour on the socket API and no theme event to subscribe to. So the picker
+handles a theme it does not recognise rather than pretending. A name Herdr also
+rejects is a typo, and `herdr config check` says so, naming the fallback it uses
+— the picker uses that same fallback, so a typo still matches. A name Herdr
+accepts that the table lacks means Herdr gained a theme since the copy was made:
+the picker draws the `terminal` palette, which keeps the meaning right (green
+idle, yellow working, red blocked) and follows your terminal profile, but is not
+guaranteed to match the sidebar. That is the signal to refresh the table from
+`src/app/state.rs` upstream.
+
+Herdr's config is found at `HERDR_CONFIG_PATH` when that is set, otherwise
+derived from the plugin config directory Herdr passes in, otherwise
+`~/.config/herdr/config.toml`.
+
+One setting cannot be followed: `[theme] auto_switch`. Herdr chooses between
+`dark_name` and `light_name` from the host terminal's light/dark appearance,
+which it learns over its client connection and exposes on neither the socket API
+nor the CLI. With `auto_switch = true` the picker uses `dark_name` and applies
+`[theme.custom.dark]`. With it off, which is the default, there is nothing to
+follow and the colours match exactly.
+
 A project name longer than 34 characters is cut with a `…` so it cannot push
 the columns after it out of alignment. The preview pane shows the full name
 above the git log. Note that the filter can only match what is displayed —
@@ -67,10 +99,11 @@ Herdr to open the pane:
 herdr() {
   if [[ $# -eq 0 && -z "$HERDR_NO_PICKER" && -t 0 ]]; then
     (
-      for _ in {1..40}; do
-        sleep 0.25
-        command herdr status server 2>/dev/null | grep -q 'status: running' || continue
-        command herdr plugin pane open --plugin mikebronner.project-finder --entrypoint picker >/dev/null 2>&1 && exit 0
+      for _ in {1..200}; do
+        if command herdr status server 2>/dev/null | grep -q 'status: running'; then
+          command herdr plugin pane open --plugin mikebronner.project-finder --entrypoint picker >/dev/null 2>&1 && exit 0
+        fi
+        sleep 0.05
       done
     ) &!
   fi
@@ -78,9 +111,11 @@ herdr() {
 }
 ```
 
-The waiter gives the server up to ten seconds, so cold and warm starts behave
-the same. `HERDR_NO_PICKER=1 herdr` skips it, and Esc in the picker changes
-nothing.
+Probe first and sleep second. A warm start finds the server already running and
+opens the picker in about 13 ms, where sleeping first paid a flat 250 ms before
+the first check on every launch. The waiter still gives the server about ten
+seconds, so cold and warm starts behave the same.
+`HERDR_NO_PICKER=1 herdr` skips it, and Esc in the picker changes nothing.
 
 ## Configure
 

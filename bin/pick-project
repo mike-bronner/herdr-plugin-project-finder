@@ -14,6 +14,10 @@ never closed.
 Both settings may also come from a .env file under HERDR_PLUGIN_CONFIG_DIR;
 real environment variables take precedence over that file.
 
+Each open project's row carries its agent status, drawn with the glyph and
+colour Herdr's own sidebar would use, read out of Herdr's config.toml. See the
+"Herdr's agent-status indicator" section below.
+
 Each new workspace opens one tab named "agent", split 50/50: Claude on the
 left, a shell on the right. Claude is started plain — Herdr's own [session]
 resume_agents_on_restore (on by default) handles bringing conversations back
@@ -44,6 +48,69 @@ def load_env(path):
             value = value[1:-1]
         if key:
             os.environ.setdefault(key, value)
+
+
+def read_toml(path, wanted):
+    """Values for the "table.key" names in `wanted`, as raw strings.
+
+    A deliberate subset of TOML: scalar values under [table] headers, which is
+    every setting read here. Arrays, inline tables and multi-line values are
+    skipped rather than half-parsed, and an unreadable file yields {}. Python
+    3.9 ships no tomllib and this plugin has no dependencies, so a full parser
+    would have to be vendored to read four keys.
+
+    Like load_env(), nothing here may raise: Herdr's config is the user's to
+    edit, and a syntax error in it must never stop the picker from opening.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return {}
+    found, table = {}, ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            table = line[1:-1].strip().strip('"')
+            continue
+        key, sep, value = line.partition("=")
+        name = f"{table}.{key.strip()}"
+        if not sep or name not in wanted:
+            continue
+        value = value.strip()
+        if value[:1] in "\"'":
+            # Quoted: take up to the closing quote, so a trailing comment that
+            # contains no quote cannot be glued onto the value.
+            end = value.find(value[0], 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = value.partition("#")[0].strip()
+        if value and not value.startswith(("[", "{")):
+            found.setdefault(name, value)
+    return found
+
+
+def herdr_config_path():
+    """Herdr's own config.toml.
+
+    HERDR_CONFIG_PATH wins, because Herdr documents it as the override for this
+    exact file (`herdr --help`) and the server is reading whatever it names.
+    Otherwise it is derived from the plugin config dir Herdr passes in, which is
+    <config root>/plugins/config/<plugin id>, so a relocated config root is
+    followed rather than guessed at. Failing both, the documented default.
+    """
+    override = os.environ.get("HERDR_CONFIG_PATH")
+    if override:
+        return os.path.expanduser(override)
+    d = os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
+    if d:
+        root = os.path.dirname(os.path.dirname(os.path.dirname(d.rstrip(os.sep))))
+        candidate = os.path.join(root, "config.toml")
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.expanduser("~/.config/herdr/config.toml")
 
 
 def resolve_root():
@@ -80,8 +147,105 @@ HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 # KIND is spelled out rather than iconified because fzf searches the visible
 # field, so typing "worktree" filters the list to worktrees.
 LABEL_WIDTH = 34
-ROW = f"{{:<{LABEL_WIDTH}}} {{:<9}} {{:<9}} {{:<12}}\t{{}}\t{{}}"
+STATUS_WIDTH = 12
+ROW = f"{{:<{LABEL_WIDTH}}} {{:<9}} {{:<9}} {{}}\t{{}}\t{{}}"
 HEADING = ROW.format("PROJECT", "KIND", "TOUCHED", "AGENT STATUS", "", "")
+
+# The AGENT STATUS field is NOT padded by ROW. It carries colour escapes, and
+# str.format pads by character count, so a padded format spec would count the
+# escapes and pad by the wrong amount. status_cell() pads the visible text to
+# STATUS_WIDTH before wrapping it. Nothing visible follows the field, so this
+# costs no alignment either way — it is done so the width stays one number.
+
+# ---------------------------------------------------------------------------
+# Herdr's agent-status indicator, reproduced.
+#
+# The picker draws the same glyph in the same colour Herdr's own spaces sidebar
+# draws, resolved from the user's config rather than assumed. Everything below
+# is a port of Herdr 0.8.2; each table cites the source it came from so a future
+# upstream change can be diffed against it rather than guessed at.
+#
+# Herdr renders through ratatui, whose crossterm backend writes a named colour
+# as the 256-colour form "38;5;<index>" (ratatui-crossterm/src/lib.rs:421 into
+# crossterm src/style/types/colored.rs:132) and an Rgb as "38;2;r;g;b". Emitting
+# the identical escape means the terminal resolves it identically — which is the
+# whole point under theme.name = "terminal", where indexes 0-15 follow the host
+# terminal profile that Herdr is following too.
+
+# src/client/shell.rs:182, keyed by [ui] status_indicators. Default "dots".
+STATUS_ICONS = {
+    "dots":    {"working": "●", "blocked": "●", "done": "●",
+                "idle": "○", "unknown": "·"},
+    "symbols": {"working": "◐", "blocked": "×", "done": "✓",
+                "idle": "○", "unknown": "·"},
+}
+
+# src/client/shell.rs:229 — which palette role colours which status.
+STATUS_ROLES = {"working": "yellow", "blocked": "red", "done": "teal",
+                "idle": "green", "unknown": "overlay0"}
+
+# The five roles above for each built-in theme, in STATUS_ROLE_ORDER, from the
+# Palette constructors in src/app/state.rs:78-525. A string is a ratatui named
+# colour, a triple is Rgb.
+STATUS_ROLE_ORDER = ("green", "yellow", "red", "teal", "overlay0")
+PALETTES = {
+    "catppuccin":       ((166, 227, 161), (249, 226, 175), (243, 139, 168), (148, 226, 213), (108, 112, 134)),
+    "catppuccin-latte": ((64, 160, 43), (223, 142, 29), (210, 15, 57), (23, 146, 153), (156, 160, 176)),
+    "terminal":         ("green", "yellow", "lightred", "cyan", "gray"),
+    "tokyo-night":      ((158, 206, 106), (224, 175, 104), (247, 118, 142), (125, 207, 255), (86, 95, 137)),
+    "tokyo-night-day":  ((88, 117, 57), (140, 108, 62), (245, 42, 101), (17, 140, 116), (137, 144, 179)),
+    "dracula":          ((80, 250, 123), (241, 250, 140), (255, 85, 85), (139, 233, 253), (98, 114, 164)),
+    "nord":             ((163, 190, 140), (235, 203, 139), (191, 97, 106), (143, 188, 187), (76, 86, 106)),
+    "gruvbox":          ((184, 187, 38), (250, 189, 47), (251, 73, 52), (142, 192, 124), (146, 131, 116)),
+    "gruvbox-light":    ((121, 116, 14), (181, 118, 20), (157, 0, 6), (66, 123, 88), (146, 131, 116)),
+    "one-dark":         ((152, 195, 121), (229, 192, 123), (224, 108, 117), (86, 182, 194), (92, 99, 112)),
+    "one-light":        ((80, 161, 79), (193, 132, 1), (228, 86, 73), (1, 132, 188), (160, 161, 167)),
+    "solarized":        ((133, 153, 0), (181, 137, 0), (220, 50, 47), (42, 161, 152), (88, 110, 117)),
+    "solarized-light":  ((133, 153, 0), (181, 137, 0), (220, 50, 47), (42, 161, 152), (147, 161, 161)),
+    "kanagawa":         ((118, 148, 106), (192, 163, 110), (195, 64, 67), (127, 180, 202), (114, 113, 105)),
+    "kanagawa-lotus":   ((111, 137, 78), (119, 113, 63), (200, 64, 83), (78, 140, 162), (160, 156, 172)),
+    "rose-pine":        ((49, 116, 143), (246, 193, 119), (235, 111, 146), (156, 207, 216), (110, 106, 134)),
+    "rose-pine-dawn":   ((40, 105, 131), (234, 157, 52), (180, 99, 122), (86, 148, 159), (152, 147, 165)),
+    "vesper":           ((153, 255, 228), (255, 199, 153), (255, 128, 128), (102, 221, 204), (92, 92, 92)),
+}
+
+# src/config/theme.rs:25. Aliases and the "-"/"_"/" " and case folding it does.
+THEME_ALIASES = {
+    "catppuccin-mocha": "catppuccin", "latte": "catppuccin-latte",
+    "light": "catppuccin-latte", "tokyonight": "tokyo-night",
+    "tokyo-day": "tokyo-night-day", "tokyonight-day": "tokyo-night-day",
+    "gruvbox-dark": "gruvbox", "onedark": "one-dark", "onelight": "one-light",
+    "solarized-dark": "solarized", "lotus": "kanagawa-lotus",
+    "rosepine": "rose-pine", "rosepine-dawn": "rose-pine-dawn", "dawn": "rose-pine-dawn",
+}
+
+# src/config/theme.rs:197, ratatui name -> the crossterm 256-colour index that
+# ratatui's backend converts it to. "reset" is the SGR default-foreground 39.
+NAMED_COLORS = {
+    "black": 0, "red": 1, "green": 2, "yellow": 3, "blue": 4, "magenta": 5,
+    "purple": 5, "cyan": 6, "gray": 7, "grey": 7, "darkgray": 8, "darkgrey": 8,
+    "lightred": 9, "lightgreen": 10, "lightyellow": 11, "lightblue": 12,
+    "lightmagenta": 13, "lightcyan": 14, "white": 15,
+}
+RESET_ALIASES = ("reset", "default", "none", "transparent")
+
+# Herdr's own default, used when [theme] name is unset and when Herdr rejects
+# the configured name — in both cases catppuccin is what Herdr itself draws
+# (src/config/theme.rs:62, and the "using ..." in its config-check diagnostic).
+DEFAULT_THEME = "catppuccin"
+
+# What to draw when Herdr ACCEPTS a theme name that PALETTES does not carry,
+# which means Herdr has gained a theme since this table was copied. Its colours
+# are unknowable from here: the palette never crosses the socket API, and there
+# is no theme event to subscribe to (verified against the 0.8.2 API schema —
+# no theme, palette, colour, or appearance surface anywhere in it).
+#
+# The terminal palette is the least-wrong answer available. It keeps the
+# semantics right (green idle, yellow working, red blocked) and follows the host
+# terminal profile, so the row still reads correctly even though it cannot be
+# guaranteed to match the sidebar. Refresh PALETTES from src/app/state.rs when
+# this fires.
+UNKNOWN_THEME = "terminal"
 
 # Key bindings and the legend above the list. Space is deliberately NOT bound:
 # it is fzf's AND separator between query terms, so binding it to toggle flips
@@ -304,15 +468,22 @@ def open_workspaces():
 
 
 def order_rows(labelled, open_ws):
-    """(label, path) rows: open projects first in sidebar order, then the rest
-    by most recently touched. Open workspaces with no matching repo are not
-    listed (they still get closed on accept, since they cannot be selected)."""
+    """(label, path, touched) rows: open projects first in sidebar order, then
+    the rest by most recently touched. Open workspaces with no matching repo are
+    not listed (they still get closed on accept, since they cannot be selected).
+
+    The touch time is carried on the row rather than looked up again later.
+    touched_at() walks each working tree, which is the single largest cost of
+    starting the picker, so every repo is walked exactly once per run: sorting
+    needs the value here and build_lines() needs it for the TOUCHED column.
+    """
     by_label = dict(labelled)
-    head = [(w["label"], by_label[w["label"]]) for w in open_ws if w["label"] in by_label]
-    listed = {l for l, _ in head}
-    rest = sorted(((touched_at(p), l, p) for l, p in labelled if l not in listed),
-                  key=lambda r: -r[0])
-    return head, [(l, p) for _, l, p in rest]
+    head = [(w["label"], by_label[w["label"]], touched_at(by_label[w["label"]]))
+            for w in open_ws if w["label"] in by_label]
+    listed = {l for l, _, _ in head}
+    rest = sorted(((l, p, touched_at(p)) for l, p in labelled if l not in listed),
+                  key=lambda r: -r[2])
+    return head, rest
 
 
 def preselect_bind(n):
@@ -362,22 +533,167 @@ def pick_focus(created_ids, closed_ids, focused_id, surviving_ids, home_id):
     return None
 
 
+def canonical_theme(name):
+    """A config theme name folded to its canonical key, or None if unknown.
+
+    Port of canonical_theme_name (src/config/theme.rs:25): lowercase, then
+    spaces and underscores to hyphens, then the alias table.
+    """
+    key = re.sub(r"[ _]", "-", (name or "").strip().lower())
+    key = THEME_ALIASES.get(key, key)
+    return key if key in PALETTES else None
+
+
+def parse_color(value):
+    """A config colour string as a ratatui colour, in the picker's own shape:
+    an int (a 256-colour index) or an (r, g, b) triple.
+
+    Port of parse_color (src/config/theme.rs:155), including its final branch:
+    an unrecognised value is cyan, NOT an error. Diverging there would colour a
+    typo differently from the sidebar it is meant to match.
+    """
+    s = (value or "").strip().lower()
+    if s in RESET_ALIASES:
+        return None                       # SGR 39, the default foreground
+    if s.startswith("#"):
+        hexpart = s[1:]
+        if len(hexpart) == 6 and re.fullmatch(r"[0-9a-f]{6}", hexpart):
+            return tuple(int(hexpart[i:i + 2], 16) for i in (0, 2, 4))
+        if len(hexpart) == 3 and re.fullmatch(r"[0-9a-f]{3}", hexpart):
+            return tuple(int(c, 16) * 17 for c in hexpart)
+    m = re.fullmatch(r"rgb\(([^)]*)\)", s)
+    if m:
+        parts = [p.strip() for p in m.group(1).split(",")]
+        if len(parts) == 3 and all(p.isdigit() and int(p) < 256 for p in parts):
+            return tuple(int(p) for p in parts)
+    return NAMED_COLORS.get(s, NAMED_COLORS["cyan"])
+
+
+# Every config key resolve_theme() reads, built from the tables above so a role
+# added there cannot be silently left unreadable.
+THEME_KEYS = frozenset(
+    ["ui.status_indicators", "theme.name", "theme.auto_switch", "theme.dark_name"]
+    + [f"theme.custom.{r}" for r in STATUS_ROLE_ORDER]
+    + [f"theme.custom.dark.{r}" for r in STATUS_ROLE_ORDER])
+
+
+def herdr_rejects_theme(field):
+    """True when Herdr itself will not accept the theme name at `field`.
+
+    `herdr config check` diagnoses an unknown theme name, naming both the field
+    and the fallback it uses ("unknown theme name theme.name = ...; using
+    "catppuccin""). That is the only way to tell a TYPO apart from a theme newer
+    than PALETTES: on a typo Herdr draws its own default, so matching it means
+    drawing that default too, while a name Herdr accepts and this table lacks
+    means the table is stale.
+
+    Called only when PALETTES has no entry for the name, so the normal path
+    never pays for the subprocess. Any failure answers False, which routes to
+    UNKNOWN_THEME: a picker that cannot ask must not claim the name was a typo.
+    """
+    try:
+        r = subprocess.run([HERDR, "config", "check"], capture_output=True, text=True)
+    except OSError:
+        return False
+    return f"unknown theme name {field}" in (r.stdout + r.stderr)
+
+
+def resolve_theme(config=None, rejects=None):
+    """(icons, colours) for the current Herdr config.
+
+    `icons` maps a status to its glyph, `colours` maps a status to a colour in
+    parse_color()'s shape. Reads [ui] status_indicators, [theme] name, and any
+    [theme.custom] override of the five status roles.
+
+    auto_switch is the one thing this cannot follow. Herdr picks between
+    dark_name and light_name from the HOST TERMINAL's appearance, which it
+    learns over the client connection and does not expose on the API or the
+    CLI. A popup pane has no way to ask. When auto_switch is on, dark_name is
+    used (Herdr's own dark default, and the overwhelmingly common case for a
+    terminal), and [theme.custom.dark] overrides are applied with it.
+    """
+    if config is None:
+        config = read_toml(herdr_config_path(), THEME_KEYS)
+    rejects = rejects or herdr_rejects_theme
+    style = config.get("ui.status_indicators", "dots")
+    icons = STATUS_ICONS.get(style, STATUS_ICONS["dots"])
+
+    auto = config.get("theme.auto_switch", "false").strip().lower() == "true"
+    field = "theme.dark_name" if auto else "theme.name"
+    name = config.get(field)
+    key = canonical_theme(name)
+    if key is None:
+        # Unset means Herdr's default. A name Herdr also rejects means Herdr is
+        # drawing that same default, so match it. A name Herdr accepts and this
+        # table lacks is a stale table, which is what UNKNOWN_THEME is for.
+        key = DEFAULT_THEME if not name or rejects(field) else UNKNOWN_THEME
+    palette = PALETTES[key]
+
+    roles = dict(zip(STATUS_ROLE_ORDER, palette))
+    # A mode override wins over the unqualified one, matching the order
+    # with_overrides() applies them (src/app/state.rs:551).
+    tables = ["theme.custom"] + (["theme.custom.dark"] if auto else [])
+    for role in STATUS_ROLE_ORDER:
+        for table in tables:
+            if f"{table}.{role}" in config:
+                roles[role] = config[f"{table}.{role}"]
+
+    colours = {}
+    for status, role in STATUS_ROLES.items():
+        value = roles[role]
+        # A built-in Rgb is already in shape; a named colour and every config
+        # override are strings that still need parsing.
+        colours[status] = value if isinstance(value, tuple) else parse_color(value)
+    return icons, colours
+
+
+def paint(text, colour):
+    """`text` wrapped in the SGR foreground escape ratatui would have written."""
+    if colour is None:
+        code = "39"
+    elif isinstance(colour, tuple):
+        code = "38;2;%d;%d;%d" % colour
+    else:
+        code = f"38;5;{colour}"
+    return f"\033[{code}m{text}\033[39m"
+
+
+def status_cell(status, icons, colours):
+    """The AGENT STATUS column for one open workspace: Herdr's glyph and colour,
+    then the status word.
+
+    The word is kept even though Herdr's sidebar shows the glyph alone, because
+    fzf searches the visible text: typing "blocked" has to narrow the list. The
+    visible text is padded to STATUS_WIDTH before the escapes go on, since ROW
+    cannot pad a string whose length it would measure wrongly.
+    """
+    icon = icons.get(status, icons["unknown"])
+    # .get() would be wrong here: a reset colour is legitimately None, so a
+    # status Herdr adds later must fall back explicitly, not by absence.
+    colour = colours[status] if status in colours else colours["unknown"]
+    return paint(f"{icon} {status}".ljust(STATUS_WIDTH), colour)
+
+
 def build_lines(rows, status, now):
-    """One fzf input line per (label, path) row, in the order given.
+    """One fzf input line per (label, path, touched) row, in the order given.
 
     Field 1 holds the visible columns, with the label elided so a long name
     cannot push the columns after it out of alignment. Fields 2 and 3 are
     hidden payload the preview reads: the repo path, then the label again,
     untruncated, since field 1 may have lost the end of it.
 
-    `status` maps an open workspace's label to its agent status; a row absent
-    from it is not open and gets a blank AGENT STATUS column.
+    `status` maps an open workspace's label to its rendered AGENT STATUS cell,
+    already glyphed, coloured and padded by status_cell(). A row absent from it
+    is not open and gets a blank column.
+
+    The touch time arrives on the row from order_rows(). Nothing here may reach
+    for the filesystem to recompute it: doing so walks every working tree a
+    second time and doubles the wait before the picker paints.
     """
     lines = []
-    for label, path in rows:
-        mark = f"● {status[label]}" if label in status else ""
+    for label, path, touched in rows:
         lines.append(ROW.format(elide(label, LABEL_WIDTH), kind(path),
-                                human_age(touched_at(path), now), mark,
+                                human_age(touched, now), status.get(label, ""),
                                 path, label))
     return lines
 
@@ -432,13 +748,17 @@ def main():
         return f"{os.path.basename(os.path.dirname(p))}/{b}" if b in dupes else b
 
     _, open_ws = open_workspaces()
-    status = {w["label"]: w.get("agent_status", "") for w in open_ws}
+    icons, colours = resolve_theme()
+    status = {w["label"]: status_cell(w.get("agent_status", "unknown"), icons, colours)
+              for w in open_ws}
     head, rest = order_rows([(label_for(p), p) for p in paths], open_ws)
 
     lines = build_lines(head + rest, status, time.time())
 
     sel = subprocess.run(
-        ["fzf", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
+        # --ansi: the AGENT STATUS cell carries Herdr's own colour escapes.
+        # Without it fzf prints them literally and the columns fall apart.
+        ["fzf", "--ansi", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
          "--multi", "--prompt=filter projects > ",
          "--header=" + HEADER,
          "--bind", KEYS,
