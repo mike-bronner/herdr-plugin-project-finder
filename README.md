@@ -101,7 +101,8 @@ herdr() {
     (
       for _ in {1..200}; do
         if command herdr status server 2>/dev/null | grep -q 'status: running'; then
-          command herdr plugin pane open --plugin mikebronner.project-finder --entrypoint picker >/dev/null 2>&1 && exit 0
+          out=$(command herdr plugin pane open --plugin mikebronner.project-finder --entrypoint picker 2>&1) && exit 0
+          [[ $out == *ui_busy* ]] && exit 0
         fi
         sleep 0.05
       done
@@ -116,6 +117,12 @@ opens the picker in about 13 ms, where sleeping first paid a flat 250 ms before
 the first check on every launch. The waiter still gives the server about ten
 seconds, so cold and warm starts behave the same.
 `HERDR_NO_PICKER=1 herdr` skips it, and Esc in the picker changes nothing.
+
+The `ui_busy` check is not optional. Herdr holds **one** popup pane globally, and
+refuses a second with that error code. A waiter that retries it stays alive
+failing, then takes the slot the moment you dismiss whatever popup was already
+up — which looks exactly like the picker opening twice. Any other failure means
+the server is not ready yet, and is worth retrying.
 
 ## Configure
 
