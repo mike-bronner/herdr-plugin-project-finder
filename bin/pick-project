@@ -469,8 +469,42 @@ def human_age(ts, now):
     return f"{int(d // 604800)}w ago"
 
 
+def live_agent_names():
+    """The agent names Herdr would refuse a new `agent start` for.
+
+    `name` is optional on Herdr's AgentInfo and is ABSENT, not null, for an
+    agent Herdr merely DETECTED rather than one started under a name: a
+    `claude` typed into a pane by hand, or an agent brought back by
+    resume_agents_on_restore. Such an agent holds no name and so cannot be
+    collided with, which is why those are dropped rather than seeding the set
+    with None. Verified against 0.8.2 on a scratch session: after
+    `agent start probe-alpha`, `agent list` carried "name": "probe-alpha", and
+    a second agent started by hand in another pane carried no "name" key at all.
+
+    The listing is fetched here rather than passed in so that main() holds no
+    copy of this comprehension to drift back to.
+
+    An unreadable listing yields no names, which fails OPEN: the worst outcome
+    is one `agent start` refused, against a picker that would otherwise refuse
+    to open anything because a cosmetic dedupe could not be resolved.
+    """
+    agents = (herdr("agent", "list") or {}).get("agents", [])
+    return {a["name"] for a in agents if a.get("name")}
+
+
 def agent_name(label, taken):
-    """Herdr agent names: [a-z][a-z0-9_-]{0,31}, unique among live agents."""
+    """A Herdr agent name for `label`: [a-z][a-z0-9_-]{0,31}, absent from `taken`.
+
+    Herdr refuses `agent start` under a name a live agent already holds
+    (error code agent_name_taken, 0.8.2). create_workspace() fires those
+    detached, so a refusal is never seen — it shows up only as one pane of a
+    multi-select missing its Claude. Hence the dedupe.
+
+    `taken` is the live names from live_agent_names(), and every name handed
+    out is added to it, so one run cannot collide with itself either. Distinct
+    labels do normalise together: two that differ only past the 32-character
+    cut, or only in a character the substitution folds to "-".
+    """
     n = re.sub(r"[^a-z0-9_-]", "-", label.lower()).strip("-") or "agent"
     if not n[0].isalpha():
         n = "a" + n
@@ -729,6 +763,9 @@ def create_workspace(label, path, live):
     The first tab arrives with the workspace and cannot be labelled at creation
     (`workspace create --label` names the workspace), so it is renamed to
     TAB_LABEL right after. It is then split Claude (left) | shell (right).
+
+    `live` is the set of agent names already spoken for, and is MUTATED: the
+    name this call takes is reserved in it, so the caller's next create sees it.
     """
     res = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
     if not res:
@@ -820,7 +857,11 @@ def main():
         if herdr("workspace", "close", w["workspace_id"]) is not None:
             closed.append(w["workspace_id"])
 
-    live = {a.get("name") for a in (herdr("agent", "list") or {}).get("agents", [])}
+    # Read after the closes above, so a name the user just freed is reusable.
+    # One set for the whole batch: agent start is fired detached and does not
+    # land in `agent list` before the next create, so agent_name() reserving
+    # into this set is the only thing keeping two new workspaces apart.
+    live = live_agent_names()
     created = [create_workspace(label, path_of[label], live) for label in to_create]
 
     focused = next((w["workspace_id"] for w in open_ws if w.get("focused")), None)
