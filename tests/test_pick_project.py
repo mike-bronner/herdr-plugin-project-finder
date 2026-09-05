@@ -363,6 +363,16 @@ class Repos(unittest.TestCase):
                          sorted([os.path.join(root, "myrepo"),
                                  os.path.join(root, "forks", "repo")]))
 
+    def test_a_nested_repo_sorting_ahead_of_its_parent_is_still_skipped(self):
+        # Pins what the depth banding buys: the skip needs the parent in `out`
+        # before anything inside it, and globbing depth by depth is what
+        # guarantees that. One flat recursive glob would not, however it is
+        # sorted, because "a/-x" sorts ahead of its own parent "a" and would
+        # leak through. Same ASCII boundary as the prefix-sibling case below:
+        # any name starting below "/" (0x2F) sorts against you.
+        root, found = self.discover(repos=["a", "a/-x"])
+        self.assertEqual(found, [os.path.join(root, "a")])
+
     def test_a_sibling_sharing_a_name_prefix_is_not_mistaken_for_nesting(self):
         # The skip compares against parent + os.sep, so "myrepo_old" must not
         # read as living inside "myrepo". The suffix has to sort AFTER "/" for

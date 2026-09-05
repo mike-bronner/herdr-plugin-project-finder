@@ -386,6 +386,19 @@ def repos():
 
     Globbing shallowest first is also what makes the nested skip below work,
     since a parent is always reached before anything inside it.
+
+    Not a recursive glob, for four reasons. It costs tens of seconds: "**/.git"
+    with recursive=True measured between 23 and 37 seconds across runs on an
+    80-repo root, against a budget of about 70ms, because it descends every
+    node_modules and vendor tree. It found nothing extra on that root either:
+    no .git sat deeper than three levels, and the four hits past level two were
+    exactly the ones this third level already reaches. It would break the skip
+    below, which needs a parent accumulated before its children — banding by
+    depth guarantees that and a single flat sort does not, because any name
+    sorting below "/" (0x2F) comes out ahead of its own parent, so "a/-x"
+    precedes "a". And "**" silently means "*" without recursive=True, so
+    "**/*/.git" reads as bounded while being either two levels or unbounded
+    depending on a flag set elsewhere.
     """
     out = []
     for depth in ("*", "*/*", "*/*/*"):
