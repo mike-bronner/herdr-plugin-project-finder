@@ -5,7 +5,7 @@ Fuzzy-pick git repos and open them as workspaces in
 
 ## What it does
 
-`bin/pick-project` opens an fzf popup listing every git repo up to two levels
+`bin/pick-project` opens an fzf popup listing every git repo up to three levels
 under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere). Open
 workspaces are listed first and pre-selected, so what is checked is exactly
 what is loaded.
@@ -18,8 +18,11 @@ The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
 
 A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
-kept beside its parent is recognisable at a glance. The filter searches the
-whole visible row, so typing `worktree` narrows the list to worktrees.
+is recognisable at a glance. The third level is what reaches Herdr's own
+worktrees, which it creates at `<worktrees.directory>/<repo>/<branch-slug>`.
+Anything nested inside a repo is skipped, so a worktree or submodule kept under
+its own parent is not listed twice. The filter searches the whole visible row,
+so typing `worktree` narrows the list to worktrees.
 
 An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
@@ -134,7 +137,7 @@ $EDITOR "$(herdr plugin config-dir mikebronner.project-finder)/.env"
 ```
 
 ```sh
-# Where to look for git repos, searched two levels deep. Default: ~
+# Where to look for git repos, searched three levels deep. Default: ~
 HERDR_PICKER_ROOT=~/Developer
 
 # Label of the pinned workspace that is never listed and never closed.

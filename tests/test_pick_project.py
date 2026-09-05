@@ -298,6 +298,82 @@ class ResolveRoot(unittest.TestCase):
                 self.assertEqual(pp.resolve_root(), d)
 
 
+class Repos(unittest.TestCase):
+    """Discovery under the root: how deep it reaches, and what it skips.
+
+    repos() reads the module-level DEV, which is bound at import, so each case
+    builds a scratch root and patches DEV at it.
+    """
+
+    def discover(self, repos=(), worktrees=()):
+        """(root, repos()) for a scratch root holding these projects.
+
+        Both arguments are paths relative to the root, at any depth. A `repos`
+        entry gets a .git DIRECTORY and a `worktrees` entry gets a .git FILE
+        with a gitdir: pointer, which is the difference kind() reads, so a
+        discovered path can be handed straight to it.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for rel in repos:
+            os.makedirs(os.path.join(tmp.name, rel, ".git"))
+        for rel in worktrees:
+            os.makedirs(os.path.join(tmp.name, rel))
+            with open(os.path.join(tmp.name, rel, ".git"), "w", encoding="utf-8") as f:
+                f.write("gitdir: /x/parent/.git/worktrees/wt\n")
+        with mock.patch.object(pp, "DEV", tmp.name):
+            return tmp.name, pp.repos()
+
+    def test_a_repo_directly_under_the_root_is_found(self):
+        root, found = self.discover(repos=["myrepo"])
+        self.assertEqual(found, [os.path.join(root, "myrepo")])
+
+    def test_a_repo_inside_a_grouping_dir_is_found(self):
+        root, found = self.discover(repos=["forks/myrepo"])
+        self.assertEqual(found, [os.path.join(root, "forks", "myrepo")])
+
+    def test_a_herdr_worktree_three_levels_down_is_found(self):
+        # Herdr creates worktrees at <worktrees.directory>/<repo>/<branch-slug>,
+        # which is three levels under the root on the default layout. Two levels
+        # of globbing never reached them.
+        root, found = self.discover(repos=["myrepo"],
+                                    worktrees=["worktrees/myrepo/feat-x"])
+        self.assertEqual(sorted(found),
+                         sorted([os.path.join(root, "myrepo"),
+                                 os.path.join(root, "worktrees", "myrepo", "feat-x")]))
+
+    def test_a_worktree_found_three_levels_down_is_tagged_worktree(self):
+        # The KIND column is the point of finding them, so the classification
+        # is pinned on a path discovery actually produced, not a handmade one.
+        root, found = self.discover(worktrees=["worktrees/myrepo/feat-x"])
+        self.assertEqual([pp.kind(p) for p in found], ["worktree"])
+
+    def test_a_fourth_level_is_not_searched(self):
+        # Bounds the depth, so gaining a fifth stat pass stays a deliberate act.
+        _, found = self.discover(repos=["a/b/c/d"])
+        self.assertEqual(found, [])
+
+    def test_a_repo_nested_inside_a_repo_is_skipped(self):
+        # The third level puts a submodule or a vendored checkout in reach for
+        # the first time, under a parent at either of the shallower depths.
+        # Shallowest-first globbing is what has the parent already in `out`.
+        root, found = self.discover(repos=["myrepo", "myrepo/vendor/pkg",
+                                           "forks/repo", "forks/repo/sub"])
+        self.assertEqual(sorted(found),
+                         sorted([os.path.join(root, "myrepo"),
+                                 os.path.join(root, "forks", "repo")]))
+
+    def test_a_sibling_sharing_a_name_prefix_is_not_mistaken_for_nesting(self):
+        # The skip compares against parent + os.sep, so "myrepo_old" must not
+        # read as living inside "myrepo". The suffix has to sort AFTER "/" for
+        # this to bite: the shorter name must already be in `out` when the
+        # longer one is tested, and "myrepo-fork" would sort ahead of it.
+        root, found = self.discover(repos=["myrepo", "myrepo_old"])
+        self.assertEqual(sorted(found),
+                         sorted([os.path.join(root, "myrepo"),
+                                 os.path.join(root, "myrepo_old")]))
+
+
 class Kind(unittest.TestCase):
     """Repo vs. linked worktree, decided by the shape of .git."""
 

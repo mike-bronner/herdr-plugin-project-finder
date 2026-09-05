@@ -366,7 +366,7 @@ def herdr(*args):
 
 
 def repos():
-    """Every git repo up to 2 levels under the configured root.
+    """Every git repo up to 3 levels under the configured root.
 
     Deliberately not hardcoded to any grouping folder: repos live both directly
     under the root and inside grouping dirs, and those groupings get
@@ -374,9 +374,21 @@ def repos():
     worktree placed inside its parent is not listed twice. A worktree kept
     beside its parent is a project in its own right and is listed, tagged
     "worktree" by kind().
+
+    The third level is Herdr's own worktrees. Herdr creates them at
+    <worktrees.directory>/<repo>/<branch-slug>, which is three levels down
+    whenever that directory sits under the picker root. Reading [worktrees]
+    directory out of config.toml and globbing only there would be cheaper, but
+    it would then find worktrees ONLY there, and how deep this walks should not
+    hang off one setting. A fourth level is not searched: the depths are
+    globbed shallowest first, and each one costs a full stat pass over
+    everything at that level, so they are not free to keep adding.
+
+    Globbing shallowest first is also what makes the nested skip below work,
+    since a parent is always reached before anything inside it.
     """
     out = []
-    for depth in ("*", "*/*"):
+    for depth in ("*", "*/*", "*/*/*"):
         for g in sorted(glob.glob(os.path.join(DEV, depth, ".git"))):
             p = os.path.dirname(g)
             if any(p.startswith(o + os.sep) for o in out):
