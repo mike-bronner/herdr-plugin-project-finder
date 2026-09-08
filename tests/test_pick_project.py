@@ -126,7 +126,7 @@ class ParseSelection(unittest.TestCase):
 
     def test_sentinel_wins_over_cursor_line(self):
         # fzf still prints the highlighted row when nothing is selected.
-        out = f"{pp.EMPTY}\nzed-laravel   3m ago  \t/x/zed-laravel\n"
+        out = f"{pp.EMPTY}\ncursor-row   3m ago  \t/x/cursor-row\n"
         self.assertEqual(pp.parse_selection(0, out), [])
 
     def test_paths_extracted(self):
@@ -254,7 +254,7 @@ class AgentName(unittest.TestCase):
     def test_illegal_characters_become_hyphens(self):
         # A duplicated basename is labelled "<parent>/<name>", and a dot is
         # legal in a directory name but not in an agent name.
-        self.assertEqual(pp.agent_name("forks/my.repo", set()), "forks-my-repo")
+        self.assertEqual(pp.agent_name("group-a/my.repo", set()), "group-a-my-repo")
 
     def test_leading_and_trailing_hyphens_are_stripped(self):
         self.assertEqual(pp.agent_name(".hidden.", set()), "hidden")
@@ -276,9 +276,10 @@ class AgentName(unittest.TestCase):
         self.assertEqual(pp.agent_name("_private", set()), "a_private")
 
     def test_a_long_label_is_cut_to_the_32_character_limit(self):
-        # A real Herdr worktree label, and the name the picker gave it.
-        name = pp.agent_name("extract-greek-lemmas-from-lexicon", set())
-        self.assertEqual(name, "extract-greek-lemmas-from-lexico")
+        # A worktree label one character past the limit, and the name the
+        # picker gave it.
+        name = pp.agent_name("label-that-exceeds-the-name-limit", set())
+        self.assertEqual(name, "label-that-exceeds-the-name-limi")
         self.assertEqual(len(name), 32)
 
     def test_a_taken_name_gains_a_numeric_suffix(self):
@@ -315,10 +316,10 @@ class AgentName(unittest.TestCase):
         # The collision the picker actually meets: Herdr's worktree labels are
         # long and share their repo-name prefix, so they truncate together.
         taken = set()
-        a = pp.agent_name("bible-models-update-for-migrations-step-one", taken)
-        b = pp.agent_name("bible-models-update-for-migrations-step-two", taken)
-        self.assertEqual(a, "bible-models-update-for-migratio")
-        self.assertEqual(b, "bible-models-update-for-migrat-2")
+        a = pp.agent_name("same-first-thirty-two-characters-one", taken)
+        b = pp.agent_name("same-first-thirty-two-characters-two", taken)
+        self.assertEqual(a, "same-first-thirty-two-characters")
+        self.assertEqual(b, "same-first-thirty-two-characte-2")
 
 
 class CreateWorkspace(unittest.TestCase):
@@ -646,8 +647,8 @@ class Repos(unittest.TestCase):
         self.assertEqual(found, [os.path.join(root, "myrepo")])
 
     def test_a_repo_inside_a_grouping_dir_is_found(self):
-        root, found = self.discover(repos=["forks/myrepo"])
-        self.assertEqual(found, [os.path.join(root, "forks", "myrepo")])
+        root, found = self.discover(repos=["group-a/myrepo"])
+        self.assertEqual(found, [os.path.join(root, "group-a", "myrepo")])
 
     def test_a_herdr_worktree_three_levels_down_is_found(self):
         # Herdr creates worktrees at <worktrees.directory>/<repo>/<branch-slug>,
@@ -675,10 +676,10 @@ class Repos(unittest.TestCase):
         # the first time, under a parent at either of the shallower depths.
         # Shallowest-first globbing is what has the parent already in `out`.
         root, found = self.discover(repos=["myrepo", "myrepo/vendor/pkg",
-                                           "forks/repo", "forks/repo/sub"])
+                                           "group-a/repo", "group-a/repo/sub"])
         self.assertEqual(sorted(found),
                          sorted([os.path.join(root, "myrepo"),
-                                 os.path.join(root, "forks", "repo")]))
+                                 os.path.join(root, "group-a", "repo")]))
 
     def test_a_nested_repo_sorting_ahead_of_its_parent_is_still_skipped(self):
         # Pins what the depth banding buys: the skip needs the parent in `out`
@@ -805,20 +806,20 @@ class Repos(unittest.TestCase):
     def test_a_worktree_beside_its_repo_is_found(self):
         # End to end, through the real read_toml() and herdr_config_path().
         root, found = self.sibling(
-            repos=["Insight/tru-data"],
-            worktrees=["Insight/worktrees/tru-data/feat-x"])
+            repos=["group-a/repo-one"],
+            worktrees=["group-a/worktrees/repo-one/feat-x"])
         self.assertEqual(
             sorted(found),
-            sorted([os.path.join(root, "Insight", "tru-data"),
-                    os.path.join(root, "Insight", "worktrees", "tru-data",
+            sorted([os.path.join(root, "group-a", "repo-one"),
+                    os.path.join(root, "group-a", "worktrees", "repo-one",
                                  "feat-x")]))
 
     def test_a_worktree_beside_its_repo_is_tagged_worktree(self):
         # The KIND column is the point of finding them, pinned on a path
         # discovery actually produced rather than a handmade one.
         root, found = self.sibling(
-            repos=["Insight/tru-data"],
-            worktrees=["Insight/worktrees/tru-data/feat-x"])
+            repos=["group-a/repo-one"],
+            worktrees=["group-a/worktrees/repo-one/feat-x"])
         beside = [p for p in found if os.sep + "worktrees" + os.sep in p]
         self.assertEqual([pp.kind(p) for p in beside], ["worktree"])
 
@@ -828,16 +829,16 @@ class Repos(unittest.TestCase):
         # against the root would find one of these two at most, and the fixture
         # is shaped so that neither container sits where the other repo looks.
         root, found = self.sibling(
-            repos=["Insight/tru-data", "Sites/data-importer"],
-            worktrees=["Insight/worktrees/tru-data/feat-x",
-                       "Sites/worktrees/data-importer/feat-y"])
+            repos=["group-a/repo-one", "group-b/repo-two"],
+            worktrees=["group-a/worktrees/repo-one/feat-x",
+                       "group-b/worktrees/repo-two/feat-y"])
         self.assertEqual(
             sorted(found),
-            sorted([os.path.join(root, "Insight", "tru-data"),
-                    os.path.join(root, "Sites", "data-importer"),
-                    os.path.join(root, "Insight", "worktrees", "tru-data",
+            sorted([os.path.join(root, "group-a", "repo-one"),
+                    os.path.join(root, "group-b", "repo-two"),
+                    os.path.join(root, "group-a", "worktrees", "repo-one",
                                  "feat-x"),
-                    os.path.join(root, "Sites", "worktrees", "data-importer",
+                    os.path.join(root, "group-b", "worktrees", "repo-two",
                                  "feat-y")]))
 
     def test_a_sibling_container_the_depth_bands_also_reach_lists_once(self):
@@ -865,21 +866,21 @@ class Repos(unittest.TestCase):
         # <root>/worktrees/<repo>/<slug>, and the new sibling
         # <parent>/worktrees/<repo>/<slug>.
         root, found = self.sibling(
-            repos=["Insight/tru-data", "zed-laravel"],
-            worktrees=["zed-laravel/.claude/worktrees/route-not-found-1a2b",
-                       "Insight/tru-data/.worktrees/tru-data/feat-old",
-                       "worktrees/zed-laravel/feat-flat",
-                       "Insight/worktrees/tru-data/feat-new"])
+            repos=["group-a/repo-one", "repo-two"],
+            worktrees=["repo-two/.claude/worktrees/slug-1a2b",
+                       "group-a/repo-one/.worktrees/repo-one/feat-old",
+                       "worktrees/repo-two/feat-flat",
+                       "group-a/worktrees/repo-one/feat-new"])
         self.assertEqual(
             sorted(found),
-            sorted([os.path.join(root, "Insight", "tru-data"),
-                    os.path.join(root, "zed-laravel"),
-                    os.path.join(root, "zed-laravel", ".claude", "worktrees",
-                                 "route-not-found-1a2b"),
-                    os.path.join(root, "Insight", "tru-data", ".worktrees",
-                                 "tru-data", "feat-old"),
-                    os.path.join(root, "worktrees", "zed-laravel", "feat-flat"),
-                    os.path.join(root, "Insight", "worktrees", "tru-data",
+            sorted([os.path.join(root, "group-a", "repo-one"),
+                    os.path.join(root, "repo-two"),
+                    os.path.join(root, "repo-two", ".claude", "worktrees",
+                                 "slug-1a2b"),
+                    os.path.join(root, "group-a", "repo-one", ".worktrees",
+                                 "repo-one", "feat-old"),
+                    os.path.join(root, "worktrees", "repo-two", "feat-flat"),
+                    os.path.join(root, "group-a", "worktrees", "repo-one",
                                  "feat-new")]))
 
     def test_a_bare_parent_container_admits_only_worktrees(self):
@@ -1316,35 +1317,32 @@ class ParentRepo(unittest.TestCase):
             f.write(pointer)
         return checkout, pp.parent_repo(checkout)
 
-    # The three real pointers on this machine, copied verbatim. All three
-    # layouts place the CHECKOUT differently and the admin path identically,
-    # which is the whole reason one parse serves them all. Herdr's sibling
-    # <parent>/worktrees/<repo>/<slug> gets no fixture of its own for exactly
-    # that reason: its pointer is byte-identical in shape to the flat one
-    # below, so a fourth copy would assert the same parse twice.
+    # The three pointer shapes a real machine writes, over placeholder paths.
+    # All three layouts place the CHECKOUT differently and the admin path
+    # identically, which is the whole reason one parse serves them all.
+    # Herdr's sibling <parent>/worktrees/<repo>/<slug> gets no fixture of its
+    # own for exactly that reason: its pointer is byte-identical in shape to
+    # the flat one below, so a fourth copy would assert the same parse twice.
 
     def test_the_repository_nested_layout_yields_the_parent(self):
         # Herdr's, while [worktrees] directory is ".worktrees": the checkout
         # lives at <repo>/.worktrees/<repo>/<slug>.
         _, parent = self.derive(
-            "gitdir: /Users/mike/Developer/Insight/tru-data/.git/worktrees/"
-            "performance-optimizations\n")
-        self.assertEqual(parent, "/Users/mike/Developer/Insight/tru-data")
+            "gitdir: /x/code/group-a/repo-one/.git/worktrees/feat-x\n")
+        self.assertEqual(parent, "/x/code/group-a/repo-one")
 
     def test_the_flat_layout_yields_the_parent(self):
         # The checkout sits under <root>/worktrees/<repo>/<slug>, nowhere near
         # its repo. These rows nest correctly in the sidebar today only because
         # Herdr opened them; through the picker they floated like the rest.
         _, parent = self.derive(
-            "gitdir: /Users/mike/Developer/Sites/data-importer/.git/worktrees/"
-            "lexicon-import-parse-layer\n")
-        self.assertEqual(parent, "/Users/mike/Developer/Sites/data-importer")
+            "gitdir: /x/code/group-b/repo-two/.git/worktrees/feat-y\n")
+        self.assertEqual(parent, "/x/code/group-b/repo-two")
 
     def test_claude_codes_layout_yields_the_parent(self):
         _, parent = self.derive(
-            "gitdir: /Users/mike/Developer/zed-laravel/.git/worktrees/"
-            "route-not-found-1610e5\n")
-        self.assertEqual(parent, "/Users/mike/Developer/zed-laravel")
+            "gitdir: /x/code/repo-three/.git/worktrees/slug-1a2b\n")
+        self.assertEqual(parent, "/x/code/repo-three")
 
     def test_a_relative_pointer_is_resolved_against_the_checkout(self):
         # `git worktree add --relative-paths`, and the worktree.useRelativePaths
@@ -1434,7 +1432,8 @@ class Elide(unittest.TestCase):
     def test_the_front_is_kept_not_the_tail(self):
         # Dupe labels carry a "parent/" prefix that makes them unique, so the
         # head is the one part that must survive.
-        self.assertTrue(pp.elide("Sites/very-long-project", 12).startswith("Sites/"))
+        cut = pp.elide("group-a/a-project-with-a-very-long-name", 12)
+        self.assertTrue(cut.startswith("group-a/"))
 
 
 class Row(unittest.TestCase):

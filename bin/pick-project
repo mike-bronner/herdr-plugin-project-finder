@@ -576,7 +576,7 @@ def elide(text, width):
     """`text` cut to `width` columns, ending in "…" when anything was removed.
 
     The tail goes rather than the head: these labels are identified by their
-    front ("jetstream-profile-picture…"), and a dupe label carries its parent
+    front ("invoice-pdf-export-service…"), and a dupe label carries its parent
     dir as a prefix, which head-truncation would be the one thing to destroy.
     The result is never wider than `width`, so a long label cannot push the
     columns after it out of alignment.
