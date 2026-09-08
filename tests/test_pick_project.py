@@ -2,7 +2,7 @@
 
 Run: python3 -m unittest discover tests
 """
-import importlib.machinery, importlib.util, io, os, sys, tempfile, unittest
+import importlib.machinery, importlib.util, io, os, sys, tempfile, time, unittest
 from unittest import mock
 
 # Must be set before the loader below runs. A .pyc is treated as valid while
@@ -481,16 +481,22 @@ class ResolveRoot(unittest.TestCase):
 
 
 class Repos(unittest.TestCase):
-    """Discovery under the root: how deep it reaches, and what it skips.
+    """Discovery under the root: how deep it reaches, what it skips, and what
+    each of its two passes contributed.
 
     repos() reads the module-level DEV, which is bound at import, so each case
     builds a scratch root and patches DEV at it.
     """
 
-    def discover(self, repos=(), worktrees=(), dirs=None, roots=None):
+    def discover(self, repos=(), worktrees=(), dirs=None, roots=None, counts=None):
         """(root, repos()) for a scratch root holding these projects.
 
         Both project arguments are paths relative to the root, at any depth.
+
+        `counts` is the optional per-pass tally dict, forwarded only when one is
+        given: the no-argument call is repos()' own default and every other case
+        here keeps exercising it, so dropping the argument entirely would leave
+        the default signature untested.
 
         The container settings are patched rather than inherited, since
         WORKTREE_DIRS is bound at import from the developer's own Herdr
@@ -512,7 +518,7 @@ class Repos(unittest.TestCase):
                                list(pp.FIXED_WORKTREE_DIRS) if dirs is None else dirs), \
              mock.patch.object(pp, "WORKTREE_ROOTS",
                                [os.path.join(tmp.name, r) for r in roots or ()]):
-            return tmp.name, pp.repos()
+            return tmp.name, (pp.repos() if counts is None else pp.repos(counts))
 
     def test_a_repo_directly_under_the_root_is_found(self):
         root, found = self.discover(repos=["myrepo"])
@@ -664,6 +670,176 @@ class Repos(unittest.TestCase):
                                     roots=["worktrees"])
         self.assertEqual(found, [os.path.join(root, "myrepo"),
                                  os.path.join(root, "worktrees", "myrepo", "feat-x")])
+
+    # The per-pass tally: the same two passes seen from the other side.
+
+    def tally(self, **kwargs):
+        """(repos(), counts) for a scratch root holding these projects."""
+        counts = {}
+        _, found = self.discover(counts=counts, **kwargs)
+        return found, counts
+
+    # Both passes contribute, and the band pass returns a worktree as well as a
+    # repo: Herdr's flat <root>/worktrees/<repo>/<slug> is three levels down, so
+    # the depth bands reach it. That is the case the reported wording has to
+    # survive — "2 repos" would be a lie about this tree.
+    MIXED_PASSES = {"repos": ["myrepo"],
+                    "worktrees": ["worktrees/myrepo/feat-x",
+                                  "myrepo/.worktrees/myrepo/feat-y"]}
+
+    def test_each_pass_reports_what_it_contributed(self):
+        found, counts = self.tally(**self.MIXED_PASSES)
+        self.assertEqual(len(found), 3)
+        self.assertEqual(counts, {"bands": 2, "containers": 1})
+
+    def test_the_two_figures_account_for_every_row(self):
+        # The debug line reports the row total beside the split, so a split that
+        # does not add up to it would be visibly wrong.
+        found, counts = self.tally(**self.MIXED_PASSES)
+        self.assertEqual(counts["bands"] + counts["containers"], len(found))
+
+    def test_a_pass_that_found_nothing_reports_zero(self):
+        # Both keys are always present: debug_discovery() indexes them, so an
+        # omitted key would raise instead of printing.
+        found, counts = self.tally(repos=["myrepo"])
+        self.assertEqual((len(found), counts), (1, {"bands": 1, "containers": 0}))
+
+    def test_nothing_found_at_all_reports_two_zeroes(self):
+        found, counts = self.tally()
+        self.assertEqual((found, counts), ([], {"bands": 0, "containers": 0}))
+
+
+class DebugDiscovery(unittest.TestCase):
+    """The HERDR_PICKER_DEBUG line: silent by default, one line when asked for."""
+
+    def report(self, flag=None, paths=("/x/a", "/x/b", "/x/c"),
+               counts=None, elapsed=0.0264):
+        """What one debug_discovery() call writes, as text.
+
+        A `flag` of None leaves HERDR_PICKER_DEBUG unset. clear=True either way,
+        so the developer's own environment cannot decide the outcome.
+        """
+        out = io.StringIO()
+        env = {} if flag is None else {"HERDR_PICKER_DEBUG": flag}
+        with mock.patch.dict(os.environ, env, clear=True):
+            pp.debug_discovery(elapsed, list(paths),
+                               counts or {"bands": 2, "containers": 1}, out)
+        return out.getvalue()
+
+    def test_unset_writes_nothing(self):
+        # The default path for every normal run: a popup pane that writes
+        # uninvited is the thing this gate exists to prevent.
+        self.assertEqual(self.report(), "")
+
+    def test_an_empty_value_writes_nothing(self):
+        # What "HERDR_PICKER_DEBUG=" in the .env file leaves behind. It has to
+        # read as off, the way an empty HERDR_PICKER_ROOT reads as unset.
+        self.assertEqual(self.report(flag=""), "")
+
+    def test_the_elapsed_seconds_are_reported_as_milliseconds(self):
+        # 0.0264s is the measured figure from the real root, in the units the
+        # repos() docstring quotes. A raw-seconds line would read "0.0ms".
+        self.assertIn("26.4ms", self.report(flag="1"))
+
+    def test_the_row_total_and_both_passes_are_reported(self):
+        text = self.report(flag="1")
+        self.assertIn("3 rows", text)
+        self.assertIn("2 from depth bands", text)
+        self.assertIn("1 from worktree containers", text)
+
+    def test_the_row_total_is_the_rows_not_the_sum_of_the_passes(self):
+        # Pins which of the two the figure comes from, so an inconsistency
+        # between the list and the tally shows up instead of being smoothed.
+        self.assertIn("3 rows", self.report(flag="1",
+                                            counts={"bands": 1, "containers": 1}))
+
+    def test_it_is_one_line(self):
+        text = self.report(flag="1")
+        self.assertEqual(text.count("\n"), 1)
+        self.assertTrue(text.endswith("\n"), text)
+
+    def test_it_names_the_picker(self):
+        # The line can land in a shared terminal, so it says whose it is.
+        self.assertTrue(self.report(flag="1").startswith("picker: "))
+
+    def test_the_default_stream_is_stderr(self):
+        # Where every other writer in the script goes. Not stdout: that is the
+        # stream a caller piping the picker would be reading.
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"HERDR_PICKER_DEBUG": "1"}, clear=True), \
+             mock.patch.object(pp.sys, "stderr", err):
+            pp.debug_discovery(0.0264, ["/x/a"], {"bands": 1, "containers": 0})
+        self.assertIn("picker: discovery", err.getvalue())
+
+
+class DebugLineFromARealRun(unittest.TestCase):
+    """What driving main() shows that a unit test of the line cannot: where the
+    write lands in the sequence, and what the timer is wrapped around.
+
+    fzf paints the popup over the whole pane, so anything written while it owns
+    the screen garbles the list. The write has to be on the near side of that
+    subprocess call.
+    """
+
+    def run_main(self, env, delay=0):
+        """Every write and every subprocess call main() makes, in order.
+
+        `delay` is seconds that discovery is made to take, so the reported figure
+        can be held against a known floor.
+        """
+        events = []
+
+        class Recorder(io.StringIO):
+            def write(self, text):
+                events.append(("write", text))
+                return super().write(text)
+
+        def fake_run(argv, **kwargs):
+            events.append(("run", argv[0]))
+            # 130 is Esc: parse_selection() reads it as cancelled, so main()
+            # returns without touching a workspace.
+            return mock.Mock(returncode=130, stdout="")
+
+        def fake_repos(counts=None):
+            time.sleep(delay)
+            if counts is not None:
+                counts.update({"bands": 2, "containers": 1})
+            return ["/x/a", "/x/b", "/x/c"]
+
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(pp, "HERDR", "/bin/herdr"), \
+             mock.patch.object(pp, "ensure_fzf", return_value=True), \
+             mock.patch.object(pp, "repos", side_effect=fake_repos), \
+             mock.patch.object(pp, "open_workspaces", return_value=(None, [])), \
+             mock.patch.object(pp, "resolve_theme", return_value=({}, {})), \
+             mock.patch.object(pp, "order_rows", return_value=([], [])), \
+             mock.patch.object(pp, "build_lines", return_value=[]), \
+             mock.patch.object(pp.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(pp.sys, "stderr", Recorder()):
+            pp.main()
+        return events
+
+    def test_the_line_is_written_before_fzf_starts(self):
+        events = self.run_main({"HERDR_PICKER_DEBUG": "1"})
+        self.assertEqual([kind for kind, _ in events], ["write", "run"])
+        self.assertIn("picker: discovery", events[0][1])
+        self.assertEqual(events[1][1], "fzf")
+
+    def test_an_ordinary_run_writes_nothing_at_all(self):
+        # The whole-run version of the gate: fzf still starts, and not one byte
+        # reaches the pane before it.
+        events = self.run_main({})
+        self.assertEqual(events, [("run", "fzf")])
+
+    def test_the_reported_time_is_the_time_discovery_took(self):
+        # The central claim, and the one thing no assertion on the text can
+        # show: the clock has to be started before repos() and read after it.
+        # A timer that brackets anything else reports a figure near zero, so
+        # discovery is made to take a known minimum and the figure held above
+        # it. No upper bound: the scheduler owns that end.
+        events = self.run_main({"HERDR_PICKER_DEBUG": "1"}, delay=0.02)
+        reported = float(events[0][1].split("discovery ")[1].split("ms")[0])
+        self.assertGreaterEqual(reported, 15.0, events[0][1])
 
 
 class WorktreeLocations(unittest.TestCase):

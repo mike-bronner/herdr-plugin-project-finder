@@ -145,7 +145,7 @@ the server is not ready yet, and is worth retrying.
 
 ## Configure
 
-Both settings are optional. To change one, create a `.env` file in the plugin's
+Every setting is optional. To change one, create a `.env` file in the plugin's
 config directory:
 
 ```sh
@@ -160,6 +160,10 @@ HERDR_PICKER_ROOT=~/Developer
 # Label of the pinned workspace that is never listed and never closed.
 # Default: ~
 HERDR_PICKER_HOME=home
+
+# Report what finding the projects cost. Any value turns it on.
+# Default: unset, and the picker prints nothing at all.
+HERDR_PICKER_DEBUG=1
 ```
 
 Real environment variables win over the file. Values may be quoted, and a
@@ -168,6 +172,29 @@ the beginning of a line, and a line without `=` is ignored.
 
 If `HERDR_PICKER_ROOT` names a folder that does not exist, the picker searches
 the home folder instead of failing.
+
+### Timing the search
+
+`HERDR_PICKER_DEBUG` writes one line to stderr before the list is drawn:
+
+```
+picker: discovery 26.9ms, 90 rows (85 from depth bands, 5 from worktree containers)
+```
+
+The search runs in two passes, and the two figures say what each one
+contributed: the depth bands walk the three levels under the root, and the
+second pass looks inside the worktree containers under every repo the bands
+found. The passes are named rather than what they return, because the bands
+find worktrees as well as repos — a flat `worktrees/<repo>/<branch>` sits three
+levels down, so the bands reach it.
+
+Leave the variable unset and the picker is silent, which is the default for
+every normal run. To read the line it is easier to run the picker from a shell
+than from the popup, since fzf takes the whole pane:
+
+```sh
+HERDR_PICKER_DEBUG=1 python3 bin/pick-project
+```
 
 ## Requires
 

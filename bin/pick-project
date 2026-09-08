@@ -9,9 +9,10 @@ empty selection closes every project so only home remains. Esc changes nothing.
 
 The search root is HERDR_PICKER_ROOT, defaulting to the home folder. The home
 workspace (label "~", override with HERDR_PICKER_HOME) is never listed and
-never closed.
+never closed. Setting HERDR_PICKER_DEBUG reports what finding the repos cost,
+on one line; unset, the picker writes nothing at all.
 
-Both settings may also come from a .env file under HERDR_PLUGIN_CONFIG_DIR;
+Every setting may also come from a .env file under HERDR_PLUGIN_CONFIG_DIR;
 real environment variables take precedence over that file.
 
 Each open project's row carries its agent status, drawn with the glyph and
@@ -411,7 +412,43 @@ def herdr(*args):
         return None
 
 
-def repos():
+def debug_discovery(elapsed, paths, counts, out=None):
+    """Report what repos() cost and what it found, one line, when asked to.
+
+    Silent unless HERDR_PICKER_DEBUG holds something, which is the whole point:
+    every normal run must write nothing at all, because this is a popup pane and
+    unbidden output sits on top of the thing the user opened. Read from
+    os.environ like the other settings here, so the .env file load_env() folds
+    into it can turn this on for good.
+
+    `elapsed` is discovery's elapsed time in SECONDS, reported as milliseconds.
+    Those are the units the figures quoted in repos() are in, and a tenth of a
+    millisecond is already finer than the run-to-run spread.
+
+    The two passes are named by WHERE THEY LOOK, not by what they return.
+    Calling the first figure "repos" would be false on a real tree: the depth
+    bands also find every worktree kept OUTSIDE a container, which includes
+    Herdr's flat <root>/worktrees/<repo>/<slug> layout three levels down. Only
+    the container pass is worktrees exclusively. Each figure reads "N from X"
+    rather than "N Xs" so that a count of one needs no singular form. `paths`
+    supplies the row total rather than a sum of the two, so the line reports
+    what was actually listed.
+
+    Call this only where fzf is not on the screen. fzf paints the popup over the
+    whole pane, so a write arriving mid-render garbles the list the user is
+    trying to read. The rule every writer in this file keeps, rather than a list
+    of them: none runs inside fzf's lifetime. They write before it starts or
+    after it has exited, and this one is on the near side of that call.
+    """
+    if not os.environ.get("HERDR_PICKER_DEBUG"):
+        return
+    (out or sys.stderr).write(
+        f"picker: discovery {elapsed * 1000:.1f}ms, {len(paths)} rows "
+        f"({counts['bands']} from depth bands, "
+        f"{counts['containers']} from worktree containers)\n")
+
+
+def repos(counts=None):
     """Every git repo up to 3 levels under the root, plus the worktrees inside
     them.
 
@@ -459,6 +496,12 @@ def repos():
     silently means "*" without recursive=True, so "**/*/.git" reads as bounded
     while being either two levels or unbounded depending on a flag set
     elsewhere.
+
+    `counts` is an optional dict, MUTATED when given: "bands" and "containers"
+    receive how many paths each pass contributed. The split is free while the
+    passes run and unrecoverable afterwards, since the return value is one flat
+    list, and debug_discovery() reports both figures. Nothing that is found
+    depends on it.
     """
     out = []
     for depth in ("*", "*/*", "*/*/*"):
@@ -468,6 +511,7 @@ def repos():
                 continue          # nested inside a repo we already have
             if p not in out:
                 out.append(p)
+    banded = len(out)
 
     # Both container layouts in one pass: Claude Code puts the worktree
     # straight in the container, Herdr puts it under the repo's own name.
@@ -479,6 +523,10 @@ def repos():
                 w = os.path.dirname(g)
                 if w not in out and kind(w) == "worktree":
                     out.append(w)
+    if counts is not None:
+        # The second pass only ever appends, so the first pass's share is the
+        # length taken before it ran.
+        counts["bands"], counts["containers"] = banded, len(out) - banded
     return out
 
 
@@ -882,7 +930,16 @@ def main():
         die("herdr not found on PATH")
     ensure_fzf()
 
-    paths = repos()
+    # Timed here, and reported here, because this is the one startup cost that
+    # varies with the shape of the tree. perf_counter() rather than time(): it
+    # is monotonic, so a clock adjustment mid-run cannot produce a negative
+    # figure. Reported before the empty check below, since "0 rows" is exactly
+    # the case worth seeing, and long before fzf takes the screen.
+    counts = {}
+    started = time.perf_counter()
+    paths = repos(counts)
+    debug_discovery(time.perf_counter() - started, paths, counts)
+
     if not paths:
         die(f"No git repositories found under {DEV}")
 
