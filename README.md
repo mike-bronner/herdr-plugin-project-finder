@@ -196,8 +196,47 @@ the server is not ready yet, and is worth retrying.
 
 ## Configure
 
-Every setting is optional. To change one, create a `.env` file in the plugin's
-config directory:
+Every setting is optional. The picker's own three settings are written as TOML,
+in the plugin's `config.toml`, so they read like the rest of your Herdr
+configuration:
+
+```sh
+$EDITOR "$(herdr plugin config-dir mikebronner.project-finder)/config.toml"
+```
+
+```toml
+[picker]
+# Where to look for git repos, searched three levels deep, plus the worktrees
+# belonging to each one. Default: ~
+root = "~/Developer"
+
+# Label of the pinned workspace that is never listed and never closed.
+# Default: ~
+home = "home"
+
+# Report what finding the projects cost, on one line.
+# Default: false, and the picker prints nothing at all.
+debug = true
+```
+
+`root` and `home` are strings and `debug` is a boolean, read the same way Herdr
+reads its own: only `true` turns it on, so `debug = 1` leaves it off. A leading
+`~` in `root` is expanded.
+
+That file is **the plugin's own**, in the directory Herdr hands the plugin. It
+is not Herdr's `~/.config/herdr/config.toml`, and these keys do not belong
+there: Herdr's schema names no plugin table, so a `[picker]` section added to it
+makes `herdr config check` report `config: issues found` from then on.
+
+### The `.env` file
+
+The picker's three settings can also be written as environment variables in a
+`.env` file in the same directory, which is where they lived before
+`config.toml`. It still works, so an existing one keeps being read.
+
+The ten `AGENT_LAYOUT_` settings have no `config.toml` key at all, and that is
+deliberate — see [which file a setting belongs
+in](#which-file-a-setting-belongs-in) below.
 
 ```sh
 $EDITOR "$(herdr plugin config-dir mikebronner.project-finder)/.env"
@@ -258,9 +297,51 @@ AGENT_LAYOUT_TOOL_LABEL=lazygit
 AGENT_LAYOUT_SHELL_LABEL=shell
 ```
 
-Real environment variables win over the file. Values may be quoted, and a
-leading `~` in `HERDR_PICKER_ROOT` is expanded. `#` starts a comment only at
-the beginning of a line, and a line without `=` is ignored.
+Values may be quoted, and a leading `~` in `HERDR_PICKER_ROOT` is expanded. `#`
+starts a comment only at the beginning of a line, and a line without `=` is
+ignored.
+
+### Which file a setting belongs in
+
+The split is by **who reads the setting**, not by which file is nicer to edit.
+
+The picker's own three — `root`, `home` and `debug` — are read by this plugin
+and nothing else, so they live in this plugin's `config.toml`.
+
+The ten `AGENT_LAYOUT_` settings are read by **two** plugins: this one, which
+lays out a workspace it opens, and the sibling
+[agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout),
+which lays out a worktree on `worktree.created`. They stay environment-only, and
+deliberately have no key in this plugin's `config.toml`. A value written into
+one plugin's private file is invisible to the other, so giving them a home here
+would let the two drift apart in silence: a workspace opened from the picker
+laid out one way, a worktree created by the sibling laid out another. Herdr's
+plugin docs say plugin commands run as your user and inherit your environment,
+so one export reaches both plugins where no file can.
+
+Export them wherever your Herdr server picks its environment up — your shell
+profile, or the launch agent that starts it:
+
+```sh
+export AGENT_LAYOUT_TOOL_COMMAND=lazygit
+export AGENT_LAYOUT_RATIO=0.5
+```
+
+A `.env` still works for them, and is the right place for a value you want in
+**this** plugin only. It is the wrong place for one you want in both.
+
+### Which setting wins
+
+A real environment variable, then `config.toml`, then `.env`. Setting one in
+your shell overrides both files, for that run only. Where both files name the
+same setting `config.toml` wins, because it is the format these settings moved
+to and a `.env` left behind should not quietly outrank the file replacing it.
+A setting only one file names is taken from that one, so the two merge per
+setting rather than all or nothing.
+
+Neither file has to exist, and neither has to parse. A missing, unreadable or
+malformed one contributes nothing and the picker opens on its defaults: this is
+a popup, and a typo in optional config must never be what stops it appearing.
 
 If `HERDR_PICKER_ROOT` names a folder that does not exist, the picker searches
 the home folder instead of failing.
@@ -314,7 +395,8 @@ one.
 
 ### Timing the search
 
-`HERDR_PICKER_DEBUG` writes one line to stderr before the list is drawn:
+`[picker] debug = true`, or `HERDR_PICKER_DEBUG` set to any value, writes one
+line to stderr before the list is drawn:
 
 ```
 picker: discovery 26.9ms, 90 rows (85 from depth bands, 5 from worktree containers)

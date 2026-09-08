@@ -663,6 +663,15 @@ class LayoutSettings(unittest.TestCase):
         for name, value in self.DEFAULTS.items():
             self.assertEqual(getattr(pp, name), value, name)
 
+    def test_no_layout_setting_has_a_home_in_the_plugins_config_toml(self):
+        # The ownership rule, and the reason these ten stay environment-only
+        # while the picker's own three moved into [picker]: the sibling plugin
+        # reads these same names, and a value written into ONE plugin's private
+        # file is invisible to the other. Folding them into PICKER_KEYS would
+        # let the two lay a workspace out differently and say nothing about it.
+        layout = {f"AGENT_LAYOUT_{name}" for name in self.DEFAULTS}
+        self.assertEqual(set(pp.PICKER_KEYS.values()) & layout, set())
+
     def test_the_readme_documents_every_setting_at_its_default(self):
         # Doc-drift guard, in the shape KeyBindings uses below: adding a
         # setting without documenting it, or changing a default without
@@ -937,6 +946,259 @@ class LoadEnv(unittest.TestCase):
 
     def test_empty_key_is_skipped(self):
         self.assertEqual(self.load("=/x/a\nA=/x/b\n"), {"A": "/x/b"})
+
+
+class LoadPickerConfig(unittest.TestCase):
+    """The [picker] table in the plugin's own config.toml."""
+
+    def load(self, body, env=None):
+        """Write `body` as a config.toml, load it over `env`, return the environ."""
+        with tempfile.TemporaryDirectory() as d:
+            path = write_config(d, body)
+            with mock.patch.dict(os.environ, env or {}, clear=True):
+                pp.load_picker_config(path)
+                return dict(os.environ)
+
+    def test_all_three_settings_are_applied(self):
+        env = self.load('[picker]\nroot = "/x/code"\nhome = "base"\ndebug = true\n')
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/x/code")
+        self.assertEqual(env["HERDR_PICKER_HOME"], "base")
+        self.assertEqual(env["HERDR_PICKER_DEBUG"], "1")
+
+    def test_a_real_env_var_overrides_the_file(self):
+        # The contract at the top of the module: a variable set for one run wins.
+        env = self.load('[picker]\nroot = "/from/file"\n',
+                        {"HERDR_PICKER_ROOT": "/from/env"})
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env")
+
+    def test_only_the_named_settings_are_applied(self):
+        # Whole-environ, so an unknown key under [picker] cannot quietly become
+        # an environment variable of its own.
+        env = self.load('[picker]\nroot = "/x/code"\nnonsense = "boom"\n')
+        self.assertEqual(env, {"HERDR_PICKER_ROOT": "/x/code"})
+
+    def test_a_key_outside_the_picker_table_is_not_claimed(self):
+        # read_toml() qualifies by table, and this pins that the picker relies
+        # on it: a root under some other table must not answer for picker.root.
+        env = self.load('[worktrees]\nroot = "/x/wrong"\n\n'
+                        '[picker]\nroot = "/x/right"\n')
+        self.assertEqual(env, {"HERDR_PICKER_ROOT": "/x/right"})
+
+    def test_a_missing_file_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                pp.load_picker_config(os.path.join(d, "config.toml"))  # never created
+                self.assertEqual(dict(os.environ), {})
+
+    def test_an_unreadable_path_is_a_noop(self):
+        # A directory where a file is expected: OSError, not a crash.
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                pp.load_picker_config(d)
+                self.assertEqual(dict(os.environ), {})
+
+    def test_a_malformed_file_does_not_raise_and_sets_nothing(self):
+        # A new config file is one more thing a user can typo, and the picker is
+        # a popup: it has to open anyway, with the defaults it would have used.
+        self.assertEqual(self.load("[picker\nroot /x/code\n}{\n"), {})
+
+    def test_a_malformed_line_does_not_stop_the_valid_ones(self):
+        env = self.load('[picker]\nroot /x/typo\nhome = "base"\n')
+        self.assertEqual(env, {"HERDR_PICKER_HOME": "base"})
+
+    def test_debug_false_leaves_debugging_off(self):
+        # The one setting that is a boolean rather than a string. "false" is a
+        # non-empty string, so applying it raw would switch debugging ON.
+        env = self.load("[picker]\ndebug = false\n")
+        self.assertEqual(env["HERDR_PICKER_DEBUG"], "")
+
+    def test_debug_false_really_silences_the_debug_line(self):
+        # End to end through the real reader: the assertion above only matters
+        # because this is what the empty value buys.
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            path = write_config(d, "[picker]\ndebug = false\n")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                pp.load_picker_config(path)
+                pp.debug_discovery(0.026, ["/x/a"], {"bands": 1, "containers": 0}, out)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_debug_true_really_writes_the_debug_line(self):
+        # The other half of the pair, so a loader that set nothing at all would
+        # not pass the test above by accident.
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            path = write_config(d, "[picker]\ndebug = true\n")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                pp.load_picker_config(path)
+                pp.debug_discovery(0.026, ["/x/a"], {"bands": 1, "containers": 0}, out)
+        self.assertIn("picker: discovery", out.getvalue())
+
+
+class ConfigPrecedence(unittest.TestCase):
+    """Environment variable, then config.toml, then .env — in that order.
+
+    The whole of the ordering lives in the call site at the top of the module:
+    both loaders apply values with setdefault(), so whoever writes first wins.
+    These run the two loaders in that same order over one config directory.
+    """
+
+    def resolve(self, toml=None, env_file=None, environ=None):
+        """The environ after loading both files over `environ`, in order."""
+        with tempfile.TemporaryDirectory() as d:
+            if toml is not None:
+                write_config(d, toml)
+            if env_file is not None:
+                with open(os.path.join(d, ".env"), "w", encoding="utf-8") as f:
+                    f.write(env_file)
+            with mock.patch.dict(os.environ, environ or {}, clear=True):
+                pp.load_picker_config(os.path.join(d, "config.toml"))
+                pp.load_env(os.path.join(d, ".env"))
+                return dict(os.environ)
+
+    def test_the_env_file_alone_still_works(self):
+        # Mike has a live .env; a change that stopped reading it would present
+        # as lost settings rather than as a migration.
+        env = self.resolve(env_file="HERDR_PICKER_ROOT=/from/env-file\n")
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env-file")
+
+    def test_config_toml_wins_over_the_env_file(self):
+        # TOML is the format these settings are moving to, so a .env left behind
+        # must not quietly outrank the file that replaced it.
+        env = self.resolve(toml='[picker]\nroot = "/from/toml"\n',
+                           env_file="HERDR_PICKER_ROOT=/from/env-file\n")
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/toml")
+
+    def test_the_env_file_still_supplies_what_the_toml_omits(self):
+        # The two layers merge per setting; config.toml is not all-or-nothing.
+        env = self.resolve(toml='[picker]\nroot = "/from/toml"\n',
+                           env_file="HERDR_PICKER_HOME=base\n")
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/toml")
+        self.assertEqual(env["HERDR_PICKER_HOME"], "base")
+
+    def test_a_real_env_var_beats_both_files(self):
+        env = self.resolve(toml='[picker]\nroot = "/from/toml"\n',
+                           env_file="HERDR_PICKER_ROOT=/from/env-file\n",
+                           environ={"HERDR_PICKER_ROOT": "/from/env"})
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env")
+
+    def test_debug_false_in_the_toml_beats_the_env_file_turning_it_on(self):
+        # Why the false case SETS the empty string rather than skipping the key:
+        # skipping would let a stale .env decide, which is the wrong file.
+        env = self.resolve(toml="[picker]\ndebug = false\n",
+                           env_file="HERDR_PICKER_DEBUG=1\n")
+        self.assertEqual(env["HERDR_PICKER_DEBUG"], "")
+
+    def test_a_malformed_toml_leaves_the_env_file_working(self):
+        # The degradation that matters: a typo in the new file must not take the
+        # old one down with it.
+        env = self.resolve(toml="[picker\nroot /x/typo\n",
+                           env_file="HERDR_PICKER_ROOT=/from/env-file\n")
+        self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env-file")
+
+
+class ModuleBootstrap(unittest.TestCase):
+    """The settings the module binds at import, from a real config directory.
+
+    ConfigPrecedence above runs the two loaders in the order this class checks
+    the module actually calls them in. That call site is where the precedence
+    lives, and re-executing the module is the only way to see it: DEV and
+    HOME_LABEL are bound once, at import, so an environment set afterwards
+    changes nothing. The loader here is the suite's own, so
+    sys.dont_write_bytecode at the top of this file still holds and no .pyc is
+    written for the re-execution.
+    """
+
+    def boot(self, files, environ=None):
+        """Re-execute the script over a plugin config dir holding `files`."""
+        with tempfile.TemporaryDirectory() as d:
+            for name, body in files.items():
+                with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                    f.write(body)
+            # PATH is carried over because the script reads it at import, the
+            # way any real run has one. HERDR_CONFIG_PATH is pinned at a file
+            # that does not exist so the run cannot pick up the developer's own
+            # Herdr config.
+            env = dict(environ or {}, PATH=os.environ.get("PATH", ""),
+                       HERDR_PLUGIN_CONFIG_DIR=d,
+                       HERDR_CONFIG_PATH=os.path.join(d, "absent.toml"))
+            with mock.patch.dict(os.environ, env, clear=True):
+                fresh = importlib.util.module_from_spec(spec)
+                loader.exec_module(fresh)
+                return fresh
+
+    def test_the_toml_supplies_the_root_and_the_home_label(self):
+        with tempfile.TemporaryDirectory() as root:
+            fresh = self.boot({"config.toml":
+                               '[picker]\nroot = "%s"\nhome = "base"\n' % root})
+            self.assertEqual(fresh.DEV, root)
+            self.assertEqual(fresh.HOME_LABEL, "base")
+
+    def test_the_env_file_still_supplies_them_on_its_own(self):
+        with tempfile.TemporaryDirectory() as root:
+            fresh = self.boot({".env": "HERDR_PICKER_ROOT=%s\n"
+                                       "HERDR_PICKER_HOME=base\n" % root})
+            self.assertEqual(fresh.DEV, root)
+            self.assertEqual(fresh.HOME_LABEL, "base")
+
+    def test_the_toml_is_loaded_before_the_env_file(self):
+        # The ordering guard. Swapping the two calls at the top of the script
+        # makes this the .env's value, because both loaders use setdefault().
+        with tempfile.TemporaryDirectory() as root:
+            fresh = self.boot({"config.toml": '[picker]\nroot = "%s"\n' % root,
+                               ".env": "HERDR_PICKER_ROOT=/from/env-file\n"})
+            self.assertEqual(fresh.DEV, root)
+
+    def test_a_real_env_var_beats_both_files_at_import(self):
+        with tempfile.TemporaryDirectory() as root:
+            fresh = self.boot({"config.toml": '[picker]\nroot = "/x/toml"\n',
+                               ".env": "HERDR_PICKER_ROOT=/from/env-file\n"},
+                              environ={"HERDR_PICKER_ROOT": root})
+            self.assertEqual(fresh.DEV, root)
+
+    def test_neither_file_present_leaves_the_defaults(self):
+        fresh = self.boot({})
+        self.assertEqual(fresh.DEV, os.path.expanduser("~"))
+        self.assertEqual(fresh.HOME_LABEL, "~")
+
+    def test_a_malformed_toml_still_lets_the_module_import(self):
+        # The picker is a popup: a typo in optional config must never be what
+        # stops it appearing.
+        fresh = self.boot({"config.toml": "[picker\nroot /x/typo\n}{\n"})
+        self.assertEqual(fresh.DEV, os.path.expanduser("~"))
+
+
+class PickerConfigIsDocumented(unittest.TestCase):
+    """Doc-drift guard for the [picker] table, in LayoutSettings' shape.
+
+    A key added to PICKER_KEYS without a README line, or renamed in one place
+    only, fails here.
+    """
+
+    README = os.path.join(HERE, "..", "README.md")
+
+    def lines(self):
+        with open(self.README, encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f]
+
+    def test_the_table_header_is_documented(self):
+        self.assertIn("[picker]", self.lines())
+
+    def test_every_key_is_documented_exactly_once(self):
+        # Line-scoped rather than a whole-file search, because "root" and "home"
+        # are ordinary words in this README's prose.
+        lines = self.lines()
+        for key in pp.PICKER_KEYS:
+            bare = key.split(".", 1)[1]
+            at = [line for line in lines if line.startswith(bare + " = ")]
+            self.assertEqual(len(at), 1, key)
+
+    def test_every_key_names_the_variable_it_stands_in_for(self):
+        # The two spellings have to stay findable from each other: a reader with
+        # HERDR_PICKER_ROOT in a .env needs to reach the key that replaces it.
+        text = "\n".join(self.lines())
+        for var in pp.PICKER_KEYS.values():
+            self.assertIn(var, text, var)
 
 
 class ResolveRoot(unittest.TestCase):

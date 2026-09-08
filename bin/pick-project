@@ -12,8 +12,10 @@ workspace (label "~", override with HERDR_PICKER_HOME) is never listed and
 never closed. Setting HERDR_PICKER_DEBUG reports what finding the repos cost,
 on one line; unset, the picker writes nothing at all.
 
-Every setting may also come from a .env file under HERDR_PLUGIN_CONFIG_DIR;
-real environment variables take precedence over that file.
+Every setting may also come from a file under HERDR_PLUGIN_CONFIG_DIR: a
+[picker] table in this plugin's own config.toml, or the older .env. Both are
+optional and both still work. Precedence is real environment variable, then
+config.toml, then .env — see load_picker_config() for why in that order.
 
 Each open project's row carries its agent status, drawn with the glyph and
 colour Herdr's own sidebar would use, read out of Herdr's config.toml. See the
@@ -102,6 +104,49 @@ def read_toml(path, wanted):
     return found
 
 
+# The [picker] table in this plugin's own config.toml, mapped to the environment
+# variable each key stands in for. One table, because the plugin owns the whole
+# file and has nothing else to keep in it.
+PICKER_KEYS = {"picker.root": "HERDR_PICKER_ROOT",
+               "picker.home": "HERDR_PICKER_HOME",
+               "picker.debug": "HERDR_PICKER_DEBUG"}
+
+
+def load_picker_config(path):
+    """Apply the [picker] table in `path` to os.environ. Real env vars win.
+
+    `path` is this plugin's OWN config.toml, in the directory Herdr hands the
+    plugin. Herdr's config.toml is not the place for these: its schema names no
+    plugin table, so a section added there makes `herdr config check` report
+    issues for good. The plugin docs say to put user config in the plugin config
+    dir and leave the format to the plugin, which is what this is.
+
+    Call this BEFORE load_env(), which is the whole of why config.toml beats a
+    .env naming the same setting. Both apply values with setdefault(), so the
+    first writer wins and a real environment variable, already in os.environ,
+    got there before either. TOML is the format these settings are moving to, so
+    a .env left behind must not quietly outrank the file that replaced it.
+
+    Like load_env(), nothing here may raise: read_toml() answers {} for a file
+    that is missing or unreadable and skips a line it cannot parse, so a typo in
+    this file must never stop the picker from opening.
+    """
+    config = read_toml(path, frozenset(PICKER_KEYS))
+    if "picker.debug" in config:
+        # A TOML boolean arrives as the raw string "true" or "false" — the same
+        # shape resolve_theme() reads auto_switch in, so it is read the same way
+        # rather than a second idiom being invented for one key. The flag itself
+        # is a plain truthy environment variable, and "false" is a non-empty
+        # string, so it has to become the empty one here or `debug = false` would
+        # switch debugging ON. Empty is still SET rather than skipped, so an
+        # explicit false beats a stale HERDR_PICKER_DEBUG in a .env.
+        on = config["picker.debug"].strip().lower() == "true"
+        config["picker.debug"] = "1" if on else ""
+    for key, var in PICKER_KEYS.items():
+        if key in config:
+            os.environ.setdefault(var, config[key])
+
+
 def herdr_config_path():
     """Herdr's own config.toml.
 
@@ -177,23 +222,26 @@ def worktree_locations(config=None):
 def resolve_root():
     """Where to look for repos: HERDR_PICKER_ROOT, else the home folder.
 
-    A leading "~" is expanded, since .env values are not shell-expanded. A root
-    that is not an existing directory falls back to the home folder rather than
-    dying, so a stale override still leaves the picker usable.
+    A leading "~" is expanded, since neither config file has its values
+    shell-expanded, whichever of the two supplied this one. A root that is not
+    an existing directory falls back to the home folder rather than dying, so a
+    stale override still leaves the picker usable.
     """
     root = os.path.expanduser(os.environ.get("HERDR_PICKER_ROOT") or "~")
     return root if os.path.isdir(root) else os.path.expanduser("~")
 
 
 # User-editable config lives in the plugin's config dir, per the Herdr docs.
-# Loaded before the settings below so the file can supply them.
+# Loaded before the settings below so the files can supply them. config.toml is
+# read FIRST because both loaders use setdefault(): see load_picker_config().
 if os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
+    load_picker_config(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], "config.toml"))
     load_env(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], ".env"))
 
 DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 
-# Bound here, beside DEV, for the same two reasons: the .env above may supply
+# Bound here, beside DEV, for the same two reasons: the files above may supply
 # the variables herdr_config_path() reads, and Herdr's config must be read once
 # per run rather than once per repo — touched_at() consults these too.
 WORKTREE_DIRS, WORKTREE_ROOTS = worktree_locations()
@@ -471,8 +519,8 @@ def debug_discovery(elapsed, paths, counts, out=None):
     Silent unless HERDR_PICKER_DEBUG holds something, which is the whole point:
     every normal run must write nothing at all, because this is a popup pane and
     unbidden output sits on top of the thing the user opened. Read from
-    os.environ like the other settings here, so the .env file load_env() folds
-    into it can turn this on for good.
+    os.environ like the other settings here, so either config file the loaders
+    at the top fold into it can turn this on for good.
 
     `elapsed` is discovery's elapsed time in SECONDS, reported as milliseconds.
     Those are the units the figures quoted in repos() are in, and a tenth of a
