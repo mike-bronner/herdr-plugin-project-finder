@@ -6,9 +6,9 @@ Fuzzy-pick git repos and open them as workspaces in
 ## What it does
 
 `bin/pick-project` opens an fzf popup listing every git repo up to three levels
-under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere). Open
-workspaces are listed first and pre-selected, so what is checked is exactly
-what is loaded.
+under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere), plus the
+linked worktrees kept inside those repos. Open workspaces are listed first and
+pre-selected, so what is checked is exactly what is loaded.
 On Enter the selection becomes the truth: unchecked open projects are closed,
 newly checked ones are created with a tab named `agent` holding Claude on the
 left and a shell on the right, and an empty selection closes everything except
@@ -18,11 +18,27 @@ The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
 
 A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
-is recognisable at a glance. The third level is what reaches Herdr's own
-worktrees, which it creates at `<worktrees.directory>/<repo>/<branch-slug>`.
-Anything nested inside a repo is skipped, so a worktree or submodule kept under
-its own parent is not listed twice. The filter searches the whole visible row,
-so typing `worktree` narrows the list to worktrees.
+is recognisable at a glance. The filter searches the whole visible row, so
+typing `worktree` narrows the list to worktrees.
+
+Worktrees are found wherever the tool that made them puts them. A worktree
+beside its parent, or in a flat root such as
+`<worktrees.directory>/<repo>/<branch-slug>`, is reached by the three depth
+levels. A worktree kept **inside** its own repo is found by name instead:
+`.worktrees/` (Herdr once its `[worktrees] directory` is relative),
+`.claude/worktrees/` (Claude Code), a plain `worktrees/`, and whatever Herdr's
+own `[worktrees] directory` setting adds. Those names are searched because no
+wildcard matches a leading dot, so no amount of extra depth would ever see
+them — and because naming them is what keeps the search cheap: 9 ms on top of
+18 ms across 85 repos here. An absolute `[worktrees] directory` is read as a
+flat root and searched even when it sits outside `HERDR_PICKER_ROOT`.
+
+Anything else nested inside a repo is skipped, so a submodule or a vendored
+checkout is not listed twice. Only a real linked worktree is exempt from that,
+which is why an ordinary repo sitting in one of those container directories is
+still skipped. A repo's `TOUCHED` time ignores its nested worktrees for the
+same reason: each one is its own row, and work on a branch is not work on its
+parent.
 
 An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
@@ -137,7 +153,8 @@ $EDITOR "$(herdr plugin config-dir mikebronner.project-finder)/.env"
 ```
 
 ```sh
-# Where to look for git repos, searched three levels deep. Default: ~
+# Where to look for git repos, searched three levels deep, plus the worktrees
+# inside each one. Default: ~
 HERDR_PICKER_ROOT=~/Developer
 
 # Label of the pinned workspace that is never listed and never closed.

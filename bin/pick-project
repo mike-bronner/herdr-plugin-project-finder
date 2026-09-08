@@ -113,6 +113,47 @@ def herdr_config_path():
     return os.path.expanduser("~/.config/herdr/config.toml")
 
 
+# Container paths a linked worktree sits in INSIDE the repo it belongs to,
+# relative to that repo. ".worktrees" is Herdr's own layout once [worktrees]
+# directory is relative, ".claude/worktrees" is Claude Code's, and "worktrees"
+# is the same idea spelled without the dot. Fixed names rather than a search:
+# see repos() for what looking harder costs.
+FIXED_WORKTREE_DIRS = (".worktrees", ".claude/worktrees", "worktrees")
+
+
+def worktree_locations(config=None):
+    """(dirs, roots): the two shapes a linked worktree is kept in.
+
+    `dirs` are RELATIVE paths, each searched under every repo that was found.
+    `roots` are absolute directories holding worktrees for many repos, searched
+    on their own because they may sit outside the picker root entirely.
+
+    On top of the fixed names, Herdr's own [worktrees] directory is read, so
+    the picker follows the setting instead of guessing at it — while never
+    depending on that one setting, which is why the fixed names stay. Herdr
+    resolves a relative value against each repo root, which is exactly a
+    container, so it joins `dirs`; an absolute one (Herdr's shipped default is
+    ~/.herdr/worktrees) is a flat root and joins `roots`.
+
+    Like read_toml() itself, nothing here may raise: an unset, unreadable or
+    malformed setting simply contributes nothing and the fixed names remain.
+    """
+    if config is None:
+        config = read_toml(herdr_config_path(), {"worktrees.directory"})
+    setting = os.path.expanduser(config.get("worktrees.directory", "").strip())
+    dirs, roots = list(FIXED_WORKTREE_DIRS), []
+    if os.path.isabs(setting):
+        roots.append(os.path.normpath(setting))
+    elif setting:
+        # normpath so "./trees" and "trees" cannot both be searched. A "../x"
+        # is kept: Herdr resolves it against the repo root too, so it names a
+        # real container beside the repo rather than a nonsense one.
+        norm = os.path.normpath(setting)
+        if norm not in dirs:
+            dirs.append(norm)
+    return dirs, roots
+
+
 def resolve_root():
     """Where to look for repos: HERDR_PICKER_ROOT, else the home folder.
 
@@ -131,6 +172,11 @@ if os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
 
 DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
+
+# Bound here, beside DEV, for the same two reasons: the .env above may supply
+# the variables herdr_config_path() reads, and Herdr's config must be read once
+# per run rather than once per repo — touched_at() consults these too.
+WORKTREE_DIRS, WORKTREE_ROOTS = worktree_locations()
 
 # Column layout for the list. The heading is built from the same format string
 # as every row, so the two cannot drift out of alignment. Only field 1 is shown
@@ -366,39 +412,53 @@ def herdr(*args):
 
 
 def repos():
-    """Every git repo up to 3 levels under the configured root.
+    """Every git repo up to 3 levels under the root, plus the worktrees inside
+    them.
 
-    Deliberately not hardcoded to any grouping folder: repos live both directly
-    under the root and inside grouping dirs, and those groupings get
-    reorganised. Anything nested inside a repo is skipped, so a submodule or a
-    worktree placed inside its parent is not listed twice. A worktree kept
-    beside its parent is a project in its own right and is listed, tagged
-    "worktree" by kind().
+    Two passes, because the two things live in different places.
 
-    The third level is Herdr's own worktrees. Herdr creates them at
-    <worktrees.directory>/<repo>/<branch-slug>, which is three levels down
-    whenever that directory sits under the picker root. Reading [worktrees]
-    directory out of config.toml and globbing only there would be cheaper, but
-    it would then find worktrees ONLY there, and how deep this walks should not
-    hang off one setting. A fourth level is not searched: the depths are
-    globbed shallowest first, and each one costs a full stat pass over
-    everything at that level, so they are not free to keep adding.
+    The first is the depth bands. Deliberately not hardcoded to any grouping
+    folder: repos live both directly under the root and inside grouping dirs,
+    and those groupings get reorganised. Anything nested inside a repo is
+    skipped there, so a submodule or a vendored checkout is not listed twice.
+    A worktree kept beside its parent is a project in its own right and is
+    listed, tagged "worktree" by kind(). A fourth level is not searched: the
+    depths are globbed shallowest first, and each one costs a full stat pass
+    over everything at that level, so they are not free to keep adding — a
+    fourth measured 93-164ms across runs on the real 85-repo root, against
+    18ms for the three kept, and matched nothing at all.
 
-    Globbing shallowest first is also what makes the nested skip below work,
-    since a parent is always reached before anything inside it.
+    Globbing shallowest first is also what makes the nested skip work, since a
+    parent is always reached before anything inside it.
+
+    The second pass is the exemption to that skip, and the only one: a LINKED
+    WORKTREE inside a well-known container is listed. Both tools that make them
+    nest them now — Herdr at <repo>/.worktrees/<repo>/<slug> once its
+    [worktrees] directory is relative, Claude Code at
+    <repo>/.claude/worktrees/<slug> — so the skip alone lost every one of them.
+    The containers come from worktree_locations(): fixed names plus whatever
+    Herdr's own setting adds, so the picker follows that setting without
+    hanging off it. Only kind() == "worktree" is admitted, which is what keeps
+    the exemption from re-admitting the submodule the skip exists for.
+
+    Depth bands cannot reach a container at all, whatever the number: glob
+    never matches a leading dot with a wildcard, so ".worktrees" and ".claude"
+    are invisible to "*/*/*". Naming them literally is also what makes this
+    cheap. On the real root the two container depths under all 85 repos cost
+    9ms on top of the bands' 18ms, 26ms in total against a ~70ms budget.
 
     Not a recursive glob, for four reasons. It costs tens of seconds: "**/.git"
-    with recursive=True measured between 23 and 37 seconds across runs on an
-    80-repo root, against a budget of about 70ms, because it descends every
-    node_modules and vendor tree. It found nothing extra on that root either:
-    no .git sat deeper than three levels, and the four hits past level two were
-    exactly the ones this third level already reaches. It would break the skip
-    below, which needs a parent accumulated before its children — banding by
-    depth guarantees that and a single flat sort does not, because any name
-    sorting below "/" (0x2F) comes out ahead of its own parent, so "a/-x"
-    precedes "a". And "**" silently means "*" without recursive=True, so
-    "**/*/.git" reads as bounded while being either two levels or unbounded
-    depending on a flag set elsewhere.
+    with recursive=True measured between 23 and 37 seconds across runs on that
+    root, because it descends every node_modules and vendor tree. It found
+    nothing the two passes here do not, and could not have: the leading-dot
+    rule binds "**" as well, so it walks past a .worktrees the same way a band
+    does — verified, not assumed. It would break the skip, which needs a
+    parent accumulated before its children — banding by depth guarantees that
+    and a single flat sort does not, because any name sorting below "/" (0x2F)
+    comes out ahead of its own parent, so "a/-x" precedes "a". And "**"
+    silently means "*" without recursive=True, so "**/*/.git" reads as bounded
+    while being either two levels or unbounded depending on a flag set
+    elsewhere.
     """
     out = []
     for depth in ("*", "*/*", "*/*/*"):
@@ -408,6 +468,17 @@ def repos():
                 continue          # nested inside a repo we already have
             if p not in out:
                 out.append(p)
+
+    # Both container layouts in one pass: Claude Code puts the worktree
+    # straight in the container, Herdr puts it under the repo's own name.
+    bases = [os.path.normpath(os.path.join(p, d)) for p in list(out)
+             for d in WORKTREE_DIRS]
+    for base in bases + WORKTREE_ROOTS:
+        for depth in ("*", "*/*"):
+            for g in sorted(glob.glob(os.path.join(base, depth, ".git"))):
+                w = os.path.dirname(g)
+                if w not in out and kind(w) == "worktree":
+                    out.append(w)
     return out
 
 
@@ -436,18 +507,34 @@ def kind(path):
 
 
 def touched_at(path):
-    """Newest of the git index and the newest working-tree file (depth 2)."""
+    """Newest of the git index and the newest working-tree file (depth 2).
+
+    A worktree container is pruned along with the rest: its contents belong to
+    the worktrees repos() lists as rows of their own, so counting them here
+    would report work done on a branch as work done on its parent. A container
+    one level down is where that actually bit, since it puts the worktree's own
+    working tree at depth 2 — under the deeper .worktrees/<repo>/<slug> and
+    .claude/worktrees/<slug> layouts the files were already past the walk's
+    reach. Pruning the container makes it true of every layout, and stops the
+    walk entering it at all.
+
+    Pruned by full path, not by name, so ".claude" keeps counting while
+    ".claude/worktrees" does not, and a "worktrees" deeper in the tree is left
+    alone — a container is only a container where repos() looks for one.
+    """
     newest = 0
     try:
         newest = os.path.getmtime(os.path.join(path, ".git", "index"))
     except OSError:
         pass
     skip = {"node_modules", "vendor", ".git"}
+    trees = {os.path.normpath(os.path.join(path, d)) for d in WORKTREE_DIRS}
     for root, dirs, files in os.walk(path):
         depth = root[len(path):].count(os.sep)
         if depth >= 2:
             dirs[:] = []
-        dirs[:] = [d for d in dirs if d not in skip]
+        dirs[:] = [d for d in dirs if d not in skip
+                   and os.path.join(root, d) not in trees]
         for f in files:
             try:
                 m = os.path.getmtime(os.path.join(root, f))

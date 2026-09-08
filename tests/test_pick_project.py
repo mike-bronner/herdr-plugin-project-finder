@@ -29,6 +29,31 @@ def ws(label, wid, focused=False, status="idle"):
             "agent_status": status}
 
 
+def make_project(path, worktree=False):
+    """Create a git project at `path`, and return it.
+
+    A repo gets a .git DIRECTORY, a worktree gets a .git FILE holding a
+    gitdir: pointer. That is the difference kind() reads, so a project built
+    here can be handed straight to it.
+    """
+    os.makedirs(path, exist_ok=True)
+    git = os.path.join(path, ".git")
+    if worktree:
+        with open(git, "w", encoding="utf-8") as f:
+            f.write("gitdir: /x/parent/.git/worktrees/wt\n")
+    else:
+        os.makedirs(git, exist_ok=True)
+    return path
+
+
+def write_config(directory, body):
+    """A config.toml holding `body` in `directory`, returned as a path."""
+    path = os.path.join(directory, "config.toml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return path
+
+
 class OpenWorkspaces(unittest.TestCase):
     def test_home_is_split_out_and_never_in_others(self):
         listing = {"workspaces": [ws("~", "w1"), ws("a", "w2"), ws("b", "w3")]}
@@ -462,23 +487,31 @@ class Repos(unittest.TestCase):
     builds a scratch root and patches DEV at it.
     """
 
-    def discover(self, repos=(), worktrees=()):
+    def discover(self, repos=(), worktrees=(), dirs=None, roots=None):
         """(root, repos()) for a scratch root holding these projects.
 
-        Both arguments are paths relative to the root, at any depth. A `repos`
-        entry gets a .git DIRECTORY and a `worktrees` entry gets a .git FILE
-        with a gitdir: pointer, which is the difference kind() reads, so a
-        discovered path can be handed straight to it.
+        Both project arguments are paths relative to the root, at any depth.
+
+        The container settings are patched rather than inherited, since
+        WORKTREE_DIRS is bound at import from the developer's own Herdr
+        config: unpatched, every case here would pass or fail according to a
+        file outside the repo. They default to the shipped names.
+
+        A `roots` entry is taken as-is when absolute and resolved against the
+        scratch root otherwise, so a flat root inside the root and one outside
+        it are both expressible.
         """
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         for rel in repos:
-            os.makedirs(os.path.join(tmp.name, rel, ".git"))
+            make_project(os.path.join(tmp.name, rel))
         for rel in worktrees:
-            os.makedirs(os.path.join(tmp.name, rel))
-            with open(os.path.join(tmp.name, rel, ".git"), "w", encoding="utf-8") as f:
-                f.write("gitdir: /x/parent/.git/worktrees/wt\n")
-        with mock.patch.object(pp, "DEV", tmp.name):
+            make_project(os.path.join(tmp.name, rel), worktree=True)
+        with mock.patch.object(pp, "DEV", tmp.name), \
+             mock.patch.object(pp, "WORKTREE_DIRS",
+                               list(pp.FIXED_WORKTREE_DIRS) if dirs is None else dirs), \
+             mock.patch.object(pp, "WORKTREE_ROOTS",
+                               [os.path.join(tmp.name, r) for r in roots or ()]):
             return tmp.name, pp.repos()
 
     def test_a_repo_directly_under_the_root_is_found(self):
@@ -539,6 +572,250 @@ class Repos(unittest.TestCase):
         self.assertEqual(sorted(found),
                          sorted([os.path.join(root, "myrepo"),
                                  os.path.join(root, "myrepo_old")]))
+
+    def test_a_worktree_in_herdrs_own_container_is_found(self):
+        # Herdr's layout once [worktrees] directory is relative: the container,
+        # then the repo's own name, then the branch slug. Two things hid it —
+        # the leading dot, which no wildcard matches, and the nested skip.
+        root, found = self.discover(
+            repos=["myrepo"], worktrees=["myrepo/.worktrees/myrepo/feat-x"])
+        self.assertEqual(
+            sorted(found),
+            sorted([os.path.join(root, "myrepo"),
+                    os.path.join(root, "myrepo", ".worktrees", "myrepo", "feat-x")]))
+
+    def test_a_worktree_in_claude_codes_container_is_found(self):
+        # The other real layout, and it does NOT nest by repo name, so both
+        # container depths have to be searched.
+        root, found = self.discover(
+            repos=["myrepo"], worktrees=["myrepo/.claude/worktrees/slug-1a2b"])
+        self.assertEqual(
+            sorted(found),
+            sorted([os.path.join(root, "myrepo"),
+                    os.path.join(root, "myrepo", ".claude", "worktrees", "slug-1a2b")]))
+
+    def test_a_worktree_in_the_undotted_container_is_found(self):
+        root, found = self.discover(repos=["myrepo"],
+                                    worktrees=["myrepo/worktrees/feat-x"])
+        self.assertIn(os.path.join(root, "myrepo", "worktrees", "feat-x"), found)
+
+    def test_a_nested_worktree_is_found_under_a_repo_at_any_depth(self):
+        # The container hangs off the repo, not off the root, so a repo two
+        # levels down carries its worktrees five levels down. That is past
+        # every depth band, which is the whole reason for the second pass.
+        root, found = self.discover(
+            repos=["group/myrepo"],
+            worktrees=["group/myrepo/.worktrees/myrepo/feat-x"])
+        self.assertIn(
+            os.path.join(root, "group", "myrepo", ".worktrees", "myrepo", "feat-x"),
+            found)
+
+    def test_a_nested_worktree_is_tagged_worktree(self):
+        # The KIND column is the point of finding them, pinned on a path
+        # discovery actually produced rather than a handmade one.
+        root, found = self.discover(
+            repos=["myrepo"], worktrees=["myrepo/.worktrees/myrepo/feat-x"])
+        nested = [p for p in found if ".worktrees" in p]
+        self.assertEqual([pp.kind(p) for p in nested], ["worktree"])
+
+    def test_an_ordinary_repo_inside_a_container_is_still_skipped(self):
+        # The exemption is for linked worktrees, not for everything under a
+        # container name. A submodule that happens to sit there is still the
+        # parent's own content and must not become a second row.
+        root, found = self.discover(repos=["myrepo", "myrepo/worktrees/vendored"])
+        self.assertEqual(found, [os.path.join(root, "myrepo")])
+
+    def test_a_container_under_a_repo_that_is_itself_nested_is_not_searched(self):
+        # A vendored checkout is skipped, so its containers are never reached
+        # either: the second pass runs over what the first pass kept.
+        root, found = self.discover(
+            repos=["myrepo", "myrepo/vendor/pkg"],
+            worktrees=["myrepo/vendor/pkg/.worktrees/pkg/feat-x"])
+        self.assertEqual(found, [os.path.join(root, "myrepo")])
+
+    def test_a_container_named_by_herdrs_config_is_searched(self):
+        # End to end: a real config.toml, read by the real read_toml() through
+        # the real herdr_config_path(), naming a container none of the fixed
+        # names cover.
+        cfg = tempfile.TemporaryDirectory()
+        self.addCleanup(cfg.cleanup)
+        path = write_config(cfg.name, '[worktrees]\ndirectory = "trees"\n')
+        with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": path}):
+            dirs, roots = pp.worktree_locations()
+        root, found = self.discover(repos=["myrepo"],
+                                    worktrees=["myrepo/trees/feat-x"],
+                                    dirs=dirs, roots=roots)
+        self.assertIn(os.path.join(root, "myrepo", "trees", "feat-x"), found)
+
+    def test_an_absolute_worktree_root_outside_the_picker_root_is_searched(self):
+        # The old flat layout, and Herdr's shipped default. Nothing under the
+        # picker root leads to it, so it is searched on its own.
+        flat = tempfile.TemporaryDirectory()
+        self.addCleanup(flat.cleanup)
+        wt = make_project(os.path.join(flat.name, "myrepo", "feat-x"), worktree=True)
+        root, found = self.discover(repos=["myrepo"], roots=[flat.name])
+        self.assertEqual(sorted(found), sorted([os.path.join(root, "myrepo"), wt]))
+
+    def test_a_worktree_reached_twice_is_listed_once(self):
+        # A flat root that sits inside the picker root is found by the depth
+        # bands as well, so the same path arrives twice. One row, not two.
+        root, found = self.discover(repos=["myrepo"],
+                                    worktrees=["worktrees/myrepo/feat-x"],
+                                    roots=["worktrees"])
+        self.assertEqual(found, [os.path.join(root, "myrepo"),
+                                 os.path.join(root, "worktrees", "myrepo", "feat-x")])
+
+
+class WorktreeLocations(unittest.TestCase):
+    """Where worktrees are looked for: fixed names plus Herdr's own setting."""
+
+    def locate(self, config):
+        return pp.worktree_locations(config)
+
+    def test_the_fixed_containers_are_always_searched(self):
+        dirs, roots = self.locate({})
+        self.assertEqual(dirs, list(pp.FIXED_WORKTREE_DIRS))
+        self.assertEqual(roots, [])
+
+    def test_both_real_layouts_are_covered_by_the_fixed_names(self):
+        # Herdr's and Claude Code's, the two that exist on this machine.
+        self.assertIn(".worktrees", pp.FIXED_WORKTREE_DIRS)
+        self.assertIn(".claude/worktrees", pp.FIXED_WORKTREE_DIRS)
+
+    def test_a_relative_setting_joins_the_containers(self):
+        dirs, roots = self.locate({"worktrees.directory": "trees"})
+        self.assertEqual(dirs, list(pp.FIXED_WORKTREE_DIRS) + ["trees"])
+        self.assertEqual(roots, [])
+
+    def test_a_relative_setting_already_covered_is_not_repeated(self):
+        dirs, _ = self.locate({"worktrees.directory": "./.worktrees"})
+        self.assertEqual(dirs, list(pp.FIXED_WORKTREE_DIRS))
+
+    def test_a_setting_beside_the_repo_stays_relative(self):
+        # Herdr resolves a relative value against the repo root, so "../x"
+        # names a real directory beside the repo, not a nonsense one.
+        dirs, roots = self.locate({"worktrees.directory": "../trees"})
+        self.assertIn(os.path.join("..", "trees"), dirs)
+        self.assertEqual(roots, [])
+
+    def test_an_absolute_setting_becomes_a_flat_root(self):
+        dirs, roots = self.locate({"worktrees.directory": "/srv/worktrees/"})
+        self.assertEqual(dirs, list(pp.FIXED_WORKTREE_DIRS))
+        self.assertEqual(roots, ["/srv/worktrees"])
+
+    def test_herdrs_shipped_default_is_read_as_a_root_not_a_container(self):
+        # ~/.herdr/worktrees is absolute once expanded, and .env values are
+        # never shell-expanded, so the tilde has to be handled here.
+        _, roots = self.locate({"worktrees.directory": "~/.herdr/worktrees"})
+        self.assertEqual(roots, [os.path.expanduser("~/.herdr/worktrees")])
+
+    def test_an_empty_setting_degrades_to_the_fixed_containers(self):
+        dirs, roots = self.locate({"worktrees.directory": "   "})
+        self.assertEqual(dirs, list(pp.FIXED_WORKTREE_DIRS))
+        self.assertEqual(roots, [])
+
+    def test_an_unreadable_config_degrades_rather_than_raising(self):
+        # read_toml() answers {} for a missing file; nothing here may raise on
+        # it, since the picker must still open.
+        with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": "/nope/config.toml"}):
+            dirs, roots = pp.worktree_locations()
+        self.assertEqual((dirs, roots), (list(pp.FIXED_WORKTREE_DIRS), []))
+
+    def test_a_malformed_setting_line_degrades_rather_than_raising(self):
+        # An array is skipped by read_toml() rather than half-parsed, so the
+        # key reads as absent.
+        with tempfile.TemporaryDirectory() as d:
+            path = write_config(d, '[worktrees]\ndirectory = ["a", "b"]\n')
+            with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": path}):
+                dirs, roots = pp.worktree_locations()
+        self.assertEqual((dirs, roots), (list(pp.FIXED_WORKTREE_DIRS), []))
+
+
+class TouchedAt(unittest.TestCase):
+    """The TOUCHED column: newest of the git index and the working tree."""
+
+    def touch(self, path, when):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("x")
+        os.utime(path, (when, when))
+
+    def touched(self, build, dirs=None):
+        """touched_at() for a scratch repo `build` fills in."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = make_project(os.path.join(tmp.name, "myrepo"))
+        build(repo)
+        with mock.patch.object(pp, "WORKTREE_DIRS",
+                               list(pp.FIXED_WORKTREE_DIRS) if dirs is None else dirs):
+            return repo, pp.touched_at(repo)
+
+    def test_the_newest_working_tree_file_is_reported(self):
+        # The control the prune cases below are measured against.
+        def build(repo):
+            self.touch(os.path.join(repo, "old.txt"), 1000)
+            self.touch(os.path.join(repo, "src", "new.txt"), 2000)
+        self.assertEqual(self.touched(build)[1], 2000)
+
+    def test_a_nested_worktrees_files_do_not_count_as_the_parents_touch(self):
+        # The live defect: a container one level down puts the worktree's own
+        # working tree at depth 2, which the walk reads. The worktree is its own
+        # row now, so its work must not read as work on the parent.
+        def build(repo):
+            self.touch(os.path.join(repo, "own.txt"), 1000)
+            self.touch(os.path.join(repo, "worktrees", "feat-x", "README.md"), 9000)
+        self.assertEqual(self.touched(build)[1], 1000)
+
+    def test_herdrs_own_container_is_not_walked(self):
+        # Measured: under .worktrees/<repo>/<slug> a worktree's own files sit at
+        # depth 3, which the walk never reached even before the prune. So what
+        # is pinned here is the container being pruned outright — the deepest
+        # level the walk does read inside it is ignored too.
+        def build(repo):
+            self.touch(os.path.join(repo, "own.txt"), 1000)
+            self.touch(os.path.join(repo, ".worktrees", "myrepo", "stamp"), 9000)
+        self.assertEqual(self.touched(build)[1], 1000)
+
+    def test_the_claude_container_is_not_walked(self):
+        # Same shape one level shallower: .claude/worktrees is itself the
+        # deepest directory the walk reads, so its contents are the fixture.
+        def build(repo):
+            self.touch(os.path.join(repo, "own.txt"), 1000)
+            self.touch(os.path.join(repo, ".claude", "worktrees", "stamp"), 9000)
+        self.assertEqual(self.touched(build)[1], 1000)
+
+    def test_the_prune_is_by_path_so_the_rest_of_dot_claude_still_counts(self):
+        # ".claude" itself is ordinary repo content. Pruning by name would
+        # silently stop settings edits counting as a touch.
+        def build(repo):
+            self.touch(os.path.join(repo, "own.txt"), 1000)
+            self.touch(os.path.join(repo, ".claude", "settings.json"), 9000)
+        self.assertEqual(self.touched(build)[1], 9000)
+
+    def test_a_configured_container_is_pruned_as_well(self):
+        def build(repo):
+            self.touch(os.path.join(repo, "own.txt"), 1000)
+            self.touch(os.path.join(repo, "trees", "b", "f.txt"), 9000)
+        self.assertEqual(self.touched(build, dirs=["trees"])[1], 1000)
+
+    def test_a_directory_merely_sharing_a_prefix_is_not_pruned(self):
+        def build(repo):
+            self.touch(os.path.join(repo, "worktrees-notes", "f.txt"), 9000)
+        self.assertEqual(self.touched(build)[1], 9000)
+
+    def test_the_same_name_somewhere_else_in_the_tree_still_counts(self):
+        # The other half of "by path, not by name": a container is only a
+        # container at the place repos() looks for it. A matching name deeper
+        # in the tree is ordinary content, and pruning it would lose real work.
+        def build(repo):
+            self.touch(os.path.join(repo, "src", "worktrees", "f.txt"), 9000)
+        self.assertEqual(self.touched(build)[1], 9000)
+
+    def test_the_git_index_still_counts(self):
+        def build(repo):
+            self.touch(os.path.join(repo, ".git", "index"), 5000)
+            self.touch(os.path.join(repo, "own.txt"), 1000)
+        self.assertEqual(self.touched(build)[1], 5000)
 
 
 class Kind(unittest.TestCase):
