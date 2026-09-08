@@ -10,9 +10,28 @@ under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere), plus the
 linked worktrees belonging to those repos. Open workspaces are listed first and
 pre-selected, so what is checked is exactly what is loaded.
 On Enter the selection becomes the truth: unchecked open projects are closed,
-newly checked ones are created with a tab named `agent` holding Claude on the
-left and a shell on the right, and an empty selection closes everything except
-the home workspace. Esc changes nothing.
+newly checked ones are created with one tab, named `agent` by default, holding
+three labelled panes, and an empty selection closes everything except the home
+workspace. Esc changes nothing.
+
+```
++-----------------+--------+
+|                 | lazygit|   agent     half the width
+|      agent      |        |   lazygit   60% of the column beside it
+|                 +--------+   shell     what lazygit leaves
+|                 | shell  |
++-----------------+--------+
+```
+
+Claude runs in the `agent` pane, `lazygit` in the one above the bare shell, and
+the cursor is on the agent when the workspace opens. That is the same layout
+the sibling
+[agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
+plugin applies to a worktree it lays out from an event, so a project opened
+from the picker looks like one opened any other way. The drawing above is the
+default and nothing more: which way each split goes, how much room each pane
+takes, what fills the tool pane and what each pane is called are all settings,
+under the sibling plugin's names — see [Configure](#configure).
 
 The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
@@ -196,6 +215,47 @@ HERDR_PICKER_HOME=home
 # Report what finding the projects cost. Any value turns it on.
 # Default: unset, and the picker prints nothing at all.
 HERDR_PICKER_DEBUG=1
+
+# Which agent Herdr starts in the agent pane.
+# Default: claude
+AGENT_LAYOUT_KIND=claude
+
+# What the workspace's first tab is renamed to.
+# Default: agent
+AGENT_LAYOUT_TAB_NAME=agent
+
+# Where the tool-and-shell column goes, relative to the agent pane.
+# Default: right
+AGENT_LAYOUT_DIRECTION=right
+
+# The share of the width the AGENT pane keeps.
+# Default: 0.5
+AGENT_LAYOUT_RATIO=0.5
+
+# Command run in the tool pane. One command line, typed into that pane's own
+# shell, so flags work unquoted.
+# Default: lazygit
+AGENT_LAYOUT_TOOL_COMMAND=lazygit
+
+# Where the bare shell goes, relative to the tool pane.
+# Default: down
+AGENT_LAYOUT_TOOL_DIRECTION=down
+
+# The share of the right-hand column the TOOL pane keeps.
+# Default: 0.6
+AGENT_LAYOUT_TOOL_RATIO=0.6
+
+# What the agent's own pane is labelled.
+# Default: agent
+AGENT_LAYOUT_AGENT_LABEL=agent
+
+# What the tool pane is labelled. Rename it when you change the command above.
+# Default: lazygit
+AGENT_LAYOUT_TOOL_LABEL=lazygit
+
+# What the bare shell pane is labelled.
+# Default: shell
+AGENT_LAYOUT_SHELL_LABEL=shell
 ```
 
 Real environment variables win over the file. Values may be quoted, and a
@@ -204,6 +264,53 @@ the beginning of a line, and a line without `=` is ignored.
 
 If `HERDR_PICKER_ROOT` names a folder that does not exist, the picker searches
 the home folder instead of failing.
+
+### Why the layout settings carry another plugin's prefix
+
+The `AGENT_LAYOUT_` names above are the sibling
+[agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
+plugin's, deliberately. Both plugins build the same three panes, and one
+vocabulary for one layout means a value learned in either place reads the same
+in the other. Each plugin still reads its **own** `.env`, so a name set here is
+not seen there. Export one as a real environment variable and both follow it,
+which is the point of sharing the names.
+
+That is the sibling's whole set bar one, so a name that works there works here:
+there is no `AGENT_LAYOUT_` value you can set for that plugin and watch do
+nothing for this one. The exception is `AGENT_LAYOUT_RECIPE`, which points the
+sibling's event hook at an executable that replaces its layout entirely. The
+picker has no such hook to point anywhere, so the name is not read here.
+
+Both directions take `right` or `down` and nothing else — Herdr's own limit,
+not the picker's. Both ratios name the share kept by the pane **being split**,
+so a bigger `AGENT_LAYOUT_RATIO` means a bigger agent pane and a bigger
+`AGENT_LAYOUT_TOOL_RATIO` means a bigger tool pane. Herdr documents neither
+half of that, and the `0.5` default splits the width evenly enough to hide it,
+so it was measured: `split right --ratio 0.7` leaves the original pane 66 of 94
+columns and gives the new one `1 - ratio`.
+
+The cursor lands on the agent pane, whatever the rest is set to, because the
+agent is started in the pane the workspace arrives on and nothing moves the
+cursor off it. Measured on 0.8.2: `pane split --focus` moves the cursor to the
+pane it creates, while `--no-focus` and no flag at all both leave it where it
+is. The picker passes `--no-focus` anyway, to say so rather than to rely on a
+default it does not own.
+
+`AGENT_LAYOUT_TOOL_COMMAND` is sent to the tool pane's own shell, so flags work
+without quoting. Its default is a bare `lazygit` rather than a path: that shell
+is interactive and reads your own rc files, which is where the name resolves,
+and a bare name is the only default that can work on both declared platforms.
+
+Nothing here is validated by the picker. Herdr's own CLI rejects an unknown
+direction or a non-numeric ratio, and a rejected layout step is skipped rather
+than failing the whole selection — a workspace that came out with fewer panes
+than intended still opens with its agent in it.
+
+`AGENT_LAYOUT_KIND` is the quietest one to get wrong. The agent is started
+detached, so that a multi-select does not wait on it, and its output is
+discarded: whatever Herdr says about a value it will not accept, you will not
+see it. The symptom is three panes laid out with nothing running in the agent's
+one.
 
 ### Timing the search
 

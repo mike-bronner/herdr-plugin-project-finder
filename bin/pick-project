@@ -19,10 +19,15 @@ Each open project's row carries its agent status, drawn with the glyph and
 colour Herdr's own sidebar would use, read out of Herdr's config.toml. See the
 "Herdr's agent-status indicator" section below.
 
-Each new workspace opens one tab named "agent", split 50/50: Claude on the
-left, a shell on the right. Claude is started plain — Herdr's own [session]
-resume_agents_on_restore (on by default) handles bringing conversations back
-after a server restart, so the picker does not pass --continue itself.
+Each new workspace opens one tab holding three labelled panes, with the cursor
+on the agent: by default a tab named "agent", Claude on the left at half the
+width, lazygit filling the top 60% of the column beside it, and a bare shell
+underneath. The same three the sibling herdr-plugin-agentic-panes-layout
+builds, under the same setting names and reading its whole set of them, so
+nothing in that layout is fixed here — see the AGENT_LAYOUT_ block below.
+Claude is started plain — Herdr's own [session] resume_agents_on_restore (on by
+default) handles bringing conversations back after a server restart, so the
+picker does not pass --continue itself.
 
 A linked worktree is opened as a worktree rather than as a bare directory, so
 Herdr's sidebar nests it under the repo it belongs to instead of floating it at
@@ -330,8 +335,42 @@ for d in ("/opt/homebrew/bin", "/usr/local/bin"):
 
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
 
-# Name of the first tab in every workspace the picker opens.
-TAB_LABEL = "agent"
+# Every value create_workspace() lays a workspace out with: the tab's name, the
+# agent's kind, which way each of the two splits goes and how much room it
+# leaves, the tool's command, and a label on each of the three panes. Each one
+# is a default that configuration overrides, and the list is exhaustive — no
+# part of the layout is written into the call site, so nothing about it can be
+# changed only by editing this file.
+#
+# The names carry the SIBLING plugin's AGENT_LAYOUT_ prefix rather than this
+# plugin's HERDR_PICKER_ one, on purpose. herdr-plugin-agentic-panes-layout
+# builds the same three panes from a worktree.created event, and one vocabulary
+# for one layout means a value learned in either place reads the same in the
+# other. The two plugins still hold separate .env files, so a name set in one is
+# not seen by the other unless it is exported as a real environment variable —
+# in which case both lay out identically, which is the point.
+#
+# That shared vocabulary is why this list is the sibling's whole set rather
+# than the values this picker happened to introduce. A name that works in one
+# plugin and quietly does nothing in the other is the exact trap the borrowed
+# prefix exists to close, so the sibling's _KIND and _TAB_NAME are read here
+# too — as is its _DIRECTION and _RATIO, which name the same first split this
+# one makes. Only _RECIPE is absent: it replaces the sibling's layout with an
+# executable of the user's, which is a different feature and not a value.
+#
+# `or` rather than a default argument to get(): an .env line reading `X=` means
+# "leave it alone", exactly as an absent line does. Taking an empty value
+# literally would only hand Herdr an empty ratio to reject.
+KIND = os.environ.get("AGENT_LAYOUT_KIND") or "claude"
+TAB_NAME = os.environ.get("AGENT_LAYOUT_TAB_NAME") or "agent"
+DIRECTION = os.environ.get("AGENT_LAYOUT_DIRECTION") or "right"
+RATIO = os.environ.get("AGENT_LAYOUT_RATIO") or "0.5"
+TOOL_COMMAND = os.environ.get("AGENT_LAYOUT_TOOL_COMMAND") or "lazygit"
+TOOL_DIRECTION = os.environ.get("AGENT_LAYOUT_TOOL_DIRECTION") or "down"
+TOOL_RATIO = os.environ.get("AGENT_LAYOUT_TOOL_RATIO") or "0.6"
+AGENT_LABEL = os.environ.get("AGENT_LAYOUT_AGENT_LABEL") or "agent"
+TOOL_LABEL = os.environ.get("AGENT_LAYOUT_TOOL_LABEL") or "lazygit"
+SHELL_LABEL = os.environ.get("AGENT_LAYOUT_SHELL_LABEL") or "shell"
 
 
 def die(msg):
@@ -476,7 +515,7 @@ def repos(counts=None):
     and those groupings get reorganised. Anything nested inside a repo is
     skipped there, so a submodule or a vendored checkout is not listed twice.
     A worktree kept beside its parent is a project in its own right and is
-    listed, tagged "worktree" by kind(). A fourth level is not searched: the
+    listed, tagged "worktree" by row_kind(). A fourth level is not searched: the
     depths are globbed shallowest first, and each one costs a full stat pass
     over everything at that level, so they are not free to keep adding — a
     fourth measured 93-164ms across runs on the real 85-repo root, against
@@ -497,7 +536,7 @@ def repos(counts=None):
     skip alone lost every one of them. The containers come from
     worktree_locations(): fixed names plus whatever Herdr's own setting adds,
     so the picker follows that setting without hanging off it. Only
-    kind() == "worktree" is admitted, which is what keeps the exemption from
+    row_kind() == "worktree" is admitted, which is what keeps the exemption from
     re-admitting the submodule the skip exists for.
 
     A DOTTED container is unreachable by the depth bands whatever the number:
@@ -563,7 +602,7 @@ def repos(counts=None):
         for depth in ("*", "*/*"):
             for g in sorted(glob.glob(os.path.join(base, depth, ".git"))):
                 w = os.path.dirname(g)
-                if w not in out and kind(w) == "worktree":
+                if w not in out and row_kind(w) == "worktree":
                     out.append(w)
     if counts is not None:
         # The second pass only ever appends, so the first pass's share is the
@@ -584,7 +623,7 @@ def elide(text, width):
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
-def kind(path):
+def row_kind(path):
     """"worktree" for a linked git worktree, otherwise "repo".
 
     A worktree's .git is a FILE holding a "gitdir:" pointer at the parent
@@ -599,8 +638,8 @@ def kind(path):
 def parent_repo(path):
     """The root of the repo a linked worktree at `path` belongs to, or None.
 
-    Read out of the worktree's own .git — the FILE kind() classifies on. It
-    holds one "gitdir:" line naming the parent's admin directory for this
+    Read out of the worktree's own .git — the FILE row_kind() classifies on.
+    It holds one "gitdir:" line naming the parent's admin directory for this
     checkout, which git spells <repo-root>/.git/worktrees/<name>. So the parent
     is three components up from the pointer. Where the checkout itself sits does
     not enter into it, which is why one parse serves every layout on this
@@ -609,13 +648,14 @@ def parent_repo(path):
     <root>/worktrees/<repo>/<slug>, and Claude Code's .claude/worktrees/<slug>.
     A layout added later needs nothing here.
 
-    One file read and no `git` subprocess, the same trade kind() makes for the
-    same information, and for the same reason: this is paid per row opened.
+    One file read and no `git` subprocess, the same trade row_kind() makes
+    for the same information, and for the same reason: this is paid per row
+    opened.
 
     None whenever the shape is not exactly that, and the caller then opens the
     checkout unnested. An ordinary repo answers None because its .git is a
     directory, so the read raises before any parsing. A SUBMODULE answers None
-    too, and deliberately: its .git is a file as well, so kind() calls it a
+    too, and deliberately: its .git is a file as well, so row_kind() calls it a
     worktree, but it points at <super>/.git/modules/<name> and has no worktree
     parent to name. Nothing obliges other tooling to write git's shape either,
     and a wrongly-derived parent is worse than none — it would nest the
@@ -979,7 +1019,7 @@ def build_lines(rows, status, now):
     """
     lines = []
     for label, path, touched in rows:
-        lines.append(ROW.format(elide(label, LABEL_WIDTH), kind(path),
+        lines.append(ROW.format(elide(label, LABEL_WIDTH), row_kind(path),
                                 human_age(touched, now), status.get(label, ""),
                                 path, label))
     return lines
@@ -1019,12 +1059,67 @@ def open_project(label, path):
     return herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
 
 
+def split_pane(pane, direction, ratio, cwd):
+    """The id of the pane a split creates, or None if the split failed.
+
+    `--ratio` is the share kept by the pane named in `--pane`, and the pane
+    this RETURNS gets `1 - ratio`. Herdr documents neither half: `herdr --skill`
+    never mentions `--ratio` and the 0.8.2 API schema types it as a bare float.
+    So it was measured in an isolated server: `split right --ratio 0.7` left the
+    original pane 66 of 94 columns (0.702) and `split down --ratio 0.6` left it
+    23 of 39 rows (0.590). Both directions agree.
+
+    That is why the caller's split ORDER is what sizes the panes, and why
+    getting it wrong is silent: a column split off the shell rather than the
+    tool pane still builds three panes, sized 40/60 instead of 60/40.
+
+    `--no-focus` states the default rather than changing it, and is passed
+    deliberately. Measured 2026-09-08 in an isolated 0.8.2 server, splitting a
+    pane three ways: with `--focus` the cursor MOVES to the pane created; with
+    `--no-focus` it does not; with neither flag it does not either. It does not
+    move onto the pane being split, so a split made away from the cursor leaves
+    the cursor where it was. `herdr pane split --help` lists both flags and
+    documents neither.
+
+    So the picker's workspaces open with the agent in focus because the agent's
+    pane is the one the workspace arrives on, and nothing here moves the cursor
+    off it. The flag is kept for what it says: an accidental `--focus`, or a
+    later Herdr that focuses new panes by default, would land the user in the
+    bare shell, and the call site should read as having decided that.
+
+    The new id is not derivable from `pane` and the second split needs the first
+    one's answer, so the reply is parsed rather than discarded. 0.8.2 documents
+    it as `.result.pane` and answers with `.result.pane.pane_id`; a reply
+    missing either level yields None, which the caller treats as a failed split.
+    """
+    res = herdr("pane", "split", "--pane", pane, "--direction", direction,
+                "--ratio", ratio, "--cwd", cwd, "--no-focus")
+    return ((res or {}).get("pane") or {}).get("pane_id")
+
+
 def create_workspace(label, path, live):
     """Open a workspace for `path` with the agent layout; return its workspace id.
 
     The first tab arrives with the workspace and cannot be labelled at creation
-    (`--label` names the workspace), so it is renamed to TAB_LABEL right after.
-    It is then split Claude (left) | shell (right).
+    (`--label` names the workspace), so it is renamed to TAB_NAME right after.
+    It is then split into three labelled panes: a KIND agent keeping RATIO of
+    the width, TOOL_COMMAND filling TOOL_RATIO of the column DIRECTION of it,
+    and a bare shell taking the remainder. Drawn at the defaults, which is the
+    only shape it can be drawn at — every value in it is a setting:
+
+        +-----------------+--------+
+        |                 | tool   |   agent   RATIO of the width
+        |      agent      | lazygit|   tool    TOOL_RATIO of the rest
+        |                 +--------+   shell   what the tool pane leaves
+        |                 | shell  |
+        +-----------------+--------+
+
+    The cursor is left on the agent pane: it is the pane the workspace arrives
+    on, and neither split moves it — see split_pane() for the measurement.
+
+    Every step after the workspace itself is non-fatal, unlike the create above.
+    A failed split, tool command or label leaves a workspace that is merely laid
+    out less well, and dying would abandon the rest of a multi-select over it.
 
     That layout is applied to every row, worktrees included. Herdr emits
     worktree.opened for the call open_project() makes, but no plugin here acts
@@ -1040,18 +1135,44 @@ def create_workspace(label, path, live):
 
     tab = res.get("tab", {}).get("tab_id")
     if tab:
-        herdr("tab", "rename", tab, TAB_LABEL)
+        herdr("tab", "rename", tab, TAB_NAME)
 
     pane = res.get("root_pane", {}).get("pane_id")
     if pane:
-        herdr("pane", "split", "--pane", pane,
-              "--direction", "right", "--ratio", "0.5", "--cwd", path)
+        # The agent keeps RATIO of the width by BEING the pane the first split
+        # names, and the tool pane keeps TOOL_RATIO of the column beside it the
+        # same way. Splitting the tool pane rather than the agent pane a second
+        # time is what puts the tool above the shell — see split_pane() for the
+        # measurement that makes the order load-bearing.
+        tool = split_pane(pane, DIRECTION, RATIO, path)
+        shell = split_pane(tool, TOOL_DIRECTION, TOOL_RATIO, path) if tool else None
+
+        # No settling delay before this one. `pane run` was measured to work
+        # immediately after a split, unlike the `agent start` below, which has
+        # a real agent_pane_busy race. It types the line into the pane's own
+        # shell, which is interactive and sources the user's rc files, so a
+        # bare `lazygit` resolves there — a bare name is also the only default
+        # that can work on both platforms the manifest declares.
+        if tool:
+            herdr("pane", "run", tool, TOOL_COMMAND)
+
+        # Labels are applied before the agent starts, and labelling the agent's
+        # own pane is not wasted: `pane rename` writes a pane's `label` and
+        # `agent start` writes its `agent`, which are independent fields that
+        # neither clears the other. Measured on 0.8.2 with
+        # ui.show_agent_labels_on_pane_borders on — the agent pane carried
+        # agent="claude" and label="agent" together, six seconds later still.
+        for target, name in ((pane, AGENT_LABEL), (tool, TOOL_LABEL),
+                             (shell, SHELL_LABEL)):
+            if target:
+                herdr("pane", "rename", target, name)
+
         # Fire and forget. `agent start` blocks until the agent is ready
         # (default 30s), which would stall the picker on a multi-select —
         # detaching makes that wait free. Note --timeout has a 3000ms
         # MINIMUM, so a short value is rejected outright; omit it instead.
         subprocess.Popen([HERDR, "agent", "start", agent_name(label, live),
-                          "--kind", "claude", "--pane", pane],
+                          "--kind", KIND, "--pane", pane],
                          start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return res["workspace"]["workspace_id"]

@@ -2,7 +2,8 @@
 
 Run: python3 -m unittest discover tests
 """
-import importlib.machinery, importlib.util, io, os, sys, tempfile, time, unittest
+import importlib.machinery, importlib.util, io, os, re, sys, tempfile, time
+import unittest
 from unittest import mock
 
 # Must be set before the loader below runs. A .pyc is treated as valid while
@@ -33,7 +34,7 @@ def make_project(path, worktree=False):
     """Create a git project at `path`, and return it.
 
     A repo gets a .git DIRECTORY, a worktree gets a .git FILE holding a
-    gitdir: pointer. That is the difference kind() reads, so a project built
+    gitdir: pointer. That is the difference row_kind() reads, so a project built
     here can be handed straight to it.
     """
     os.makedirs(path, exist_ok=True)
@@ -322,25 +323,90 @@ class AgentName(unittest.TestCase):
         self.assertEqual(b, "same-first-thirty-two-characte-2")
 
 
-class CreateWorkspace(unittest.TestCase):
+class CreateWorkspaceHarness:
+    """Shared by the two classes below. A mixin rather than a base TestCase,
+    which would run every inherited test a second time."""
+
     RES = {"workspace": {"workspace_id": "w9"}, "tab": {"tab_id": "w9:t1"},
            "root_pane": {"pane_id": "p1"}}
 
-    def run_create(self, res):
-        with mock.patch.object(pp, "herdr", return_value=res) as h, \
+    @staticmethod
+    def fake_herdr(res, splits=("p2", "p3")):
+        """A `herdr` stand-in answering each `pane split` with a NEW pane id.
+
+        Every split has to answer with its own id. Which pane the SECOND split
+        names is the whole of the layout — `--ratio` sizes the pane named in
+        `--pane` — and one shared return value would make the agent pane and the
+        tool pane the same string, hiding exactly the mix-up these tests exist
+        to catch. A split past the end of `splits` answers None, which is how a
+        failed split is spelt.
+        """
+        ids = iter(splits)
+
+        def call(*args):
+            if args[:2] == ("pane", "split"):
+                new = next(ids, None)
+                return {"pane": {"pane_id": new}} if new else None
+            return res
+
+        return call
+
+    def run_create(self, res, splits=("p2", "p3")):
+        with mock.patch.object(pp, "herdr",
+                               side_effect=self.fake_herdr(res, splits)) as h, \
              mock.patch.object(pp.subprocess, "Popen"), \
              mock.patch.object(pp, "die", side_effect=SystemExit):
             wid = pp.create_workspace("proj", "/x/proj", set())
         return wid, [c.args for c in h.call_args_list]
 
+    def splits(self, calls):
+        return [c for c in calls if c[:2] == ("pane", "split")]
+
+    def renames(self, calls):
+        return [c for c in calls if c[:2] == ("pane", "rename")]
+
     def agent_start_argv(self, label, live):
         """The detached `herdr agent start` argv this fires for `label`."""
-        with mock.patch.object(pp, "herdr", return_value=self.RES), \
+        with mock.patch.object(pp, "herdr", side_effect=self.fake_herdr(self.RES)), \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
             pp.create_workspace(label, "/x/proj", live)
         return popen.call_args.args[0]
 
+    def create_watching_the_agent_pane(self, splits=("p2", "p3")):
+        """(the herdr calls, the pane `agent start` was aimed at) from ONE create.
+
+        Both halves out of the same run on purpose: the focus test compares
+        them, and taking them from two creates would compare two workspaces.
+        """
+        with mock.patch.object(pp, "herdr",
+                               side_effect=self.fake_herdr(self.RES, splits)) as h, \
+             mock.patch.object(pp.subprocess, "Popen") as popen, \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            pp.create_workspace("proj", "/x/proj", set())
+        argv = popen.call_args.args[0]
+        return [c.args for c in h.call_args_list], argv[argv.index("--pane") + 1]
+
+    def focused_pane(self, calls, splits=("p2", "p3"), root="p1"):
+        """Which pane the cursor is on once the layout is built.
+
+        A workspace arrives focused on the single pane it arrives with, and a
+        split moves the cursor onto the pane it CREATES only when `--focus` is
+        passed. `--no-focus` and no flag at all both leave the cursor where it
+        already is. That rule was measured, not read: see split_pane(), whose
+        docstring carries the isolated-server observation it came from.
+
+        `splits` is the id the fake answers each split with, in order, because
+        the created id is not derivable from the call itself.
+        """
+        focus = root
+        for call, created in zip(self.splits(calls), splits):
+            if "--focus" in call:
+                focus = created
+        return focus
+
+
+class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
     def test_first_tab_is_renamed_agent(self):
         wid, calls = self.run_create(self.RES)
         self.assertEqual(wid, "w9")
@@ -374,11 +440,12 @@ class CreateWorkspace(unittest.TestCase):
         self.assertEqual(self.agent_start_argv("my-proj", live)[3], "my-proj-2")
 
     def test_a_worktree_row_gets_the_same_layout_as_a_repo_row(self):
-        # The picker stays solely responsible for the agent-and-shell layout on
+        # The picker stays solely responsible for the three-pane layout on
         # every row: Herdr emits worktree.opened for this call, and the local
         # agent-layout plugin subscribes to worktree.created alone.
         with mock.patch.object(pp, "parent_repo", return_value="/x/myrepo"), \
-             mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
+             mock.patch.object(pp, "herdr",
+                               side_effect=self.fake_herdr(self.RES)) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
             wid = pp.create_workspace("feat-x", "/x/wt/feat-x", set())
@@ -386,8 +453,278 @@ class CreateWorkspace(unittest.TestCase):
         self.assertEqual(wid, "w9")
         self.assertEqual(calls[0][:2], ("worktree", "open"))
         self.assertIn(("tab", "rename", "w9:t1", "agent"), calls)
-        self.assertTrue(any(c[:2] == ("pane", "split") for c in calls))
+        self.assertEqual(len(self.splits(calls)), 2)
+        self.assertEqual(len(self.renames(calls)), 3)
         popen.assert_called_once()
+
+
+class AgentLayout(CreateWorkspaceHarness, unittest.TestCase):
+    """The three panes create_workspace() builds, and how they are sized.
+
+    The sizing is entirely in the ORDER of the two splits, because `--ratio` is
+    the share kept by the pane named in `--pane` rather than the one the split
+    creates. Nothing about a wrong order raises: the tab still ends up with
+    three panes, sized the wrong way round. So the pane ids in these assertions
+    are the point of them, not incidental detail.
+    """
+
+    def test_one_pane_becomes_three(self):
+        _, calls = self.run_create(self.RES)
+        self.assertEqual(len(self.splits(calls)), 2)
+
+    def test_the_agent_pane_is_split_first_and_keeps_half_the_width(self):
+        # --pane p1 is the root pane the workspace arrived with, so the agent
+        # keeps 0.5 and the column beside it gets the other half. Direction and
+        # ratio are DIRECTION and RATIO at their defaults, pinned as settings
+        # by LayoutSettings below and as read-at-the-call by the last test in
+        # this class.
+        _, calls = self.run_create(self.RES)
+        self.assertEqual(self.splits(calls)[0],
+                         ("pane", "split", "--pane", "p1", "--direction", "right",
+                          "--ratio", "0.5", "--cwd", "/x/proj", "--no-focus"))
+
+    def test_the_second_split_names_the_tool_pane(self):
+        # p2 is what the first split returned. Naming p1 here would build a
+        # third column beside the agent; naming the pane the second split
+        # CREATES would leave the tool pane 0.4 of the column instead of 0.6.
+        _, calls = self.run_create(self.RES)
+        self.assertEqual(self.splits(calls)[1],
+                         ("pane", "split", "--pane", "p2", "--direction", "down",
+                          "--ratio", "0.6", "--cwd", "/x/proj", "--no-focus"))
+
+    def test_a_new_workspace_opens_with_the_cursor_on_the_agent(self):
+        # The wanted outcome, rather than the --no-focus flags. Those flags are
+        # only the default said out loud — a split moves the cursor when
+        # --focus is passed and not otherwise, measured rather than assumed
+        # (split_pane()). So the cursor lands on the agent for one reason:
+        # the agent is started in the pane the workspace arrived on. Start it
+        # in a pane a split created, or add --focus to either split, and the
+        # user opens a project looking at lazygit or at a bare shell — both of
+        # which satisfy every other assertion in this class. Comparing the
+        # focused pane against the pane the agent is really started in is what
+        # stops the two drifting apart.
+        calls, agent_pane = self.create_watching_the_agent_pane()
+        self.assertEqual(agent_pane, "p1")
+        self.assertEqual(self.focused_pane(calls), agent_pane)
+
+    def test_the_focus_model_follows_a_split_that_asks_for_the_focus(self):
+        # A canary on focused_pane() itself. No real split passes --focus, so
+        # the branch that MOVES the cursor never runs in a green suite: a model
+        # that ignored the flag would answer "p1" to everything and pass the
+        # test above whatever the picker did.
+        stealing = [("pane", "split", "--pane", "p1", "--direction", "right",
+                     "--ratio", "0.5", "--cwd", "/x/proj", "--focus"),
+                    ("pane", "split", "--pane", "p2", "--direction", "down",
+                     "--ratio", "0.6", "--cwd", "/x/proj", "--focus")]
+        self.assertEqual(self.focused_pane(stealing), "p3")
+        self.assertEqual(self.focused_pane(stealing[:1]), "p2")
+        # --no-focus is not --focus by a prefix match: the picker's own calls
+        # carry the longer flag, and reading it as the shorter one would make
+        # the test above assert the exact opposite of the layout it guards.
+        no_focus = [c[:-1] + ("--no-focus",) for c in stealing]
+        self.assertEqual(self.focused_pane(no_focus), "p1")
+
+    def test_every_split_opens_in_the_project(self):
+        _, calls = self.run_create(self.RES)
+        for call in self.splits(calls):
+            self.assertEqual(call[call.index("--cwd") + 1], "/x/proj")
+
+    def test_the_tool_command_runs_in_the_tool_pane(self):
+        # p2, never p3: lazygit belongs above the bare shell, not in it.
+        _, calls = self.run_create(self.RES)
+        self.assertIn(("pane", "run", "p2", "lazygit"), calls)
+        self.assertEqual(len([c for c in calls if c[:2] == ("pane", "run")]), 1)
+
+    def test_all_three_panes_are_labelled(self):
+        # p1 included. A pane's `label` and its `agent` are independent fields
+        # on 0.8.2 and neither clears the other, so labelling the agent's own
+        # pane is not wasted work left to the border to do.
+        _, calls = self.run_create(self.RES)
+        self.assertEqual(self.renames(calls),
+                         [("pane", "rename", "p1", "agent"),
+                          ("pane", "rename", "p2", "lazygit"),
+                          ("pane", "rename", "p3", "shell")])
+
+    def test_the_panes_are_laid_out_before_the_agent_is_started(self):
+        # `agent start` is what takes the pane busy. Every rename and the tool
+        # command land first, so none of them races it.
+        manager = mock.Mock()
+        with mock.patch.object(pp, "herdr",
+                               side_effect=self.fake_herdr(self.RES)) as h, \
+             mock.patch.object(pp.subprocess, "Popen") as popen, \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            manager.attach_mock(h, "herdr")
+            manager.attach_mock(popen, "popen")
+            pp.create_workspace("proj", "/x/proj", set())
+        names = [c[0] for c in manager.mock_calls]
+        self.assertEqual(names.count("popen"), 1)
+        self.assertEqual(names[-1], "popen")
+
+    def test_the_agent_still_starts_when_the_first_split_fails(self):
+        # A workspace with one pane and an agent in it beats no workspace: the
+        # picker is mid-way through a multi-select and must not abandon it.
+        wid, calls = self.run_create(self.RES, splits=())
+        self.assertEqual(wid, "w9")
+        self.assertEqual(len(self.splits(calls)), 1)
+        self.assertFalse([c for c in calls if c[:2] == ("pane", "run")])
+        self.assertEqual(self.renames(calls), [("pane", "rename", "p1", "agent")])
+
+    def test_a_failed_second_split_still_fills_and_labels_the_tool_pane(self):
+        # Two panes exist and one of them is the tool pane, so lazygit and both
+        # labels that CAN be written still are. Only the shell's is skipped.
+        _, calls = self.run_create(self.RES, splits=("p2",))
+        self.assertIn(("pane", "run", "p2", "lazygit"), calls)
+        self.assertEqual(self.renames(calls),
+                         [("pane", "rename", "p1", "agent"),
+                          ("pane", "rename", "p2", "lazygit")])
+
+    def test_no_root_pane_builds_nothing_and_starts_nothing(self):
+        res = {k: v for k, v in self.RES.items() if k != "root_pane"}
+        wid, calls = self.run_create(res)
+        self.assertEqual(wid, "w9")
+        self.assertFalse(self.splits(calls))
+        self.assertFalse(self.renames(calls))
+
+    def test_the_settings_are_what_reach_herdr(self):
+        # Every value is read from its setting at the call, not baked into the
+        # call site. Each default below would still pass a happy-path test.
+        #
+        # The two directions are swapped for each other rather than set to
+        # "left" and "up": `herdr pane split --help` gives the flag exactly two
+        # possible values, right and down, so a fixture outside that pair could
+        # never happen in a real run.
+        with mock.patch.multiple(pp, KIND="codex", TAB_NAME="work",
+                                 DIRECTION="down", RATIO="0.3",
+                                 TOOL_COMMAND="gitui --ps", TOOL_DIRECTION="right",
+                                 TOOL_RATIO="0.75", AGENT_LABEL="claude",
+                                 TOOL_LABEL="git", SHELL_LABEL="sh"):
+            _, calls = self.run_create(self.RES)
+            argv = self.agent_start_argv("proj", set())
+        self.assertIn(("tab", "rename", "w9:t1", "work"), calls)
+        self.assertEqual(argv[argv.index("--kind") + 1], "codex")
+        self.assertEqual(self.splits(calls)[0][4:8],
+                         ("--direction", "down", "--ratio", "0.3"))
+        self.assertEqual(self.splits(calls)[1][4:8],
+                         ("--direction", "right", "--ratio", "0.75"))
+        self.assertIn(("pane", "run", "p2", "gitui --ps"), calls)
+        self.assertEqual(self.renames(calls),
+                         [("pane", "rename", "p1", "claude"),
+                          ("pane", "rename", "p2", "git"),
+                          ("pane", "rename", "p3", "sh")])
+
+
+class LayoutSettings(unittest.TestCase):
+    """The layout values are settings with documented defaults.
+
+    The names are the sibling herdr-plugin-agentic-panes-layout's rather than
+    this plugin's HERDR_PICKER_ prefix, because both plugins build the same
+    three panes and one vocabulary for one layout is the point. This class
+    pins that decision so a rename cannot happen in one plugin alone.
+    """
+
+    DEFAULTS = {"KIND": "claude", "TAB_NAME": "agent",
+                "DIRECTION": "right", "RATIO": "0.5",
+                "TOOL_COMMAND": "lazygit", "TOOL_DIRECTION": "down",
+                "TOOL_RATIO": "0.6", "AGENT_LABEL": "agent",
+                "TOOL_LABEL": "lazygit", "SHELL_LABEL": "shell"}
+
+    README = os.path.join(HERE, "..", "README.md")
+
+    def test_the_defaults_are_the_documented_ones(self):
+        for name, value in self.DEFAULTS.items():
+            self.assertEqual(getattr(pp, name), value, name)
+
+    def test_the_readme_documents_every_setting_at_its_default(self):
+        # Doc-drift guard, in the shape KeyBindings uses below: adding a
+        # setting without documenting it, or changing a default without
+        # correcting the README, both fail here.
+        #
+        # Scoped to the line naming the setting and the comment block directly
+        # above it, never a whole-file search: "Default: lazygit" appears twice
+        # in this file for two different settings, so a file-wide `in` would be
+        # satisfied by the other one and pin nothing.
+        with open(self.README, encoding="utf-8") as f:
+            lines = [line.rstrip("\n") for line in f]
+        for name, value in self.DEFAULTS.items():
+            key = f"AGENT_LAYOUT_{name}"
+            at = [i for i, line in enumerate(lines) if line.startswith(key + "=")]
+            self.assertEqual(len(at), 1, key)
+            self.assertEqual(lines[at[0]], f"{key}={value}", key)
+            above = lines[max(0, at[0] - 3):at[0]]
+            self.assertTrue(any(line == f"# Default: {value}" for line in above), key)
+
+    def test_the_settings_are_read_under_the_sibling_plugins_names(self):
+        # Read from the source: the constants are bound at import, so an
+        # environment set now cannot be observed without re-executing the
+        # module. The names are the contract with the other plugin.
+        with open(pp.__file__, encoding="utf-8") as f:
+            source = f.read()
+        for name in self.DEFAULTS:
+            self.assertIn(f'os.environ.get("AGENT_LAYOUT_{name}")', source, name)
+
+    def test_nothing_is_read_that_this_class_does_not_cover(self):
+        # The closing half of the guard above, and self-contained: a setting
+        # added to the picker but not to DEFAULTS would otherwise slip past
+        # every check in this class, including the README one. Reading the
+        # source is the only way to see it — the constants are bound at import.
+        with open(pp.__file__, encoding="utf-8") as f:
+            source = f.read()
+        read = set(re.findall(r'os\.environ\.get\("(AGENT_LAYOUT_\w+)"\)', source))
+        self.assertEqual(read, {f"AGENT_LAYOUT_{n}" for n in self.DEFAULTS})
+
+    def test_every_sibling_setting_but_the_recipe_is_read(self):
+        # The other half of the vocabulary contract, and the reason there is no
+        # list of ignored names here any more: a name that works in one plugin
+        # and quietly does nothing in the other is the trap the shared prefix
+        # exists to close. Adding one to the sibling and not to DEFAULTS above
+        # fails here.
+        #
+        # _RECIPE is the single exception, and not an oversight: it points the
+        # sibling's event hook at an executable that replaces the layout, which
+        # is a feature this picker does not have rather than a value it lays
+        # out with. Reading it would promise something nothing here honours.
+        sibling = os.path.join(HERE, "..", "..",
+                               "herdr-plugin-agentic-panes-layout", "README.md")
+        if not os.path.isfile(sibling):
+            self.skipTest("the sibling plugin is not checked out beside this one")
+        with open(sibling, encoding="utf-8") as f:
+            names = {line.split("=")[0] for line in f
+                     if line.startswith("AGENT_LAYOUT_")}
+        self.assertIn("AGENT_LAYOUT_RECIPE", names)  # the file was really read
+        expected = {f"AGENT_LAYOUT_{name}" for name in self.DEFAULTS}
+        self.assertEqual(names - {"AGENT_LAYOUT_RECIPE"}, expected)
+
+
+class SplitPane(unittest.TestCase):
+    """Reading the new pane's id out of a split, and failing closed without it."""
+
+    def call(self, reply):
+        with mock.patch.object(pp, "herdr", return_value=reply) as h:
+            got = pp.split_pane("p1", "down", "0.6", "/x/proj")
+        return got, h.call_args.args
+
+    def test_the_new_pane_id_is_returned(self):
+        got, _ = self.call({"pane": {"pane_id": "p2"}})
+        self.assertEqual(got, "p2")
+
+    def test_the_split_is_asked_for_exactly_as_given(self):
+        _, args = self.call({"pane": {"pane_id": "p2"}})
+        self.assertEqual(args, ("pane", "split", "--pane", "p1", "--direction",
+                                "down", "--ratio", "0.6", "--cwd", "/x/proj",
+                                "--no-focus"))
+
+    def test_a_failed_command_yields_none(self):
+        self.assertIsNone(self.call(None)[0])
+
+    def test_a_reply_without_a_pane_yields_none(self):
+        self.assertIsNone(self.call({})[0])
+
+    def test_an_explicitly_null_pane_yields_none(self):
+        # A null is not a missing key, and .get("pane", {}) would raise on it.
+        self.assertIsNone(self.call({"pane": None})[0])
+
+    def test_a_pane_without_an_id_yields_none(self):
+        self.assertIsNone(self.call({"pane": {}})[0])
 
 
 class OpenProject(unittest.TestCase):
@@ -664,7 +1001,7 @@ class Repos(unittest.TestCase):
         # The KIND column is the point of finding them, so the classification
         # is pinned on a path discovery actually produced, not a handmade one.
         root, found = self.discover(worktrees=["worktrees/myrepo/feat-x"])
-        self.assertEqual([pp.kind(p) for p in found], ["worktree"])
+        self.assertEqual([pp.row_kind(p) for p in found], ["worktree"])
 
     def test_a_fourth_level_is_not_searched(self):
         # Bounds the depth, so gaining a fifth stat pass stays a deliberate act.
@@ -702,9 +1039,12 @@ class Repos(unittest.TestCase):
                                  os.path.join(root, "myrepo_old")]))
 
     def test_a_worktree_in_herdrs_own_container_is_found(self):
-        # Herdr's layout once [worktrees] directory is relative: the container,
-        # then the repo's own name, then the branch slug. Two things hid it —
-        # the leading dot, which no wildcard matches, and the nested skip.
+        # Herdr's layout while [worktrees] directory is ".worktrees": the
+        # container inside the repo, then the repo's own name, then the branch
+        # slug. Relative is not what nests it — "../worktrees" is relative too
+        # and lands beside the repo instead, which the sibling case below pins.
+        # Two things hid this one — the leading dot, which no wildcard matches,
+        # and the nested skip.
         root, found = self.discover(
             repos=["myrepo"], worktrees=["myrepo/.worktrees/myrepo/feat-x"])
         self.assertEqual(
@@ -744,7 +1084,7 @@ class Repos(unittest.TestCase):
         root, found = self.discover(
             repos=["myrepo"], worktrees=["myrepo/.worktrees/myrepo/feat-x"])
         nested = [p for p in found if ".worktrees" in p]
-        self.assertEqual([pp.kind(p) for p in nested], ["worktree"])
+        self.assertEqual([pp.row_kind(p) for p in nested], ["worktree"])
 
     def test_an_ordinary_repo_inside_a_container_is_still_skipped(self):
         # The exemption is for linked worktrees, not for everything under a
@@ -821,7 +1161,7 @@ class Repos(unittest.TestCase):
             repos=["group-a/repo-one"],
             worktrees=["group-a/worktrees/repo-one/feat-x"])
         beside = [p for p in found if os.sep + "worktrees" + os.sep in p]
-        self.assertEqual([pp.kind(p) for p in beside], ["worktree"])
+        self.assertEqual([pp.row_kind(p) for p in beside], ["worktree"])
 
     def test_each_repo_resolves_its_own_sibling_container(self):
         # The ".." is resolved against the REPO, not against the root, so two
@@ -886,7 +1226,7 @@ class Repos(unittest.TestCase):
     def test_a_bare_parent_container_admits_only_worktrees(self):
         # ".." is a legal value that resolves to the grouping dir itself, so it
         # aims the container globs at every sibling of the repo. What bounds
-        # that is the kind() == "worktree" test, not the container name: the
+        # that is the row_kind() == "worktree" test, not the container name: the
         # ordinary repo here sits exactly where the worktree does, four levels
         # down and past the bands, and must not become a row.
         root, found = self.discover(
@@ -1275,7 +1615,7 @@ class Kind(unittest.TestCase):
             p = os.path.join(d, "proj")
             os.mkdir(p)
             make(os.path.join(p, ".git"))
-            return pp.kind(p)
+            return pp.row_kind(p)
 
     def test_directory_dot_git_is_a_repo(self):
         self.assertEqual(self.kind_of(os.mkdir), "repo")
@@ -1287,7 +1627,7 @@ class Kind(unittest.TestCase):
         self.assertEqual(self.kind_of(write_pointer), "worktree")
 
     def test_worktree_with_a_deleted_parent_still_classifies(self):
-        # `git -C` fails outright on these, which is why kind() only stats.
+        # `git -C` fails outright on these, which is why row_kind() only stats.
         def dangling(g):
             with open(g, "w", encoding="utf-8") as f:
                 f.write("gitdir: /x/deleted/.git/worktrees/proj\n")
@@ -1359,8 +1699,9 @@ class ParentRepo(unittest.TestCase):
             self.assertIsNone(pp.parent_repo(make_project(os.path.join(d, "r"))))
 
     def test_a_submodule_pointer_yields_none(self):
-        # A submodule's .git is a FILE too, so kind() calls it a worktree, but
-        # it points into .git/modules and has no worktree parent to name.
+        # A submodule's .git is a FILE too, so row_kind() calls it a
+        # worktree, but it points into .git/modules and has no worktree parent
+        # to name.
         # Nesting it under the superproject would be a different claim entirely.
         self.assertIsNone(self.derive("gitdir: /x/super/.git/modules/sub\n")[1])
 
@@ -1649,8 +1990,8 @@ class BytecodeCache(unittest.TestCase):
 class BuildLines(unittest.TestCase):
     """Assembling one fzf input line per row.
 
-    kind() hits the filesystem, so it is stubbed per path: these tests are about
-    which value lands in which field, not about how it is derived.
+    row_kind() hits the filesystem, so it is stubbed per path: these tests are
+    about which value lands in which field, not about how it is derived.
 
     touched_at() is stubbed to RAISE. The touch time reaches build_lines on the
     row, computed once by order_rows; a build_lines that reaches for the
@@ -1662,7 +2003,7 @@ class BuildLines(unittest.TestCase):
         """`rows` are (label, path) pairs here; the touch time is attached from
         `touched` (keyed by path, default 0) to keep the fixtures readable."""
         triples = [(l, p, (touched or {}).get(p, 0)) for l, p in rows]
-        with mock.patch.object(pp, "kind",
+        with mock.patch.object(pp, "row_kind",
                                side_effect=lambda p: (kinds or {}).get(p, "repo")), \
              mock.patch.object(pp, "touched_at",
                                side_effect=AssertionError("build_lines walked the tree")):
@@ -1757,7 +2098,7 @@ class TouchTimeIsComputedOncePerRun(unittest.TestCase):
             return 0
 
         with mock.patch.object(pp, "touched_at", side_effect=counted), \
-             mock.patch.object(pp, "kind", return_value="repo"):
+             mock.patch.object(pp, "row_kind", return_value="repo"):
             head, rest = pp.order_rows(labelled, open_ws)
             pp.build_lines(head + rest, {}, 100)
         return calls
