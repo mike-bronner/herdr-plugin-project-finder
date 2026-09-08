@@ -774,6 +774,156 @@ class Repos(unittest.TestCase):
                                     dirs=dirs, roots=roots)
         self.assertIn(os.path.join(root, "myrepo", "trees", "feat-x"), found)
 
+    # A container BESIDE the repo, which is what a "../worktrees" setting
+    # produces. Herdr moved to it so that nothing walking a repository can
+    # descend into a checkout: .git/info/exclude stops git, and nothing else.
+    # A repo at <root>/<group>/<name> then keeps its worktrees at
+    # <root>/<group>/worktrees/<name>/<slug> — four levels down, past every
+    # depth band, and inside no repository at all.
+    #
+    # The container pass reaches it with no new mechanism: a container is a
+    # relative path resolved against the repo root, and normpath collapsing the
+    # ".." is the whole of the handling. These cases pin that, since nothing
+    # else states it and an innocent-looking change to either the join or the
+    # dirs list would silently drop the layout. What the ".." does change is
+    # the COST — one container now serves every repo in a parent — so the last
+    # case here counts globs rather than rows.
+
+    def sibling_locations(self):
+        """(dirs, roots) for a real config.toml holding "../worktrees"."""
+        cfg = tempfile.TemporaryDirectory()
+        self.addCleanup(cfg.cleanup)
+        path = write_config(cfg.name, '[worktrees]\ndirectory = "../worktrees"\n')
+        with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": path}):
+            return pp.worktree_locations()
+
+    def sibling(self, **kwargs):
+        """discover() with the sibling container read from a real config."""
+        dirs, roots = self.sibling_locations()
+        return self.discover(dirs=dirs, roots=roots, **kwargs)
+
+    def test_a_worktree_beside_its_repo_is_found(self):
+        # End to end, through the real read_toml() and herdr_config_path().
+        root, found = self.sibling(
+            repos=["Insight/tru-data"],
+            worktrees=["Insight/worktrees/tru-data/feat-x"])
+        self.assertEqual(
+            sorted(found),
+            sorted([os.path.join(root, "Insight", "tru-data"),
+                    os.path.join(root, "Insight", "worktrees", "tru-data",
+                                 "feat-x")]))
+
+    def test_a_worktree_beside_its_repo_is_tagged_worktree(self):
+        # The KIND column is the point of finding them, pinned on a path
+        # discovery actually produced rather than a handmade one.
+        root, found = self.sibling(
+            repos=["Insight/tru-data"],
+            worktrees=["Insight/worktrees/tru-data/feat-x"])
+        beside = [p for p in found if os.sep + "worktrees" + os.sep in p]
+        self.assertEqual([pp.kind(p) for p in beside], ["worktree"])
+
+    def test_each_repo_resolves_its_own_sibling_container(self):
+        # The ".." is resolved against the REPO, not against the root, so two
+        # repos under different parents each get their own container. Resolving
+        # against the root would find one of these two at most, and the fixture
+        # is shaped so that neither container sits where the other repo looks.
+        root, found = self.sibling(
+            repos=["Insight/tru-data", "Sites/data-importer"],
+            worktrees=["Insight/worktrees/tru-data/feat-x",
+                       "Sites/worktrees/data-importer/feat-y"])
+        self.assertEqual(
+            sorted(found),
+            sorted([os.path.join(root, "Insight", "tru-data"),
+                    os.path.join(root, "Sites", "data-importer"),
+                    os.path.join(root, "Insight", "worktrees", "tru-data",
+                                 "feat-x"),
+                    os.path.join(root, "Sites", "worktrees", "data-importer",
+                                 "feat-y")]))
+
+    def test_a_sibling_container_the_depth_bands_also_reach_lists_once(self):
+        # A repo directly under the root resolves its sibling container to
+        # <root>/worktrees, which puts the checkout three levels down and in
+        # reach of the bands — an undotted container is not hidden from them
+        # the way ".worktrees" and ".claude" are. So the path arrives twice and
+        # must still produce one row, credited to the pass that found it.
+        counts = {}
+        dirs, roots = self.sibling_locations()
+        root, found = self.discover(repos=["myrepo"],
+                                    worktrees=["worktrees/myrepo/feat-x"],
+                                    dirs=dirs, roots=roots, counts=counts)
+        self.assertEqual(found, [os.path.join(root, "myrepo"),
+                                 os.path.join(root, "worktrees", "myrepo",
+                                              "feat-x")])
+        self.assertEqual(counts, {"bands": 2, "containers": 0})
+
+    def test_every_worktree_layout_lists_at_once(self):
+        # The migration is not atomic: while Herdr's setting changes, worktrees
+        # made under the old value stay where they are. All four shapes have to
+        # list together — Claude Code's <repo>/.claude/worktrees/<slug>, which
+        # carries one level fewer than the rest, Herdr's old nested
+        # <repo>/.worktrees/<repo>/<slug>, Herdr's older flat
+        # <root>/worktrees/<repo>/<slug>, and the new sibling
+        # <parent>/worktrees/<repo>/<slug>.
+        root, found = self.sibling(
+            repos=["Insight/tru-data", "zed-laravel"],
+            worktrees=["zed-laravel/.claude/worktrees/route-not-found-1a2b",
+                       "Insight/tru-data/.worktrees/tru-data/feat-old",
+                       "worktrees/zed-laravel/feat-flat",
+                       "Insight/worktrees/tru-data/feat-new"])
+        self.assertEqual(
+            sorted(found),
+            sorted([os.path.join(root, "Insight", "tru-data"),
+                    os.path.join(root, "zed-laravel"),
+                    os.path.join(root, "zed-laravel", ".claude", "worktrees",
+                                 "route-not-found-1a2b"),
+                    os.path.join(root, "Insight", "tru-data", ".worktrees",
+                                 "tru-data", "feat-old"),
+                    os.path.join(root, "worktrees", "zed-laravel", "feat-flat"),
+                    os.path.join(root, "Insight", "worktrees", "tru-data",
+                                 "feat-new")]))
+
+    def test_a_bare_parent_container_admits_only_worktrees(self):
+        # ".." is a legal value that resolves to the grouping dir itself, so it
+        # aims the container globs at every sibling of the repo. What bounds
+        # that is the kind() == "worktree" test, not the container name: the
+        # ordinary repo here sits exactly where the worktree does, four levels
+        # down and past the bands, and must not become a row.
+        root, found = self.discover(
+            repos=["a/group/one", "a/group/trees/vendored"],
+            worktrees=["a/group/trees/feat-x"],
+            dirs=list(pp.FIXED_WORKTREE_DIRS) + [".."])
+        self.assertEqual(
+            sorted(found),
+            sorted([os.path.join(root, "a", "group", "one"),
+                    os.path.join(root, "a", "group", "trees", "feat-x")]))
+
+    def globbed(self, **kwargs):
+        """((root, repos()), the patterns repos() handed to glob)."""
+        patterns, real = [], pp.glob.glob
+        with mock.patch.object(
+                pp.glob, "glob",
+                side_effect=lambda p, **kw: patterns.append(p) or real(p, **kw)):
+            return self.discover(**kwargs), patterns
+
+    def test_a_shared_sibling_container_is_globbed_once(self):
+        # Every repo in a parent resolves "../worktrees" to the SAME directory,
+        # so the bases list holds one copy per repo and the two container globs
+        # would re-run over it once per repo. Counted rather than timed: the
+        # saving is real work not done, and a timing assertion would be flaky.
+        # On the real 85-repo root it is 340 bases against 262 distinct ones,
+        # 28.9ms of discovery against 23.0ms.
+        dirs, roots = self.sibling_locations()
+        (root, found), patterns = self.globbed(
+            repos=["group/one", "group/two", "group/three"],
+            worktrees=["group/worktrees/one/feat-x"],
+            dirs=dirs, roots=roots)
+        shared = os.path.join(root, "group", "worktrees") + os.sep
+        self.assertEqual([p for p in patterns if p.startswith(shared)],
+                         [shared + os.path.join("*", ".git"),
+                          shared + os.path.join("*", "*", ".git")])
+        self.assertIn(os.path.join(root, "group", "worktrees", "one", "feat-x"),
+                      found)
+
     def test_an_absolute_worktree_root_outside_the_picker_root_is_searched(self):
         # The old flat layout, and Herdr's shipped default. Nothing under the
         # picker root leads to it, so it is searched on its own.
@@ -1168,11 +1318,14 @@ class ParentRepo(unittest.TestCase):
 
     # The three real pointers on this machine, copied verbatim. All three
     # layouts place the CHECKOUT differently and the admin path identically,
-    # which is the whole reason one parse serves them all.
+    # which is the whole reason one parse serves them all. Herdr's sibling
+    # <parent>/worktrees/<repo>/<slug> gets no fixture of its own for exactly
+    # that reason: its pointer is byte-identical in shape to the flat one
+    # below, so a fourth copy would assert the same parse twice.
 
     def test_the_repository_nested_layout_yields_the_parent(self):
-        # Herdr's, once [worktrees] directory is relative: the checkout lives
-        # at <repo>/.worktrees/<repo>/<slug>.
+        # Herdr's, while [worktrees] directory is ".worktrees": the checkout
+        # lives at <repo>/.worktrees/<repo>/<slug>.
         _, parent = self.derive(
             "gitdir: /Users/mike/Developer/Insight/tru-data/.git/worktrees/"
             "performance-optimizations\n")

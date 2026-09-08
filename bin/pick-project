@@ -508,8 +508,11 @@ def repos(counts=None):
     repo directly under the root is exactly that case. Naming the containers
     literally is also what makes this cheap. On the real root the two container
     depths under all 85 repos cost 9ms on top of the bands' 18ms, 26ms in total
-    against a ~70ms budget; measured again on 2026-09-08 with the setting at
-    "../worktrees", 23.5ms in total, and 29.0ms without the base dedupe below.
+    against a ~70ms budget. Re-measured there on 2026-09-08, when the setting
+    moved beside the repo: 22.5ms in total at ".worktrees" and 23.0ms at
+    "../worktrees", so the move costs 0.5ms. Both figures are the whole of
+    repos(), which is why they sit below the 26ms recorded for the same tree in
+    v0.6.1 rather than contradicting it.
 
     Not a recursive glob, for four reasons. It costs tens of seconds: "**/.git"
     with recursive=True measured between 23 and 37 seconds across runs on that
@@ -551,8 +554,9 @@ def repos(counts=None):
     # globs below would re-run over it that many times. Deduped first-seen, so
     # the order the appends rely on is unchanged. Measured on the real 85-repo
     # root with directory = "../worktrees": 340 bases collapse to 262, and
-    # discovery drops from 29.0ms to 23.5ms — against 22.7ms for ".worktrees",
-    # whose bases are all distinct and which the dedupe therefore cannot help.
+    # discovery drops from 28.9ms to 23.0ms. It pays for itself only there: at
+    # ".worktrees" all 255 bases are already distinct, and building the dict
+    # instead of the list costs 0.3ms for nothing.
     bases = dict.fromkeys(os.path.normpath(os.path.join(p, d))
                           for p in list(out) for d in WORKTREE_DIRS)
     for base in list(bases) + WORKTREE_ROOTS:
@@ -598,10 +602,12 @@ def parent_repo(path):
     Read out of the worktree's own .git — the FILE kind() classifies on. It
     holds one "gitdir:" line naming the parent's admin directory for this
     checkout, which git spells <repo-root>/.git/worktrees/<name>. So the parent
-    is three components up from the pointer. All three layouts on this machine
-    agree on it, however differently they place the checkout itself: Herdr's
-    nested .worktrees/<repo>/<slug>, Herdr's flat <root>/worktrees/<repo>/<slug>,
-    and Claude Code's .claude/worktrees/<slug>.
+    is three components up from the pointer. Where the checkout itself sits does
+    not enter into it, which is why one parse serves every layout on this
+    machine: Herdr's nested .worktrees/<repo>/<slug>, Herdr's sibling
+    <parent>/worktrees/<repo>/<slug>, Herdr's older flat
+    <root>/worktrees/<repo>/<slug>, and Claude Code's .claude/worktrees/<slug>.
+    A layout added later needs nothing here.
 
     One file read and no `git` subprocess, the same trade kind() makes for the
     same information, and for the same reason: this is paid per row opened.

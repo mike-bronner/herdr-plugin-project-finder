@@ -7,7 +7,7 @@ Fuzzy-pick git repos and open them as workspaces in
 
 `bin/pick-project` opens an fzf popup listing every git repo up to three levels
 under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere), plus the
-linked worktrees kept inside those repos. Open workspaces are listed first and
+linked worktrees belonging to those repos. Open workspaces are listed first and
 pre-selected, so what is checked is exactly what is loaded.
 On Enter the selection becomes the truth: unchecked open projects are closed,
 newly checked ones are created with a tab named `agent` holding Claude on the
@@ -22,16 +22,31 @@ is recognisable at a glance. The filter searches the whole visible row, so
 typing `worktree` narrows the list to worktrees.
 
 Worktrees are found wherever the tool that made them puts them. A worktree
-beside its parent, or in a flat root such as
-`<worktrees.directory>/<repo>/<branch-slug>`, is reached by the three depth
-levels. A worktree kept **inside** its own repo is found by name instead:
-`.worktrees/` (Herdr once its `[worktrees] directory` is relative),
+directly under one of the three depth levels is reached by them, which includes
+a flat root such as `<root>/worktrees/<repo>/<branch-slug>`. Everything else is
+found by naming the **container**: a relative path resolved against each repo's
+own root, searched two levels deep. The names are `.worktrees/`,
 `.claude/worktrees/` (Claude Code), a plain `worktrees/`, and whatever Herdr's
-own `[worktrees] directory` setting adds. Those names are searched because no
-wildcard matches a leading dot, so no amount of extra depth would ever see
-them — and because naming them is what keeps the search cheap: 9 ms on top of
-18 ms across 85 repos here. An absolute `[worktrees] directory` is read as a
-flat root and searched even when it sits outside `HERDR_PICKER_ROOT`.
+own `[worktrees] directory` setting adds.
+
+Resolving against the repo is what covers every layout in one pass, wherever
+the container falls. `.worktrees/<repo>/<branch-slug>` and Claude Code's
+`.claude/worktrees/<branch-slug>` sit inside the repo. A `../worktrees` setting
+resolves to `<parent>/worktrees/<repo>/<branch-slug>` beside it, which is where
+Herdr puts checkouts once they are moved out of the repository so that tools
+walking the tree stop descending into them.
+
+The names are searched rather than hunted for, because a hunt would not work
+and would not be cheap. No wildcard matches a leading dot, so no amount of
+extra depth would ever see `.worktrees` or `.claude`. And naming them holds the
+cost to 9 ms on top of 18 ms across 85 repos here. A container shared by every
+repo in a parent, which is what `../worktrees` produces, is globbed once rather
+than once per repo: 340 container paths across those 85 repos collapse to 262
+distinct ones, and the whole search takes 23.0 ms against 22.5 ms for
+`.worktrees`, so moving the worktrees out of the repos costs 0.5 ms. An
+absolute `[worktrees] directory` is read as a flat root instead, and searched
+even when it sits outside `HERDR_PICKER_ROOT`. A missing, unreadable or
+malformed setting leaves the fixed names in place and never fails.
 
 Anything else nested inside a repo is skipped, so a submodule or a vendored
 checkout is not listed twice. Only a real linked worktree is exempt from that,
@@ -171,7 +186,7 @@ $EDITOR "$(herdr plugin config-dir mikebronner.project-finder)/.env"
 
 ```sh
 # Where to look for git repos, searched three levels deep, plus the worktrees
-# inside each one. Default: ~
+# belonging to each one. Default: ~
 HERDR_PICKER_ROOT=~/Developer
 
 # Label of the pinned workspace that is never listed and never closed.
@@ -200,10 +215,12 @@ picker: discovery 26.9ms, 90 rows (85 from depth bands, 5 from worktree containe
 
 The search runs in two passes, and the two figures say what each one
 contributed: the depth bands walk the three levels under the root, and the
-second pass looks inside the worktree containers under every repo the bands
-found. The passes are named rather than what they return, because the bands
-find worktrees as well as repos — a flat `worktrees/<repo>/<branch>` sits three
-levels down, so the bands reach it.
+second pass searches the worktree containers of every repo the bands found. The
+passes are named rather than what they return, because the bands find worktrees
+as well as repos — any worktree within three levels whose path carries no
+leading dot, which covers a flat `worktrees/<repo>/<branch>` and a
+`../worktrees` container beside a repo directly under the root. Each row is
+credited to the pass that reached it first, and listed once either way.
 
 Leave the variable unset and the picker is silent, which is the default for
 every normal run. To read the line it is easier to run the picker from a shell
