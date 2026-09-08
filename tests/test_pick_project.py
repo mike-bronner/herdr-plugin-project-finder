@@ -372,6 +372,127 @@ class CreateWorkspace(unittest.TestCase):
         self.assertEqual(self.agent_start_argv("my-proj", live)[3], "my-proj")
         self.assertEqual(self.agent_start_argv("my-proj", live)[3], "my-proj-2")
 
+    def test_a_worktree_row_gets_the_same_layout_as_a_repo_row(self):
+        # The picker stays solely responsible for the agent-and-shell layout on
+        # every row: Herdr emits worktree.opened for this call, and the local
+        # agent-layout plugin subscribes to worktree.created alone.
+        with mock.patch.object(pp, "parent_repo", return_value="/x/myrepo"), \
+             mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
+             mock.patch.object(pp.subprocess, "Popen") as popen, \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            wid = pp.create_workspace("feat-x", "/x/wt/feat-x", set())
+        calls = [c.args for c in h.call_args_list]
+        self.assertEqual(wid, "w9")
+        self.assertEqual(calls[0][:2], ("worktree", "open"))
+        self.assertIn(("tab", "rename", "w9:t1", "agent"), calls)
+        self.assertTrue(any(c[:2] == ("pane", "split") for c in calls))
+        popen.assert_called_once()
+
+
+class OpenProject(unittest.TestCase):
+    """Which herdr command opens a row, and what happens when it will not.
+
+    A linked worktree has to go through `worktree open`. It is the only command
+    that records which repo the checkout belongs to, and that record is what
+    Herdr's sidebar groups by — a worktree opened with `workspace create`
+    carries none and floats at top level as an unrelated project.
+    """
+
+    RES = {"workspace": {"workspace_id": "w9"}}
+
+    def open(self, parent, fails=()):
+        """(result, calls) for open_project() with parent_repo() answering `parent`.
+
+        `fails` names commands, by their first two words, that herdr() answers
+        None for; every other command answers RES.
+        """
+        calls = []
+
+        def fake_herdr(*args):
+            calls.append(args)
+            return None if args[:2] in fails else self.RES
+
+        with mock.patch.object(pp, "parent_repo", return_value=parent), \
+             mock.patch.object(pp, "herdr", side_effect=fake_herdr):
+            return pp.open_project("feat-x", "/x/wt/feat-x"), calls
+
+    def test_a_worktree_is_opened_against_its_parent_repo(self):
+        # --cwd names the parent by PATH. The --workspace form would need the
+        # parent's own workspace open, and opening one the user did not check
+        # would break the picker's contract that the selection is the truth.
+        _, calls = self.open("/x/myrepo")
+        self.assertEqual(calls[0], ("worktree", "open", "--cwd", "/x/myrepo",
+                                    "--path", "/x/wt/feat-x",
+                                    "--label", "feat-x", "--no-focus"))
+
+    def test_opening_a_worktree_never_falls_through_to_workspace_create(self):
+        # Two commands for one row would open the project twice.
+        _, calls = self.open("/x/myrepo")
+        self.assertEqual([c[:2] for c in calls], [("worktree", "open")])
+
+    def test_the_worktree_result_is_returned_unchanged(self):
+        # create_workspace() reads tab and root_pane off whatever comes back,
+        # so a result summarised or reshaped here would lose the layout.
+        res, _ = self.open("/x/myrepo")
+        self.assertIs(res, self.RES)
+
+    def test_a_row_with_no_parent_uses_workspace_create(self):
+        _, calls = self.open(None)
+        self.assertEqual(calls, [("workspace", "create", "--cwd", "/x/wt/feat-x",
+                                  "--label", "feat-x", "--no-focus")])
+
+    def test_a_failed_worktree_open_falls_back_to_workspace_create(self):
+        # A Herdr too old to carry the command. min_herdr_version is 0.8.0, and
+        # the fallback opens the worktree exactly as every earlier version of
+        # this picker did, so the floor does not have to rise.
+        res, calls = self.open("/x/myrepo", fails={("worktree", "open")})
+        self.assertEqual([c[:2] for c in calls],
+                         [("worktree", "open"), ("workspace", "create")])
+        self.assertIs(res, self.RES)
+
+    def test_both_commands_failing_yields_none_so_the_caller_dies(self):
+        # The fallback's own failure stays fatal, as it always has been.
+        res, _ = self.open("/x/myrepo",
+                           fails={("worktree", "open"), ("workspace", "create")})
+        self.assertIsNone(res)
+
+    def test_nothing_is_ever_focused(self):
+        # Opening the picker must not move the user off what they are looking
+        # at; main() picks the focus target itself, after every create.
+        for parent in ("/x/myrepo", None):
+            with self.subTest(parent=parent):
+                _, calls = self.open(parent)
+                self.assertIn("--no-focus", calls[0])
+                self.assertNotIn("--focus", calls[0])
+
+    # The two cases above again, over a real directory rather than a stubbed
+    # parent_repo(), so the call site is pinned to the filesystem it reads.
+
+    def real(self, worktree):
+        """(repo, calls) for open_project() over a real project dir."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        repo = make_project(os.path.join(d.name, "myrepo"))
+        checkout = os.path.join(repo, ".worktrees", "myrepo", "feat-x")
+        os.makedirs(checkout)
+        with open(os.path.join(checkout, ".git"), "w", encoding="utf-8") as f:
+            f.write(f"gitdir: {repo}/.git/worktrees/feat-x\n")
+        calls = []
+        with mock.patch.object(pp, "herdr",
+                               side_effect=lambda *a: calls.append(a) or self.RES):
+            pp.open_project("feat-x", checkout if worktree else repo)
+        return repo, calls
+
+    def test_a_real_worktree_names_its_real_parent(self):
+        repo, calls = self.real(worktree=True)
+        self.assertEqual(calls[0][:4], ("worktree", "open", "--cwd", repo))
+
+    def test_a_real_repo_still_uses_workspace_create(self):
+        # Repo rows are untouched by this: they have no parent to name.
+        repo, calls = self.real(worktree=False)
+        self.assertEqual(calls, [("workspace", "create", "--cwd", repo,
+                                  "--label", "feat-x", "--no-focus")])
+
 
 class LoadEnv(unittest.TestCase):
     def load(self, body, env=None):
@@ -1025,6 +1146,118 @@ class Kind(unittest.TestCase):
         # repos() only ever yields paths that have a .git, so this is
         # unreachable today. Pinned so a future caller sees the fallback.
         self.assertEqual(self.kind_of(lambda g: None), "repo")
+
+
+class ParentRepo(unittest.TestCase):
+    """The repo a linked worktree belongs to, read out of its gitdir pointer.
+
+    open_project() names that repo to Herdr so the sidebar can nest the
+    checkout under it. A wrong answer nests it under an unrelated repo, so
+    every shape that is not exactly git's must come back None.
+    """
+
+    def derive(self, pointer):
+        """(checkout, parent_repo(checkout)) for a .git holding `pointer`."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        checkout = os.path.join(d.name, "feat-x")
+        os.makedirs(checkout)
+        with open(os.path.join(checkout, ".git"), "w", encoding="utf-8") as f:
+            f.write(pointer)
+        return checkout, pp.parent_repo(checkout)
+
+    # The three real pointers on this machine, copied verbatim. All three
+    # layouts place the CHECKOUT differently and the admin path identically,
+    # which is the whole reason one parse serves them all.
+
+    def test_the_repository_nested_layout_yields_the_parent(self):
+        # Herdr's, once [worktrees] directory is relative: the checkout lives
+        # at <repo>/.worktrees/<repo>/<slug>.
+        _, parent = self.derive(
+            "gitdir: /Users/mike/Developer/Insight/tru-data/.git/worktrees/"
+            "performance-optimizations\n")
+        self.assertEqual(parent, "/Users/mike/Developer/Insight/tru-data")
+
+    def test_the_flat_layout_yields_the_parent(self):
+        # The checkout sits under <root>/worktrees/<repo>/<slug>, nowhere near
+        # its repo. These rows nest correctly in the sidebar today only because
+        # Herdr opened them; through the picker they floated like the rest.
+        _, parent = self.derive(
+            "gitdir: /Users/mike/Developer/Sites/data-importer/.git/worktrees/"
+            "lexicon-import-parse-layer\n")
+        self.assertEqual(parent, "/Users/mike/Developer/Sites/data-importer")
+
+    def test_claude_codes_layout_yields_the_parent(self):
+        _, parent = self.derive(
+            "gitdir: /Users/mike/Developer/zed-laravel/.git/worktrees/"
+            "route-not-found-1610e5\n")
+        self.assertEqual(parent, "/Users/mike/Developer/zed-laravel")
+
+    def test_a_relative_pointer_is_resolved_against_the_checkout(self):
+        # `git worktree add --relative-paths`, and the worktree.useRelativePaths
+        # setting, write one of these. Handed to Herdr as --cwd unresolved it
+        # would name a directory relative to wherever the picker happens to run.
+        checkout, parent = self.derive("gitdir: ../myrepo/.git/worktrees/feat-x\n")
+        self.assertEqual(parent,
+                         os.path.join(os.path.dirname(checkout), "myrepo"))
+
+    def test_an_ordinary_repo_has_no_worktree_parent(self):
+        # Its .git is a directory, so the read raises before any parsing. This
+        # is what keeps repo rows on `workspace create` without a second stat.
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pp.parent_repo(make_project(os.path.join(d, "r"))))
+
+    def test_a_submodule_pointer_yields_none(self):
+        # A submodule's .git is a FILE too, so kind() calls it a worktree, but
+        # it points into .git/modules and has no worktree parent to name.
+        # Nesting it under the superproject would be a different claim entirely.
+        self.assertIsNone(self.derive("gitdir: /x/super/.git/modules/sub\n")[1])
+
+    def test_an_admin_dir_outside_dot_git_yields_none(self):
+        # "worktrees" alone is not the shape: the component above it has to be
+        # .git. A prefix or a single-name test would admit this.
+        self.assertIsNone(self.derive("gitdir: /x/parent/git/worktrees/wt\n")[1])
+
+    def test_an_admin_dir_with_no_worktrees_component_yields_none(self):
+        self.assertIsNone(self.derive("gitdir: /x/parent/.git\n")[1])
+
+    def test_a_line_whose_key_is_not_gitdir_yields_none(self):
+        # The KEY is checked, not merely the value's shape. The fixture is
+        # shaped to make that visible: an admin path that passes every shape
+        # check below, behind a key that is not "gitdir". A .git file holding
+        # anything else is malformed, and malformed must not name a parent.
+        self.assertIsNone(
+            self.derive("worktreedir: /x/parent/.git/worktrees/wt\n")[1])
+
+    def test_a_gitdir_key_with_no_target_yields_none(self):
+        self.assertIsNone(self.derive("gitdir:   \n")[1])
+
+    def test_an_empty_dot_git_yields_none(self):
+        self.assertIsNone(self.derive("")[1])
+
+    def test_a_missing_dot_git_yields_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pp.parent_repo(os.path.join(d, "gone")))
+
+    def test_surrounding_whitespace_around_the_target_is_ignored(self):
+        # Git pads neither end, but a file edited by hand may. Unstripped, the
+        # padded path stops looking absolute and gets joined onto the checkout.
+        _, parent = self.derive("gitdir:  /x/parent/.git/worktrees/wt  \n")
+        self.assertEqual(parent, "/x/parent")
+
+    def test_only_the_first_line_is_read(self):
+        # The fixture is shaped to make the difference visible: read whole, the
+        # two lines splice into one path that still passes every shape check
+        # and yields "/x/parent/.git/worktrees/wt\n/x/other" as the repo to
+        # nest under. A second line is not a shape git writes, so anything
+        # carrying one is malformed and must not produce a parent by accident.
+        _, parent = self.derive("gitdir: /x/parent/.git/worktrees/wt\n"
+                                "/x/other/.git/worktrees/wt2\n")
+        self.assertEqual(parent, "/x/parent")
+
+    def test_a_trailing_separator_on_the_admin_path_is_tolerated(self):
+        _, parent = self.derive("gitdir: /x/parent/.git/worktrees/wt/\n")
+        self.assertEqual(parent, "/x/parent")
 
 
 class Elide(unittest.TestCase):

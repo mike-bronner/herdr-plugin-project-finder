@@ -23,6 +23,10 @@ Each new workspace opens one tab named "agent", split 50/50: Claude on the
 left, a shell on the right. Claude is started plain — Herdr's own [session]
 resume_agents_on_restore (on by default) handles bringing conversations back
 after a server restart, so the picker does not pass --continue itself.
+
+A linked worktree is opened as a worktree rather than as a bare directory, so
+Herdr's sidebar nests it under the repo it belongs to instead of floating it at
+top level. See open_project().
 """
 import glob, json, os, re, shutil, subprocess, sys, time
 
@@ -114,20 +118,25 @@ def herdr_config_path():
     return os.path.expanduser("~/.config/herdr/config.toml")
 
 
-# Container paths a linked worktree sits in INSIDE the repo it belongs to,
-# relative to that repo. ".worktrees" is Herdr's own layout once [worktrees]
-# directory is relative, ".claude/worktrees" is Claude Code's, and "worktrees"
-# is the same idea spelled without the dot. Fixed names rather than a search:
-# see repos() for what looking harder costs.
+# Container paths a linked worktree sits in, each RESOLVED AGAINST the root of
+# the repo it belongs to. The rule is the resolution, not the destination: all
+# three fixed names land inside the repo, but a "../x" added by the setting
+# below lands beside it, and repos() searches whatever the join produces.
+# ".worktrees" is Herdr's own layout while [worktrees] directory is ".worktrees",
+# ".claude/worktrees" is Claude Code's, and "worktrees" is the same idea spelled
+# without the dot. Fixed names rather than a search: see repos() for what looking
+# harder costs.
 FIXED_WORKTREE_DIRS = (".worktrees", ".claude/worktrees", "worktrees")
 
 
 def worktree_locations(config=None):
     """(dirs, roots): the two shapes a linked worktree is kept in.
 
-    `dirs` are RELATIVE paths, each searched under every repo that was found.
-    `roots` are absolute directories holding worktrees for many repos, searched
-    on their own because they may sit outside the picker root entirely.
+    `dirs` are RELATIVE paths, each resolved against every repo that was found.
+    A leading "../" is therefore not a special case here: it resolves to a
+    directory BESIDE the repo instead of inside it, and repos() searches it the
+    same way. `roots` are absolute directories holding worktrees for many repos,
+    searched on their own because they may sit outside the picker root entirely.
 
     On top of the fixed names, Herdr's own [worktrees] directory is read, so
     the picker follows the setting instead of guessing at it — while never
@@ -147,8 +156,13 @@ def worktree_locations(config=None):
         roots.append(os.path.normpath(setting))
     elif setting:
         # normpath so "./trees" and "trees" cannot both be searched. A "../x"
-        # is kept: Herdr resolves it against the repo root too, so it names a
-        # real container beside the repo rather than a nonsense one.
+        # is kept, and normpath keeps its leading "..": Herdr resolves the value
+        # against the repo root too, so "../worktrees" names a real container
+        # beside the repo rather than a nonsense one. That is the layout Herdr
+        # moved to so that no filesystem-walking tool descends into a worktree,
+        # and repos() carries the two consequences of it — the container is
+        # SHARED by every repo in that parent, and it can fall inside the depth
+        # bands' reach because it has no leading dot.
         norm = os.path.normpath(setting)
         if norm not in dirs:
             dirs.append(norm)
@@ -427,9 +441,12 @@ def debug_discovery(elapsed, paths, counts, out=None):
 
     The two passes are named by WHERE THEY LOOK, not by what they return.
     Calling the first figure "repos" would be false on a real tree: the depth
-    bands also find every worktree kept OUTSIDE a container, which includes
-    Herdr's flat <root>/worktrees/<repo>/<slug> layout three levels down. Only
-    the container pass is worktrees exclusively. Each figure reads "N from X"
+    bands find worktrees too, every one that falls within three levels of the
+    root and carries no leading dot on the way. Herdr's flat
+    <root>/worktrees/<repo>/<slug> is that, and so is a "../worktrees"
+    container beside a repo directly under the root. Only the container pass is
+    worktrees exclusively, and the two are counted where they were FOUND, not
+    where they belong. Each figure reads "N from X"
     rather than "N Xs" so that a count of one needs no singular form. `paths`
     supplies the row total rather than a sum of the two, so the line reports
     what was actually listed.
@@ -449,8 +466,8 @@ def debug_discovery(elapsed, paths, counts, out=None):
 
 
 def repos(counts=None):
-    """Every git repo up to 3 levels under the root, plus the worktrees inside
-    them.
+    """Every git repo up to 3 levels under the root, plus the worktrees kept in
+    a container resolved against each of them.
 
     Two passes, because the two things live in different places.
 
@@ -469,20 +486,30 @@ def repos(counts=None):
     parent is always reached before anything inside it.
 
     The second pass is the exemption to that skip, and the only one: a LINKED
-    WORKTREE inside a well-known container is listed. Both tools that make them
-    nest them now — Herdr at <repo>/.worktrees/<repo>/<slug> once its
-    [worktrees] directory is relative, Claude Code at
-    <repo>/.claude/worktrees/<slug> — so the skip alone lost every one of them.
-    The containers come from worktree_locations(): fixed names plus whatever
-    Herdr's own setting adds, so the picker follows that setting without
-    hanging off it. Only kind() == "worktree" is admitted, which is what keeps
-    the exemption from re-admitting the submodule the skip exists for.
+    WORKTREE in a well-known container is listed. A container is a relative
+    path RESOLVED AGAINST each repo root, which is what makes one pass serve
+    every layout on this machine however differently each places the checkout:
+    Herdr's <repo>/.worktrees/<repo>/<slug> while its [worktrees] directory is
+    ".worktrees", Claude Code's <repo>/.claude/worktrees/<slug>, which carries
+    one level fewer, and Herdr's <parent>/worktrees/<repo>/<slug> once that
+    setting becomes "../worktrees" — the value that keeps checkouts out of the
+    repo entirely, so that no filesystem-walking tool descends into them. The
+    skip alone lost every one of them. The containers come from
+    worktree_locations(): fixed names plus whatever Herdr's own setting adds,
+    so the picker follows that setting without hanging off it. Only
+    kind() == "worktree" is admitted, which is what keeps the exemption from
+    re-admitting the submodule the skip exists for.
 
-    Depth bands cannot reach a container at all, whatever the number: glob
-    never matches a leading dot with a wildcard, so ".worktrees" and ".claude"
-    are invisible to "*/*/*". Naming them literally is also what makes this
-    cheap. On the real root the two container depths under all 85 repos cost
-    9ms on top of the bands' 18ms, 26ms in total against a ~70ms budget.
+    A DOTTED container is unreachable by the depth bands whatever the number:
+    glob never matches a leading dot with a wildcard, so ".worktrees" and
+    ".claude" are invisible to "*/*/*". An undotted one is reachable whenever
+    it happens to fall within three levels, which is why the loop below tests
+    `w not in out` rather than assuming a fresh path — "../worktrees" beside a
+    repo directly under the root is exactly that case. Naming the containers
+    literally is also what makes this cheap. On the real root the two container
+    depths under all 85 repos cost 9ms on top of the bands' 18ms, 26ms in total
+    against a ~70ms budget; measured again on 2026-09-08 with the setting at
+    "../worktrees", 23.5ms in total, and 29.0ms without the base dedupe below.
 
     Not a recursive glob, for four reasons. It costs tens of seconds: "**/.git"
     with recursive=True measured between 23 and 37 seconds across runs on that
@@ -513,11 +540,22 @@ def repos(counts=None):
                 out.append(p)
     banded = len(out)
 
-    # Both container layouts in one pass: Claude Code puts the worktree
-    # straight in the container, Herdr puts it under the repo's own name.
-    bases = [os.path.normpath(os.path.join(p, d)) for p in list(out)
-             for d in WORKTREE_DIRS]
-    for base in bases + WORKTREE_ROOTS:
+    # Every container layout in one pass, because the two depths cover all of
+    # them: Claude Code puts the worktree straight in the container, Herdr puts
+    # it under the repo's own name whether the container sits inside the repo
+    # or beside it.
+    #
+    # normpath is what resolves a "../x" container, and dict.fromkeys is what
+    # pays for it. A container beside the repo is SHARED by every repo in that
+    # parent, so the join produces the same directory once per repo, and the
+    # globs below would re-run over it that many times. Deduped first-seen, so
+    # the order the appends rely on is unchanged. Measured on the real 85-repo
+    # root with directory = "../worktrees": 340 bases collapse to 262, and
+    # discovery drops from 29.0ms to 23.5ms — against 22.7ms for ".worktrees",
+    # whose bases are all distinct and which the dedupe therefore cannot help.
+    bases = dict.fromkeys(os.path.normpath(os.path.join(p, d))
+                          for p in list(out) for d in WORKTREE_DIRS)
+    for base in list(bases) + WORKTREE_ROOTS:
         for depth in ("*", "*/*"):
             for g in sorted(glob.glob(os.path.join(base, depth, ".git"))):
                 w = os.path.dirname(g)
@@ -554,6 +592,51 @@ def kind(path):
     return "worktree" if os.path.isfile(os.path.join(path, ".git")) else "repo"
 
 
+def parent_repo(path):
+    """The root of the repo a linked worktree at `path` belongs to, or None.
+
+    Read out of the worktree's own .git — the FILE kind() classifies on. It
+    holds one "gitdir:" line naming the parent's admin directory for this
+    checkout, which git spells <repo-root>/.git/worktrees/<name>. So the parent
+    is three components up from the pointer. All three layouts on this machine
+    agree on it, however differently they place the checkout itself: Herdr's
+    nested .worktrees/<repo>/<slug>, Herdr's flat <root>/worktrees/<repo>/<slug>,
+    and Claude Code's .claude/worktrees/<slug>.
+
+    One file read and no `git` subprocess, the same trade kind() makes for the
+    same information, and for the same reason: this is paid per row opened.
+
+    None whenever the shape is not exactly that, and the caller then opens the
+    checkout unnested. An ordinary repo answers None because its .git is a
+    directory, so the read raises before any parsing. A SUBMODULE answers None
+    too, and deliberately: its .git is a file as well, so kind() calls it a
+    worktree, but it points at <super>/.git/modules/<name> and has no worktree
+    parent to name. Nothing obliges other tooling to write git's shape either,
+    and a wrongly-derived parent is worse than none — it would nest the
+    checkout under some unrelated repo.
+
+    A relative pointer is resolved against the checkout. Git writes an absolute
+    one by default, but `git worktree add --relative-paths` and the
+    worktree.useRelativePaths setting write a relative one, and a relative path
+    would then be resolved by Herdr against the wrong directory entirely.
+    """
+    try:
+        with open(os.path.join(path, ".git"), encoding="utf-8") as f:
+            pointer = f.read()
+    except OSError:
+        return None
+    key, _, target = pointer.partition("\n")[0].partition(":")
+    if key.strip() != "gitdir" or not target.strip():
+        return None
+    admin = os.path.normpath(os.path.join(path, target.strip()))
+    container = os.path.dirname(admin)
+    dotgit = os.path.dirname(container)
+    if os.path.basename(container) != "worktrees" \
+            or os.path.basename(dotgit) != ".git":
+        return None
+    return os.path.dirname(dotgit)
+
+
 def touched_at(path):
     """Newest of the git index and the newest working-tree file (depth 2).
 
@@ -568,7 +651,11 @@ def touched_at(path):
 
     Pruned by full path, not by name, so ".claude" keeps counting while
     ".claude/worktrees" does not, and a "worktrees" deeper in the tree is left
-    alone — a container is only a container where repos() looks for one.
+    alone — a container is only a container where repos() looks for one. That
+    same full-path rule makes a container BESIDE the repo, which a "../x"
+    setting produces, inert here rather than a special case: it resolves to a
+    path the walk below never reaches, and it needs no pruning because a
+    sibling directory was never counted as this repo's work in the first place.
     """
     newest = 0
     try:
@@ -892,17 +979,56 @@ def build_lines(rows, status, now):
     return lines
 
 
+def open_project(label, path):
+    """Ask Herdr to open `path` as a workspace; its result, or None on failure.
+
+    A linked worktree goes through `worktree open`, which is the only command
+    that records which repo the checkout belongs to. `workspace create` records
+    nothing, so a worktree opened with it carries no repo metadata at all and
+    Herdr's sidebar has nothing to group it by: it floats at top level as if it
+    were an unrelated project, while the same worktree opened by Herdr itself
+    nests under its repo. That was true of every worktree the picker opened, in
+    every layout, not only the nested ones.
+
+    The parent is named by PATH (--cwd), not by workspace id. The id form would
+    need the parent's own workspace open, and opening one the user did not check
+    would break this picker's contract that the selection is the truth.
+
+    `worktree open` returns the same workspace / tab / root_pane the create call
+    does, so the caller's layout is built on it identically.
+
+    Falls back to `workspace create` in both the cases where the nesting cannot
+    be had: a checkout whose parent parent_repo() cannot derive, and a Herdr too
+    old to carry the command — min_herdr_version is 0.8.0 and this is not worth
+    raising, since the fallback opens the worktree exactly as every version of
+    this picker already did. Only the fallback failing is fatal, which is the
+    same failure the caller has always died on.
+    """
+    parent = parent_repo(path)
+    if parent:
+        res = herdr("worktree", "open", "--cwd", parent, "--path", path,
+                    "--label", label, "--no-focus")
+        if res:
+            return res
+    return herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
+
+
 def create_workspace(label, path, live):
     """Open a workspace for `path` with the agent layout; return its workspace id.
 
     The first tab arrives with the workspace and cannot be labelled at creation
-    (`workspace create --label` names the workspace), so it is renamed to
-    TAB_LABEL right after. It is then split Claude (left) | shell (right).
+    (`--label` names the workspace), so it is renamed to TAB_LABEL right after.
+    It is then split Claude (left) | shell (right).
+
+    That layout is applied to every row, worktrees included. Herdr emits
+    worktree.opened for the call open_project() makes, but no plugin here acts
+    on it — the local agent-layout plugin subscribes to worktree.created alone —
+    so this stays the only thing laying the workspace out.
 
     `live` is the set of agent names already spoken for, and is MUTATED: the
     name this call takes is reserved in it, so the caller's next create sees it.
     """
-    res = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
+    res = open_project(label, path)
     if not res:
         die(f"failed to create workspace for {path}")
 

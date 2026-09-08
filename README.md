@@ -40,6 +40,23 @@ still skipped. A repo's `TOUCHED` time ignores its nested worktrees for the
 same reason: each one is its own row, and work on a branch is not work on its
 parent.
 
+A worktree is *opened* as a worktree rather than as a bare directory, so
+Herdr's spaces sidebar nests it under the repo it belongs to. `workspace
+create` records nothing about where a checkout came from, so a worktree opened
+with it carries no repo metadata and floats at top level as though it were an
+unrelated project. That applied to every worktree the picker opened, in every
+layout, not only the ones kept inside a repo.
+
+The parent is read from the worktree's own `.git`, the one-line `gitdir:`
+pointer at `<repo>/.git/worktrees/<name>`. That is one file read and no `git`
+subprocess, the same trade the `KIND` column already makes. Herdr is then told
+the parent by **path**, so the parent's own workspace does not have to be open:
+opening one you did not check would break the rule that the selection is the
+truth. Two cases fall back to the old behaviour, where the worktree opens
+without being grouped: a `.git` that does not carry git's pointer shape, and a
+Herdr too old for the command. Repo rows are unaffected, having no parent to
+name.
+
 An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
 `~/.config/herdr/config.toml` rather than assumed: `[ui] status_indicators`
