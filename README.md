@@ -385,3 +385,11 @@ puts the cache under `sys.pycache_prefix`
 The test module cannot protect its own compilation this way, since the flag
 runs after it. Prefix the command with `PYTHONDONTWRITEBYTECODE=1` if you are
 making rapid same-size edits to the tests themselves.
+
+One check needs a newer interpreter than the plugin does. The suite parses
+`herdr-plugin.toml` for real, because Herdr re-reads that file at dispatch time
+and a syntax error in it stops the plugin silently. Parsing needs `tomllib`,
+which arrived in Python 3.11, and the `python3` this plugin runs under is 3.9
+on macOS. Under 3.9 that one check is skipped and the run prints a banner
+saying so, because a green suite there is not a checked manifest. Run the suite
+under a 3.11 or newer interpreter to include it.

@@ -6,6 +6,34 @@ import importlib.machinery, importlib.util, io, os, re, sys, tempfile, time
 import unittest
 from unittest import mock
 
+# ManifestIsValidToml at the foot of this file parses herdr-plugin.toml for
+# real, which needs tomllib — added in Python 3.11. /usr/bin/python3 is 3.9 on
+# this machine, and the plugin targets it deliberately, because Herdr's server
+# runs under launchd with a minimal PATH that /opt/homebrew is not on. So the
+# check has to be skippable.
+#
+# A skip that reads as a pass would be worse than no check at all, hence the
+# banner: it is printed once, at import, on stderr, so no green run can be
+# mistaken for a checked manifest.
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
+NO_TOML = ("Python %d.%d.%d has no tomllib, which arrived in 3.11"
+           % sys.version_info[:3])
+
+if tomllib is None:
+    print("\n%(bar)s\n"
+          "!! herdr-plugin.toml WAS NOT CHECKED: %(why)s.\n"
+          "!! The manifest parse test is SKIPPED, not passed. Herdr re-reads\n"
+          "!! that file at dispatch time, so one syntax error in it stops this\n"
+          "!! plugin dispatching, silently and with nothing surfaced. A green\n"
+          "!! run below does NOT say the manifest is valid TOML.\n"
+          "!! To really check it, re-run under a 3.11+ interpreter:\n"
+          "!!     python3.11 -m unittest discover tests\n"
+          "%(bar)s\n" % {"bar": "!" * 70, "why": NO_TOML}, file=sys.stderr)
+
 # Must be set before the loader below runs. A .pyc is treated as valid while
 # the source's (mtime truncated to whole seconds, byte size) is unchanged, so
 # editing the script to a same-size version inside one second makes this suite
@@ -19,6 +47,7 @@ sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "bin", "pick-project")
+MANIFEST = os.path.join(HERE, "..", "herdr-plugin.toml")
 loader = importlib.machinery.SourceFileLoader("pick_project", SCRIPT)
 spec = importlib.util.spec_from_loader("pick_project", loader)
 pp = importlib.util.module_from_spec(spec)
@@ -686,6 +715,15 @@ class LayoutSettings(unittest.TestCase):
         sibling = os.path.join(HERE, "..", "..",
                                "herdr-plugin-agentic-panes-layout", "README.md")
         if not os.path.isfile(sibling):
+            # Loud for the same reason as the banner at the top of this file: a
+            # skip that reads as a pass is worse than no check at all.
+            print("\n%(bar)s\n"
+                  "!! THE SHARED SETTING NAMES WERE NOT CHECKED: the sibling\n"
+                  "!! plugin herdr-plugin-agentic-panes-layout is not checked\n"
+                  "!! out beside this repo, so its README could not be read.\n"
+                  "!! The test is SKIPPED, not passed. Clone the sibling beside\n"
+                  "!! this repo to check that one vocabulary covers both.\n"
+                  "%(bar)s\n" % {"bar": "!" * 70}, file=sys.stderr)
             self.skipTest("the sibling plugin is not checked out beside this one")
         with open(sibling, encoding="utf-8") as f:
             names = {line.split("=")[0] for line in f
@@ -2599,6 +2637,66 @@ class KeyBindings(unittest.TestCase):
     def test_legend_names_every_bound_key(self):
         for key in ("ctrl-a", "ctrl-d"):
             self.assertIn(key, pp.HEADER)
+
+
+class ManifestIsValidToml(unittest.TestCase):
+    """The manifest has to PARSE. Nothing else here opens it at all.
+
+    Measured on 0.8.2, 2026-09-08: Herdr re-reads herdr-plugin.toml from disk
+    when it dispatches, rather than trusting the copy it cached in
+    plugins.json. An edit takes effect on the very next dispatch — no re-link,
+    no restart, no reload-config. This is the other half of that: a syntax
+    error in the manifest stops every dispatch for this plugin, with no toast,
+    no error and nothing surfaced. It simply goes quiet, and every route into
+    this plugin runs through the one [[panes]] entry the manifest declares, so
+    what goes quiet is the picker itself.
+
+    read_toml() in the picker cannot answer this question and is deliberately
+    not used here. It extracts a fixed set of wanted scalars out of Herdr's own
+    config and ignores every line it does not recognise, so it returns happily
+    on a file no TOML parser would accept. That tolerance is right for optional
+    user config and wrong for a validity check.
+
+    Skipped, loudly, where tomllib is unavailable: see the banner at the top of
+    this file. A skip is not a pass — and this suite already skips one other
+    test when the sibling plugin is not checked out beside it, so the skip
+    COUNT in the summary cannot tell you which checks did not run. The banner
+    is what distinguishes this one.
+    """
+
+    def setUp(self):
+        if tomllib is None:
+            self.skipTest("herdr-plugin.toml was NOT parsed: " + NO_TOML)
+
+    def parse(self, path):
+        """The manifest at `path`, read exactly as Herdr's loader would."""
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+
+    def test_the_manifest_parses(self):
+        try:
+            self.parse(MANIFEST)
+        except tomllib.TOMLDecodeError as e:
+            self.fail("herdr-plugin.toml is not valid TOML: %s" % e)
+
+    def test_a_typo_in_the_manifest_is_really_caught(self):
+        """A canary on the test above, which would pass for two very different
+        reasons: the manifest is valid, or nothing is really parsing it.
+
+        The fixture is the REAL manifest plus one unterminated string, which is
+        what a typo looks like, written to a temporary directory. Corrupting
+        the real file to prove the point would be the same class of mistake
+        this test exists to catch.
+        """
+        with open(MANIFEST, "rb") as f:
+            typo = f.read() + b'\nname = "unterminated\n'
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        broken = os.path.join(tmp.name, "herdr-plugin.toml")
+        with open(broken, "wb") as f:
+            f.write(typo)
+        with self.assertRaises(tomllib.TOMLDecodeError):
+            self.parse(broken)
 
 
 if __name__ == "__main__":
