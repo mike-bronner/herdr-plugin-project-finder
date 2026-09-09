@@ -12,7 +12,7 @@ herdr plugin install mike-bronner/herdr-plugin-project-finder
 Pin a particular revision with `--ref`:
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder --ref v0.7.0
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref v0.8.0
 ```
 
 To work on the plugin instead, clone it and link the checkout:
@@ -50,15 +50,39 @@ that directory. Note that `herdr plugin list` may still report the version the
 link was registered at, so treat the version it prints for a linked plugin as
 unreliable.
 
+Either way the picker rebuilds itself on the next run. See
+[how the binary is built](#how-the-binary-is-built).
+
 ## What it does
 
-`bin/pick-project` opens an fzf popup listing every git repo up to three levels
+`bin/pick-project` opens a popup listing every git repo up to three levels
 under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere), plus the
 linked worktrees belonging to those repos. Open workspaces are listed first and
-pre-selected, so what is checked is exactly what is loaded.
+pre-checked, so what is checked is exactly what is loaded.
 On Enter the selection becomes the truth: unchecked open projects are closed,
 newly checked ones are opened, and an empty selection closes everything except
 the home workspace. Esc changes nothing.
+
+The list is drawn by the plugin itself, with
+[ratatui](https://ratatui.rs) and [nucleo](https://github.com/helix-editor/nucleo)
+for the fuzzy matching. Type to filter, `Tab` to check a row, `Enter` to apply.
+
+| Key | Does |
+| --- | --- |
+| any character | types into the filter, `space` included |
+| `Tab` | checks or unchecks the highlighted row, then moves down |
+| `Shift-Tab` | the same, then moves up |
+| `Ctrl-A` | checks every row the filter left |
+| `Ctrl-D` | unchecks every row the filter left |
+| `Up` / `Down`, `Ctrl-P` / `Ctrl-N` | move the cursor |
+| `PageUp` / `PageDown`, `Home` / `End` | move it further |
+| `Backspace`, `Ctrl-W`, `Ctrl-U` | drop a character, a word, the whole filter |
+| `Enter` | applies what is checked |
+| `Esc`, `Ctrl-C` | changes nothing |
+
+`space` types rather than toggling, so a two-word filter works. `Ctrl-A` and
+`Ctrl-D` reach only the rows the filter left on screen, so a row you checked
+before narrowing the list stays checked.
 
 **Every workspace the picker opens is handed to one command of your choosing.**
 That is the `layout` setting, and it is where the panes come from: the picker
@@ -84,8 +108,11 @@ The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
 
 A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
-is recognisable at a glance. The filter searches the whole visible row, so
-typing `worktree` narrows the list to worktrees.
+is recognisable at a glance.
+
+The filter searches the project name, the kind, the age and the agent-status
+word, so typing `worktree` narrows the list to worktrees and `blocked` narrows
+it to blocked agents.
 
 Worktrees are found wherever the tool that made them puts them. A worktree
 directly under one of the three depth levels is reached by them, which includes
@@ -103,16 +130,15 @@ Herdr puts checkouts once they are moved out of the repository so that tools
 walking the tree stop descending into them.
 
 The names are searched rather than hunted for, because a hunt would not work
-and would not be cheap. No wildcard matches a leading dot, so no amount of
-extra depth would ever see `.worktrees` or `.claude`. And naming them holds the
-cost to 9 ms on top of 18 ms across 85 repos here. A container shared by every
-repo in a parent, which is what `../worktrees` produces, is globbed once rather
-than once per repo: 340 container paths across those 85 repos collapse to 262
-distinct ones, and the whole search takes 23.0 ms against 22.5 ms for
-`.worktrees`, so moving the worktrees out of the repos costs 0.5 ms. An
+and would not be cheap. A directory whose name begins with a dot is never
+descended into blindly, so no amount of extra depth would ever reach
+`.worktrees` or `.claude`. A container shared by every repo in a parent, which
+is what `../worktrees` produces, is searched once rather than once per repo. An
 absolute `[worktrees] directory` is read as a flat root instead, and searched
-even when it sits outside `HERDR_PICKER_ROOT`. A missing, unreadable or
-malformed setting leaves the fixed names in place and never fails.
+even when it sits outside `HERDR_PICKER_ROOT`. Symbolic links are followed, so a
+flat root holding a link into another group directory still lists what is behind
+it. A missing, unreadable or malformed setting leaves the fixed names in place
+and never fails.
 
 Anything else nested inside a repo is skipped, so a submodule or a vendored
 checkout is not listed twice. Only a real linked worktree is exempt from that,
@@ -122,7 +148,7 @@ same reason: each one is its own row, and work on a branch is not work on its
 parent.
 
 Every git checkout is *opened* as a worktree rather than as a bare directory,
-so Herdr records which repo it belongs to. `workspace create` records nothing
+so Herdr records which repo it belongs to. `workspace.create` records nothing
 about where a checkout came from, and two things break on that. A worktree
 carries no repo metadata and floats at top level in Herdr's spaces sidebar as
 though it were an unrelated project, instead of nesting under its repo — that
@@ -136,12 +162,12 @@ A worktree names its parent, read from the worktree's own `.git`, the one-line
 `gitdir:` pointer at `<repo>/.git/worktrees/<name>`. That is one file read and
 no `git` subprocess, the same trade the `KIND` column already makes. A repo
 names itself: the checkout and the repo are then the same directory, which is
-the shape the command accepts for a checkout that is not linked. Herdr is told
+the shape the call accepts for a checkout that is not linked. Herdr is told
 the repo by **path**, so its own workspace does not have to be open: opening
 one you did not check would break the rule that the selection is the truth.
-Three cases fall back to the old behaviour, where the row opens with no repo
+Three cases fall back to `workspace.create`, where the row opens with no repo
 recorded: a directory that is no git checkout at all, a worktree `.git` that
-does not carry git's pointer shape, and a Herdr too old for the command.
+does not carry git's pointer shape, and a Herdr that refuses the call.
 
 An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
@@ -151,7 +177,7 @@ picks `dots` or `symbols`, and `[theme]` plus any `[theme.custom]` override of
 built-in themes are covered, and under `theme.name = "terminal"` the colours are
 ANSI indexes, so the picker follows your terminal profile exactly as Herdr does.
 Herdr shows the glyph alone; the picker keeps the status word beside it because
-fzf searches the visible text, so typing `blocked` narrows the list.
+the filter searches it.
 
 The palette is a copy, because Herdr keeps its own inside the renderer: there is
 no colour on the socket API and no theme event to subscribe to. So the picker
@@ -163,6 +189,10 @@ the picker draws the `terminal` palette, which keeps the meaning right (green
 idle, yellow working, red blocked) and follows your terminal profile, but is not
 guaranteed to match the sidebar. That is the signal to refresh the table from
 `src/app/state.rs` upstream.
+
+`herdr config check` is the one thing the picker still runs as a subprocess.
+It is a diagnostic command, not an API method, so there is nothing on the socket
+to ask instead. A Herdr that cannot be run is simply not a rejection.
 
 Herdr's config is found at `HERDR_CONFIG_PATH` when that is set, otherwise
 derived from the plugin config directory Herdr passes in, otherwise
@@ -176,12 +206,55 @@ nor the CLI. With `auto_switch = true` the picker uses `dark_name` and applies
 follow and the colours match exactly.
 
 A project name longer than 34 characters is cut with a `…` so it cannot push
-the columns after it out of alignment. The preview pane shows the full name
-above the git log. Note that the filter can only match what is displayed —
-fzf does not search hidden fields — so text past the ellipsis will not match.
+the columns after it out of alignment. The preview pane on the right shows the
+full name above the git log. The filter reads the **whole** name rather than
+what fits on screen, so text past the ellipsis still matches.
 
 Pairs well with [herdr-plugin-recent-spaces](https://github.com/mike-bronner/herdr-plugin-recent-spaces),
 which keeps the sidebar in most-recently-used order.
+
+## How it talks to Herdr
+
+Over Herdr's socket, at `HERDR_SOCKET_PATH`, and not by shelling out to the CLI.
+The wire protocol is newline-delimited JSON with no handshake: one connection
+per request, `{id, method, params}` out and `{id, result}` or `{id, error}`
+back. The picker uses `workspace.list`, `workspace.create`, `workspace.close`,
+`workspace.focus`, `worktree.open`, `plugin.list` and `notification.show`.
+
+An error comes back with a code, so a refusal can be told apart from a crash
+without reading stderr for a phrase. That is the whole reason for the choice: a
+`worktree.open` the server refuses falls back to `workspace.create`, and it has
+to be sure which of the two it is looking at.
+
+With `HERDR_SOCKET_PATH` unset the picker says so and draws nothing, because a
+selection it cannot act on is worse than no popup at all.
+
+## How the binary is built
+
+The plugin is a Rust binary. `bin/pick-project` is a small `sh` shim: it checks
+whether anything under `src/`, `Cargo.toml` or `Cargo.lock` is newer than the
+built binary, rebuilds if so, and then runs it. The manifest points Herdr at the
+shim and never at the build output, so nothing breaks when a profile or a path
+changes.
+
+The shim exists because Herdr's `[[build]]` steps run **only** during
+`herdr plugin install owner/repo`. They do not run for `herdr plugin link`, and
+they do not run on update. A linked checkout would therefore never build itself,
+and an update would keep running the old binary. `[[build]]` is declared as well,
+so that a GitHub install shows a visible build step rather than stalling
+silently on first use.
+
+Finding `cargo` by absolute path is not enough. Herdr's server runs under launchd
+with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and `cargo` is a rustup shim that
+execs `rustc` out of its own directory — so a cold build dies with
+`could not execute process rustc -vV`. `bin/build` therefore prepends the cargo
+binary's own directory to the `PATH` it builds under. It looks on the `PATH`
+first, then at `$CARGO`, `$CARGO_HOME/bin/cargo`, `~/.cargo/bin/cargo`, and the
+usual Homebrew rustup and `/usr/local` locations.
+
+When cargo is missing but a binary is already there, the shim runs that binary
+and says on stderr that it may be stale. When there is neither, it stops and
+says how to install a toolchain.
 
 ## Open on launch
 
@@ -257,6 +330,13 @@ That file is **the plugin's own**, in the directory Herdr hands the plugin. It
 is not Herdr's `~/.config/herdr/config.toml`, and these keys do not belong
 there: Herdr's schema names no plugin table, so a `[picker]` section added to it
 makes `herdr config check` report `config: issues found` from then on.
+
+It is parsed as real TOML, by the same parser Herdr parses its own config with,
+so a file that sits beside Herdr's own cannot mean two different things. Herdr's
+asymmetry on bad input is followed too: **a key the picker does not know is
+named on stderr and the rest of the file still applies**, while **a syntax error
+voids the whole file** and the picker falls back to its defaults. A typo in an
+optional file must never be what stops the popup appearing.
 
 ### The `.env` file
 
@@ -408,17 +488,19 @@ leading dot, which covers a flat `worktrees/<repo>/<branch>` and a
 `../worktrees` container beside a repo directly under the root. Each row is
 credited to the pass that reached it first, and listed once either way.
 
-Leave the variable unset and the picker is silent, which is the default for
+Leave the setting unset and the picker is silent, which is the default for
 every normal run. To read the line it is easier to run the picker from a shell
-than from the popup, since fzf takes the whole pane:
+than from the popup, since it takes the whole pane:
 
 ```sh
-HERDR_PICKER_DEBUG=1 python3 bin/pick-project
+HERDR_PICKER_DEBUG=1 sh bin/pick-project
 ```
 
 ## Requires
 
-[`fzf`](https://github.com/junegunn/fzf) and `python3` on the PATH.
+A Rust toolchain — `cargo` 1.75 or newer — the first time the plugin runs, and
+after every change to its source. Nothing else: the picker draws its own list
+and talks to Herdr over the socket, so there is no runtime dependency to install.
 
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
 is wanted, not required, and only because it is what the `layout` setting
@@ -426,55 +508,23 @@ defaults to. Without it every workspace opens as one bare pane; the picker still
 opens them, and says once per run why they are bare. Point `layout` at something
 else and this plugin is not wanted either.
 
-Herdr's manifest has no dependency field, so the requirement is declared as a
-`[[build]]` step that runs `python3 bin/pick-project --check-deps` at install
-time. When fzf is missing the check exits non-zero and prints the install
-command for the platform it detects:
+Herdr's manifest has no dependency field, so the toolchain requirement is
+declared as a `[[build]]` step that runs `sh bin/build` at install time. It
+prints where it found cargo, or says how to install one:
 
 ```
-project-finder requires fzf, which is not on the PATH.
-Install it with:
-
-    brew install fzf
+project-finder: cargo not found; install a Rust toolchain (1.75 or newer), then
+run `cargo build --release` in /path/to/herdr-plugin-project-finder
 ```
-
-If the plugin is already installed and fzf is not, the picker offers to
-install it on first run:
-
-```
-fzf is required and not installed.
-Install it now with `brew install fzf`? [y/N]
-```
-
-Only a privilege-free installer is ever run for you, which in practice means
-Homebrew. A command needing `sudo` (`apt-get`, `dnf`, `pacman`) is printed for
-you to run yourself: a popup pane is a bad place to ask for a password, and
-installing system packages without asking is not a plugin's business. Decline,
-and nothing is installed.
 
 ## Tests
 
 ```sh
-python3 -m unittest discover tests
+cargo test
 ```
 
-The suite loads `bin/pick-project` as a module and sets
-`sys.dont_write_bytecode`, because a `.pyc` stays valid while the source keeps
-the same size and whole-second mtime. Without that, editing the script to a
-same-size version inside one second makes the suite run the previous code and
-report failures against source that is correct. On macOS the system `python3`
-puts the cache under `sys.pycache_prefix`
-(`~/Library/Caches/com.apple.python`), outside the repo, so `find . -name
-'*.pyc'` does not reveal it.
-
-The test module cannot protect its own compilation this way, since the flag
-runs after it. Prefix the command with `PYTHONDONTWRITEBYTECODE=1` if you are
-making rapid same-size edits to the tests themselves.
-
-One check needs a newer interpreter than the plugin does. The suite parses
-`herdr-plugin.toml` for real, because Herdr re-reads that file at dispatch time
-and a syntax error in it stops the plugin silently. Parsing needs `tomllib`,
-which arrived in Python 3.11, and the `python3` this plugin runs under is 3.9
-on macOS. Under 3.9 that one check is skipped and the run prints a banner
-saying so, because a green suite there is not a checked manifest. Run the suite
-under a 3.11 or newer interpreter to include it.
+The suite runs the picker against a stub Herdr server over a real Unix socket,
+so what is checked is the requests it does and does not send. Nothing is mocked
+in process except the terminal itself, which `cargo test` cannot give it; the
+screen is checked instead by rendering into ratatui's test backend and reading
+the cells back.
