@@ -502,9 +502,10 @@ def build_lines(rows, status, now):
 
 
 def open_project(label, path):
-    parent = parent_repo(path)
-    if parent:
-        res = herdr("worktree", "open", "--cwd", parent, "--path", path,
+    repo = parent_repo(path) or \
+        (path if os.path.isdir(os.path.join(path, ".git")) else None)
+    if repo:
+        res = herdr("worktree", "open", "--cwd", repo, "--path", path,
                     "--label", label, "--no-focus")
         if res:
             return res

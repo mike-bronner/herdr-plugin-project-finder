@@ -600,7 +600,7 @@ class OpenProject(unittest.TestCase):
         res, _ = self.open("/x/myrepo")
         self.assertIs(res, self.RES)
 
-    def test_a_row_with_no_parent_uses_workspace_create(self):
+    def test_a_row_that_is_no_git_checkout_uses_workspace_create(self):
         _, calls = self.open(None)
         self.assertEqual(calls, [("workspace", "create", "--cwd", "/x/wt/feat-x",
                                   "--label", "feat-x", "--no-focus")])
@@ -623,7 +623,7 @@ class OpenProject(unittest.TestCase):
                 self.assertIn("--no-focus", calls[0])
                 self.assertNotIn("--focus", calls[0])
 
-    def real(self, worktree):
+    def real(self, kind, fails=()):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         repo = make_project(os.path.join(d.name, "myrepo"))
@@ -631,20 +631,41 @@ class OpenProject(unittest.TestCase):
         os.makedirs(checkout)
         with open(os.path.join(checkout, ".git"), "w", encoding="utf-8") as f:
             f.write(f"gitdir: {repo}/.git/worktrees/feat-x\n")
+        plain = os.path.join(d.name, "notes")
+        os.makedirs(plain)
         calls = []
-        with mock.patch.object(pp, "herdr",
-                               side_effect=lambda *a: calls.append(a) or self.RES):
-            pp.open_project("feat-x", checkout if worktree else repo)
+
+        def fake_herdr(*args):
+            calls.append(args)
+            return None if args[:2] in fails else self.RES
+
+        with mock.patch.object(pp, "herdr", side_effect=fake_herdr):
+            pp.open_project("feat-x", {"worktree": checkout, "repo": repo,
+                                       "plain": plain}[kind])
         return repo, calls
 
     def test_a_real_worktree_names_its_real_parent(self):
-        repo, calls = self.real(worktree=True)
+        repo, calls = self.real("worktree")
         self.assertEqual(calls[0][:4], ("worktree", "open", "--cwd", repo))
 
-    def test_a_real_repo_still_uses_workspace_create(self):
-        repo, calls = self.real(worktree=False)
-        self.assertEqual(calls, [("workspace", "create", "--cwd", repo,
-                                  "--label", "feat-x", "--no-focus")])
+    def test_a_real_repo_names_itself_as_the_repo_it_belongs_to(self):
+        repo, calls = self.real("repo")
+        self.assertEqual(calls[0], ("worktree", "open", "--cwd", repo,
+                                    "--path", repo,
+                                    "--label", "feat-x", "--no-focus"))
+
+    def test_opening_a_real_repo_never_falls_through_to_workspace_create(self):
+        _, calls = self.real("repo")
+        self.assertEqual([c[:2] for c in calls], [("worktree", "open")])
+
+    def test_a_failed_worktree_open_on_a_repo_falls_back_to_workspace_create(self):
+        repo, calls = self.real("repo", fails={("worktree", "open")})
+        self.assertEqual(calls[1], ("workspace", "create", "--cwd", repo,
+                                    "--label", "feat-x", "--no-focus"))
+
+    def test_a_real_directory_with_no_git_uses_workspace_create(self):
+        _, calls = self.real("plain")
+        self.assertEqual([c[:2] for c in calls], [("workspace", "create")])
 
 
 class LoadEnv(unittest.TestCase):

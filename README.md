@@ -74,22 +74,27 @@ still skipped. A repo's `TOUCHED` time ignores its nested worktrees for the
 same reason: each one is its own row, and work on a branch is not work on its
 parent.
 
-A worktree is *opened* as a worktree rather than as a bare directory, so
-Herdr's spaces sidebar nests it under the repo it belongs to. `workspace
-create` records nothing about where a checkout came from, so a worktree opened
-with it carries no repo metadata and floats at top level as though it were an
-unrelated project. That applied to every worktree the picker opened, in every
-layout, not only the ones kept inside a repo.
+Every git checkout is *opened* as a worktree rather than as a bare directory,
+so Herdr records which repo it belongs to. `workspace create` records nothing
+about where a checkout came from, and two things break on that. A worktree
+carries no repo metadata and floats at top level in Herdr's spaces sidebar as
+though it were an unrelated project, instead of nesting under its repo — that
+applied to every worktree the picker opened, in every layout, not only the ones
+kept inside a repo. An ordinary repo has no root for Herdr's new-worktree
+dialog to resolve a relative `[worktrees] directory` against, so the dialog
+falls back to your home directory and proposes a checkout at a path you cannot
+write.
 
-The parent is read from the worktree's own `.git`, the one-line `gitdir:`
-pointer at `<repo>/.git/worktrees/<name>`. That is one file read and no `git`
-subprocess, the same trade the `KIND` column already makes. Herdr is then told
-the parent by **path**, so the parent's own workspace does not have to be open:
-opening one you did not check would break the rule that the selection is the
-truth. Two cases fall back to the old behaviour, where the worktree opens
-without being grouped: a `.git` that does not carry git's pointer shape, and a
-Herdr too old for the command. Repo rows are unaffected, having no parent to
-name.
+A worktree names its parent, read from the worktree's own `.git`, the one-line
+`gitdir:` pointer at `<repo>/.git/worktrees/<name>`. That is one file read and
+no `git` subprocess, the same trade the `KIND` column already makes. A repo
+names itself: the checkout and the repo are then the same directory, which is
+the shape the command accepts for a checkout that is not linked. Herdr is told
+the repo by **path**, so its own workspace does not have to be open: opening
+one you did not check would break the rule that the selection is the truth.
+Three cases fall back to the old behaviour, where the row opens with no repo
+recorded: a directory that is no git checkout at all, a worktree `.git` that
+does not carry git's pointer shape, and a Herdr too old for the command.
 
 An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
