@@ -214,144 +214,6 @@ class PickFocus(unittest.TestCase):
         self.assertIsNone(pp.pick_focus([], ["w2"], "w1", ["w1"], "h"))
 
 
-class LiveAgentNames(unittest.TestCase):
-    """Which of Herdr's listed agents hold a name a new `agent start` collides with.
-
-    `name` is optional on AgentInfo. Herdr OMITS the key for an agent it merely
-    detected rather than one started under a name, so most entries in a real
-    listing carry no name at all.
-    """
-
-    def names(self, *agents):
-        """live_agent_names() over an `agent list` carrying these agents."""
-        with mock.patch.object(pp, "herdr", return_value={"agents": list(agents)}):
-            return pp.live_agent_names()
-
-    def test_named_agents_are_collected(self):
-        self.assertEqual(self.names({"name": "alpha"}, {"name": "beta"}),
-                         {"alpha", "beta"})
-
-    def test_an_agent_with_no_name_key_contributes_nothing(self):
-        # Reading the field with a bare .get() puts None in the set. None is
-        # not a name and no generated name equals it, so the set would only
-        # LOOK like it deduplicates while never matching anything.
-        self.assertEqual(self.names({"pane_id": "w1:p1"}), set())
-
-    def test_an_explicitly_null_name_contributes_nothing(self):
-        # The 0.8.2 schema types name as ["string", "null"], so a null is legal
-        # on the wire even though the serializer drops the key instead.
-        self.assertEqual(self.names({"name": None}), set())
-
-    def test_named_and_unnamed_agents_mix_in_one_listing(self):
-        # The real shape: agents this picker started keep their names, agents
-        # typed into a pane by hand or brought back by resume_agents_on_restore
-        # do not, and both are listed together.
-        self.assertEqual(
-            self.names({"name": "alpha"}, {"pane_id": "w2:p1"}, {"name": "beta"}),
-            {"alpha", "beta"})
-
-    def test_an_unreachable_server_yields_no_names_rather_than_raising(self):
-        # herdr() answers None on any failure. Failing OPEN here is deliberate:
-        # the cost is one `agent start` possibly refused, against a picker that
-        # opens nothing at all because it could not resolve a dedupe.
-        with mock.patch.object(pp, "herdr", return_value=None):
-            self.assertEqual(pp.live_agent_names(), set())
-
-    def test_a_listing_with_no_agents_key_yields_no_names(self):
-        with mock.patch.object(pp, "herdr", return_value={}):
-            self.assertEqual(pp.live_agent_names(), set())
-
-    def test_the_names_come_from_the_agent_list_command(self):
-        # Not `workspace list`: an open workspace says nothing about whether a
-        # live agent holds the name derived from its label.
-        with mock.patch.object(pp, "herdr", return_value={"agents": []}) as h:
-            pp.live_agent_names()
-        self.assertEqual([c.args for c in h.call_args_list], [("agent", "list")])
-
-
-class AgentName(unittest.TestCase):
-    """A label turned into a Herdr agent name, and the dedupe against live ones.
-
-    Herdr refuses `agent start` under a name a live agent already holds (error
-    agent_name_taken). create_workspace() fires that command detached, so the
-    refusal is never read: the workspace opens and the pane simply never gets
-    its Claude. Every case here is what stops that happening.
-    """
-
-    def test_a_plain_label_passes_through_lowercased(self):
-        self.assertEqual(pp.agent_name("MyRepo", set()), "myrepo")
-
-    def test_illegal_characters_become_hyphens(self):
-        # A duplicated basename is labelled "<parent>/<name>", and a dot is
-        # legal in a directory name but not in an agent name.
-        self.assertEqual(pp.agent_name("group-a/my.repo", set()), "group-a-my-repo")
-
-    def test_leading_and_trailing_hyphens_are_stripped(self):
-        self.assertEqual(pp.agent_name(".hidden.", set()), "hidden")
-
-    def test_a_label_with_no_legal_characters_falls_back_to_agent(self):
-        # The strip can empty the name outright, and the first-character test
-        # below indexes it — without the fallback this raises instead of
-        # opening the workspace.
-        self.assertEqual(pp.agent_name("...", set()), "agent")
-
-    def test_a_name_starting_with_a_digit_is_prefixed(self):
-        # Herdr's grammar is [a-z][a-z0-9_-]{0,31}: the first character must be
-        # a letter, and "2fa-service" is a perfectly ordinary directory name.
-        self.assertEqual(pp.agent_name("2fa-service", set()), "a2fa-service")
-
-    def test_an_underscore_start_is_prefixed_too(self):
-        # "_" is legal in the tail but not in the first position, so testing
-        # only the digit case would leave this one through.
-        self.assertEqual(pp.agent_name("_private", set()), "a_private")
-
-    def test_a_long_label_is_cut_to_the_32_character_limit(self):
-        # A worktree label one character past the limit, and the name the
-        # picker gave it.
-        name = pp.agent_name("label-that-exceeds-the-name-limit", set())
-        self.assertEqual(name, "label-that-exceeds-the-name-limi")
-        self.assertEqual(len(name), 32)
-
-    def test_a_taken_name_gains_a_numeric_suffix(self):
-        self.assertEqual(pp.agent_name("myrepo", {"myrepo"}), "myrepo-2")
-
-    def test_the_suffix_counts_up_until_it_finds_a_free_name(self):
-        taken = {"myrepo", "myrepo-2", "myrepo-3"}
-        self.assertEqual(pp.agent_name("myrepo", taken), "myrepo-4")
-
-    def test_a_suffixed_name_still_fits_the_32_character_limit(self):
-        # The suffix replaces the tail rather than extending it. Appending
-        # would make the deduped name the one thing Herdr rejects on length.
-        taken = {pp.agent_name("a" * 40, set())}
-        for _ in range(9):
-            self.assertEqual(len(pp.agent_name("a" * 40, taken)), 32)
-
-    def test_a_two_digit_suffix_takes_the_extra_character_it_needs(self):
-        # The cut is 32 minus the suffix LENGTH, not a fixed 30, so the tenth
-        # collision has to give up one more character than the ninth.
-        taken = {"a" * 32} | {"a" * 30 + f"-{i}" for i in range(2, 10)}
-        self.assertEqual(pp.agent_name("a" * 40, taken), "a" * 29 + "-10")
-
-    def test_the_chosen_name_is_reserved_in_the_taken_set(self):
-        # One picker run creates several workspaces from one set, and each
-        # agent start is detached, so a new name does not reach `agent list`
-        # before the next create reads it. Reserving here is the only thing
-        # keeping two labels that normalise together apart.
-        taken = set()
-        first = pp.agent_name("my.repo", taken)
-        second = pp.agent_name("my-repo", taken)
-        self.assertEqual((first, second), ("my-repo", "my-repo-2"))
-
-    def test_labels_differing_only_past_the_cut_are_still_distinguished(self):
-        # The collision the picker actually meets: Herdr's worktree labels are
-        # long and share their repo-name prefix, so they truncate together.
-        taken = set()
-        a = pp.agent_name("same-first-thirty-two-characters-one", taken)
-        b = pp.agent_name("same-first-thirty-two-characters-two", taken)
-        self.assertEqual(a, "same-first-thirty-two-characters")
-        self.assertEqual(b, "same-first-thirty-two-characte-2")
-
-
 class CreateWorkspaceHarness:
     """Shared by the two classes below. A mixin rather than a base TestCase,
     which would run every inherited test a second time."""
@@ -366,8 +228,7 @@ class CreateWorkspaceHarness:
     # so it is a real-looking path rather than a bare name.
     LAYOUT = "/x/panes/bin/agent-layout"
 
-    def create(self, res=RES, layout=LAYOUT, label="proj", path="/x/proj",
-               live=None):
+    def create(self, res=RES, layout=LAYOUT, label="proj", path="/x/proj"):
         """(workspace id, the herdr calls, the Popen mock) from ONE create.
 
         All three come out of one run on purpose: the handoff assertions hold
@@ -377,8 +238,7 @@ class CreateWorkspaceHarness:
         with mock.patch.object(pp, "herdr", return_value=res) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
-            wid = pp.create_workspace(label, path,
-                                      set() if live is None else live, layout)
+            wid = pp.create_workspace(label, path, layout)
         return wid, [c.args for c in h.call_args_list], popen
 
     def handoff(self, **kwargs):
@@ -426,23 +286,16 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
              mock.patch.object(pp, "die", side_effect=SystemExit):
             manager.attach_mock(h, "herdr")
             manager.attach_mock(popen, "popen")
-            pp.create_workspace("proj", "/x/proj", set(), self.LAYOUT)
+            pp.create_workspace("proj", "/x/proj", self.LAYOUT)
         self.assertEqual([c[0] for c in manager.mock_calls], ["herdr", "popen"])
 
-    def test_the_agent_name_handed_over_is_the_deduped_one(self):
-        # The dedupe is decorative unless the deduped name is the one that
-        # reaches the sibling; the raw label would collide instead.
-        argv = self.handoff(label="my-proj", live={"my-proj"})
-        self.assertEqual(argv[argv.index("--agent-name") + 1], "my-proj-2")
-
-    def test_the_name_is_reserved_so_the_next_workspace_cannot_reuse_it(self):
-        # Two creates out of one live set, which is how main() runs a
-        # multi-select. Nothing else keeps the second off the first's name.
-        live = set()
-        first = self.handoff(label="my-proj", live=live)
-        second = self.handoff(label="my-proj", live=live)
-        self.assertEqual(first[first.index("--agent-name") + 1], "my-proj")
-        self.assertEqual(second[second.index("--agent-name") + 1], "my-proj-2")
+    def test_the_label_is_what_the_workspace_is_opened_under(self):
+        # This file no longer derives the agent name, and the sibling derives it
+        # from the workspace LABEL. So the label reaching Herdr unchanged is the
+        # whole of the picker's remaining part in naming the agent: pass some
+        # other string here and every agent comes up under the wrong name.
+        _, calls, _ = self.create(label="my-proj")
+        self.assertEqual(calls[0][calls[0].index("--label") + 1], "my-proj")
 
     def test_a_worktree_row_is_handed_over_exactly_like_a_repo_row(self):
         # A worktree is opened by a different command, and the handoff must not
@@ -452,8 +305,7 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
              mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
-            wid = pp.create_workspace("feat-x", "/x/wt/feat-x", set(),
-                                      self.LAYOUT)
+            wid = pp.create_workspace("feat-x", "/x/wt/feat-x", self.LAYOUT)
         calls = [c.args for c in h.call_args_list]
         self.assertEqual(wid, "w9")
         self.assertEqual(calls[0][:2], ("worktree", "open"))
@@ -477,18 +329,16 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
 class LayoutHandoff(CreateWorkspaceHarness, unittest.TestCase):
     """The call that replaces the layout this file used to build.
 
-    Two flags and no third, run detached with a corrected environment. Each
+    One flag and nothing else, run detached with a corrected environment. Each
     part of that is load-bearing and none of it raises when it is wrong: a
-    missing --workspace lays out whichever workspace happens to be focused, a
-    missing --agent-name collides two agents in one multi-select, and a
-    synchronous call stalls the picker for as long as the agent takes to come
-    up. All three still open the workspaces.
+    missing --workspace lays out whichever workspace happens to be focused, an
+    --agent-name added back takes the sibling off its own dedupe and collides
+    two agents in one multi-select, and a synchronous call stalls the picker for
+    as long as the agent takes to come up. All three still open the workspaces.
     """
 
-    def test_the_sibling_is_run_with_the_workspace_and_the_agent_name(self):
-        self.assertEqual(self.handoff(),
-                         [self.LAYOUT, "--workspace", "w9",
-                          "--agent-name", "proj"])
+    def test_the_sibling_is_run_with_the_workspace_and_nothing_else(self):
+        self.assertEqual(self.handoff(), [self.LAYOUT, "--workspace", "w9"])
 
     def test_the_workspace_handed_over_is_the_one_that_was_opened(self):
         # Held against the create's own answer rather than against "w9", so a
@@ -497,11 +347,21 @@ class LayoutHandoff(CreateWorkspaceHarness, unittest.TestCase):
         argv = popen.call_args.args[0]
         self.assertEqual(argv[argv.index("--workspace") + 1], wid)
 
+    def test_no_agent_name_is_passed(self):
+        # The point of this handoff. Given --agent-name the sibling hands that
+        # name to Herdr verbatim and fails loudly when a live agent holds it;
+        # left off, it derives the name from the workspace label and retries as
+        # base-2, base-3 on agent_name_taken. Passing a name here — even a
+        # correct one — is what opts the picker back out of that dedupe, and
+        # nothing about it raises: it shows up as one pane of a multi-select
+        # missing its Claude.
+        self.assertNotIn("--agent-name", self.handoff())
+
     def test_no_agent_flag_is_passed(self):
-        # --no-agent and --agent-name are mutually exclusive in the sibling,
-        # and this is deliberately the shape that keeps the agent on the
-        # sibling's side. The other shape works too and would put ten herdr
-        # round trips back on the critical path of a multi-select.
+        # --no-agent stops the sibling starting an agent at all, and this is
+        # deliberately the shape that keeps the agent on the sibling's side. The
+        # other shape works too and would put ten herdr round trips back on the
+        # critical path of a multi-select.
         self.assertNotIn("--no-agent", self.handoff())
 
     def test_the_call_is_detached_and_its_output_discarded(self):
@@ -759,7 +619,6 @@ class LayoutIsResolvedOncePerRun(unittest.TestCase):
              mock.patch.object(pp, "order_rows", return_value=([], [])), \
              mock.patch.object(pp, "build_lines", return_value=[]), \
              mock.patch.object(pp, "parse_selection", return_value=chosen), \
-             mock.patch.object(pp, "live_agent_names", return_value=set()), \
              mock.patch.object(pp, "layout_command", return_value=command) as lc, \
              mock.patch.object(pp, "warn") as warn, \
              mock.patch.object(pp, "herdr",

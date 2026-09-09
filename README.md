@@ -27,11 +27,19 @@ workspace. Esc changes nothing.
 to the sibling
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
 plugin, which owns the recipe: the drawing above, the ten `AGENT_LAYOUT_`
-settings that reshape it, and every measurement behind them. So a project
-opened from the picker looks like a worktree that plugin lays out from an
-event, because the same code laid both out. Its README is where the sizes and
-the ratios are written down; this one names the settings under
-[Configure](#configure) and leaves it there.
+settings that reshape it, every measurement behind them, and the agent's own
+name. So a project opened from the picker looks like a worktree that plugin
+lays out from an event, because the same code laid both out. Its README is
+where the sizes and the ratios are written down; this one names the settings
+under [Configure](#configure) and leaves it there.
+
+The picker hands over a workspace id and nothing else. The agent's name is
+derived from the workspace label — so `herdr agent prompt <project>` still
+reaches the project you see in the sidebar — and the sibling asks Herdr for
+that name, taking `<project>-2` when a live agent already holds it. The server
+arbitrates, so two projects whose labels normalise to the same name come up
+under distinct ones even though the picker fires each layout as its own
+detached process, and so does a project racing an agent you started by hand.
 
 That sibling is not required. Without it a picked project still opens, as one
 bare pane with no agent in it, and the picker raises one Herdr notification for
