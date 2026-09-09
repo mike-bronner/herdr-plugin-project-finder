@@ -107,12 +107,39 @@ raises one Herdr notification for the whole run saying why.
 The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
 
-A `KIND` column marks each row `repo` or `worktree`, so a linked git worktree
-is recognisable at a glance.
+A `KIND` column marks each row `repo` or `tree`, so a linked git worktree is
+recognisable at a glance. Four characters say both words, which leaves the room
+the row spends on the project name intact.
+
+`tree` is drawn in your theme's **accent** colour and `repo` is left at the
+default foreground, so the worktree rows are the marked case and an ordinary
+repository stays quiet. The colour is read from Herdr's own theme rather than
+chosen here: `[theme.custom] accent` wins when you set it, and otherwise the
+accent is the cool slot of whichever of the eighteen built-in palettes is in
+force — ANSI cyan under `theme.name = "terminal"`. Nothing is hardcoded, so the
+column belongs to your colour scheme instead of fighting it.
+
+A worktree row also names the repository it belongs to in front of the branch:
+`tru-data/feat-x`. The prefix carries the terminal's DIM attribute, so it reads
+as secondary to the branch without claiming a colour of its own. Two worktrees
+called `main` under different repositories are told apart by it, and the picker
+sorts open workspaces first and then by touch time, so a worktree can sit far
+from its repository or with its repository not listed at all. When the pair is
+too long for the name column, the **repository** is cut at its end with a `…`
+before the `/`, as in `repo-te…/worktree`, and the branch survives whole. A
+repository is recognised by how its name starts, and the branch is the part
+being read, so both keep their front. The repository is read from the same
+one-line `gitdir:` pointer the row is opened by.
+
+A terminal that ignores DIM draws the prefix exactly like the branch. That is
+the accepted cost of the attribute: it follows whatever the user's colour scheme
+already calls faint, where a fixed palette index would fight it.
 
 The filter searches the project name, the kind, the age and the agent-status
 word, so typing `worktree` narrows the list to worktrees and `blocked` narrows
-it to blocked agents.
+it to blocked agents. The kind is matched on its whole word, `worktree`, even
+though the column says `tree`. The repository prefix is drawn and never
+matched on, so a repository name finds the rows it always found.
 
 Worktrees are found wherever the tool that made them puts them. A worktree
 directly under one of the three depth levels is reached by them, which includes
@@ -173,11 +200,12 @@ An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
 `~/.config/herdr/config.toml` rather than assumed: `[ui] status_indicators`
 picks `dots` or `symbols`, and `[theme]` plus any `[theme.custom]` override of
-`green`, `yellow`, `red`, `teal`, or `overlay0` decides the colour. All eighteen
-built-in themes are covered, and under `theme.name = "terminal"` the colours are
-ANSI indexes, so the picker follows your terminal profile exactly as Herdr does.
-Herdr shows the glyph alone; the picker keeps the status word beside it because
-the filter searches it.
+`green`, `yellow`, `red`, `teal`, or `overlay0` decides the colour. `accent` is
+read the same way, for the `KIND` column. All eighteen built-in themes are
+covered, and under `theme.name = "terminal"` the colours are ANSI indexes, so
+the picker follows your terminal profile exactly as Herdr does. Herdr shows the
+glyph alone; the picker keeps the status word beside it because the filter
+searches it.
 
 The palette is a copy, because Herdr keeps its own inside the renderer: there is
 no colour on the socket API and no theme event to subscribe to. So the picker
@@ -206,7 +234,9 @@ nor the CLI. With `auto_switch = true` the picker uses `dark_name` and applies
 follow and the colours match exactly.
 
 A project name longer than 34 characters is cut with a `…` so it cannot push
-the columns after it out of alignment. The preview pane on the right shows the
+the columns after it out of alignment. A repository prefix in front of it gives
+up its own characters first, from the left, and is dropped entirely rather than
+taking a character from the name. The preview pane on the right shows the
 full name above the git log. The filter reads the **whole** name rather than
 what fits on screen, so text past the ellipsis still matches.
 

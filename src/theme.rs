@@ -13,6 +13,10 @@ pub const STATUSES: [&str; 5] = ["working", "blocked", "done", "idle", "unknown"
 
 pub const STATUS_ROLE_ORDER: [&str; 5] = ["green", "yellow", "red", "teal", "overlay0"];
 
+pub const ACCENT_ROLE: &str = "accent";
+
+pub const ACCENT_FALLBACK_ROLE: &str = "teal";
+
 pub const STATUS_ROLES: [(&str, &str); 5] = [
     ("working", "yellow"),
     ("blocked", "red"),
@@ -164,7 +168,7 @@ pub fn theme_keys() -> Vec<String> {
         "theme.auto_switch".to_string(),
         "theme.dark_name".to_string(),
     ];
-    for role in STATUS_ROLE_ORDER {
+    for role in STATUS_ROLE_ORDER.iter().chain([&ACCENT_ROLE]) {
         keys.push(format!("theme.custom.{}", role));
         keys.push(format!("theme.custom.dark.{}", role));
     }
@@ -175,6 +179,7 @@ pub fn theme_keys() -> Vec<String> {
 pub struct Theme {
     pub icons: Vec<(String, String)>,
     pub colours: Vec<(String, Colour)>,
+    pub accent: Colour,
 }
 
 impl Theme {
@@ -263,7 +268,22 @@ pub fn resolve_theme(config: &HerdrConfig, rejects: &dyn Fn(&str) -> bool) -> Th
         })
         .collect();
 
-    Theme { icons, colours }
+    let at = STATUS_ROLE_ORDER
+        .iter()
+        .position(|role| *role == ACCENT_FALLBACK_ROLE)
+        .expect("the accent falls back to a role the palette carries");
+    let mut accent = base[at];
+    for table in &tables {
+        if let Some(value) = config.string(&format!("{}.{}", table, ACCENT_ROLE)) {
+            accent = parse_colour(value);
+        }
+    }
+
+    Theme {
+        icons,
+        colours,
+        accent,
+    }
 }
 
 pub fn herdr_rejects_theme(herdr: Option<&str>, field: &str) -> bool {

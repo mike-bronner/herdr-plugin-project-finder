@@ -9,7 +9,7 @@ use crate::config::{
     Environment, HerdrConfig,
 };
 use crate::discover::{
-    debug_line, human_age, labelled, now, order_rows, repos, row_kind, touched_at,
+    debug_line, human_age, labelled, now, order_rows, repo_name, repos, row_kind, touched_at,
 };
 use crate::layout::{hand_over, resolve_layout};
 use crate::picker::Entry;
@@ -122,6 +122,7 @@ pub fn run(
         entries.push(Entry {
             label: row.label.clone(),
             path: row.path.clone(),
+            repo: repo_name(&row.path),
             kind: row_kind(&row.path),
             age: human_age(row.touched, stamp),
             status: open_ws

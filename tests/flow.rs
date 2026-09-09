@@ -523,6 +523,21 @@ fn a_repo_and_a_worktree_are_both_listed_and_told_apart() {
 }
 
 #[test]
+fn a_listed_worktree_carries_the_repository_it_belongs_to_and_a_repository_carries_none() {
+    let world = World::new();
+    let repo = world.repo("alpha");
+    make_worktree(
+        &world.tree.join("alpha/.worktrees/alpha/feat-x"),
+        &format!("{}/.git/worktrees/feat-x", repo.to_string_lossy()),
+    );
+    let stub = Stub::start(Script::default());
+    let run = run_choosing(&world, &stub, &[], &[]);
+    let repos: Vec<Option<String>> = run.listed.iter().map(|e| e.repo.clone()).collect();
+    assert!(repos.contains(&Some("alpha".to_string())), "{:?}", repos);
+    assert!(repos.contains(&None), "{:?}", repos);
+}
+
+#[test]
 fn a_worktree_is_opened_against_the_repo_it_belongs_to() {
     let world = World::new();
     let repo = world.repo("alpha");

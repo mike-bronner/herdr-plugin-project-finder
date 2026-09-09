@@ -27,6 +27,13 @@ impl Kind {
             Kind::Worktree => "worktree",
         }
     }
+
+    pub fn cell(&self) -> &'static str {
+        match self {
+            Kind::Repo => "repo",
+            Kind::Worktree => "tree",
+        }
+    }
 }
 
 pub fn row_kind(path: &Path) -> Kind {
@@ -208,6 +215,10 @@ pub fn elide(text: &str, width: usize) -> String {
     let mut cut: String = chars[..width.saturating_sub(1)].iter().collect();
     cut.push('…');
     cut
+}
+
+pub fn repo_name(path: &Path) -> Option<String> {
+    parent_repo(path).as_deref().map(basename)
 }
 
 pub fn label_for(path: &Path, duplicated: &HashSet<String>) -> String {

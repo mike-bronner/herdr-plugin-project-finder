@@ -326,8 +326,53 @@ fn a_real_boolean_turns_auto_switch_on_as_well_as_the_word() {
 }
 
 #[test]
+fn the_accent_starts_as_the_cool_slot_of_whatever_palette_is_in_force() {
+    for (name, palette) in PALETTES {
+        let theme = theme_of(&[("theme.name", name)]);
+        assert_eq!(theme.accent, palette[3], "{}", name);
+    }
+}
+
+#[test]
+fn a_custom_accent_overrides_the_palette_and_is_read_as_a_colour() {
+    let theme = theme_of(&[("theme.name", "terminal"), ("theme.custom.accent", "lightblue")]);
+    assert_eq!(theme.accent, Colour::Indexed(12));
+}
+
+#[test]
+fn a_custom_accent_is_taken_over_a_custom_teal_because_they_are_separate_roles() {
+    let theme = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.teal", "#ff0000"),
+        ("theme.custom.accent", "lightblue"),
+    ]);
+    assert_eq!(theme.accent, Colour::Indexed(12));
+    assert_eq!(theme.colour("done"), Colour::Rgb(255, 0, 0));
+}
+
+#[test]
+fn a_custom_teal_alone_never_moves_the_accent() {
+    let theme = theme_of(&[("theme.name", "terminal"), ("theme.custom.teal", "#ff0000")]);
+    assert_eq!(theme.accent, Colour::Indexed(6));
+}
+
+#[test]
+fn the_dark_accent_is_taken_only_when_the_theme_switches_automatically() {
+    let off = theme_of(&[("theme.name", "terminal"), ("theme.custom.dark.accent", "#010203")]);
+    assert_eq!(off.accent, Colour::Indexed(6));
+    let on = theme_of(&[
+        ("theme.dark_name", "terminal"),
+        ("theme.auto_switch", "true"),
+        ("theme.custom.dark.accent", "#010203"),
+    ]);
+    assert_eq!(on.accent, Colour::Rgb(1, 2, 3));
+}
+
+#[test]
 fn the_theme_keys_cover_every_key_the_resolver_reads() {
     let keys = theme_keys();
+    assert!(keys.contains(&"theme.custom.accent".to_string()));
+    assert!(keys.contains(&"theme.custom.dark.accent".to_string()));
     for role in STATUS_ROLE_ORDER {
         assert!(keys.contains(&format!("theme.custom.{}", role)));
         assert!(keys.contains(&format!("theme.custom.dark.{}", role)));

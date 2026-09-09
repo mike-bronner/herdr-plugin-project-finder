@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pick_project::discover::Kind;
 use pick_project::picker::{
-    heading, row_prefix, Action, Entry, Picker, AGE_WIDTH, GUTTER, KIND_WIDTH, LABEL_WIDTH,
-    LEGEND, MARKER, PROMPT,
+    heading, row_cells, row_prefix, Action, Entry, Picker, AGE_WIDTH, GUTTER, KIND_WIDTH,
+    LABEL_WIDTH, LEGEND, MARKER, PROMPT,
 };
 use support::TempDir;
 
@@ -14,10 +14,18 @@ fn entry(label: &str, kind: Kind, age: &str, status: Option<&str>, selected: boo
     Entry {
         label: label.to_string(),
         path: PathBuf::from(format!("/x/{}", label)),
+        repo: None,
         kind,
         age: age.to_string(),
         status: status.map(str::to_string),
         selected,
+    }
+}
+
+fn worktree_of(repo: &str, label: &str) -> Entry {
+    Entry {
+        repo: Some(repo.to_string()),
+        ..entry(label, Kind::Worktree, "3m ago", None, false)
     }
 }
 
@@ -411,7 +419,7 @@ fn the_heading_is_exactly_one_line() {
 #[test]
 fn the_heading_columns_line_up_with_a_row() {
     let row = row_prefix(&entry("proj", Kind::Worktree, "3m ago", None, false));
-    assert_eq!(at(&heading(), "KIND"), at(&row, "worktree"));
+    assert_eq!(at(&heading(), "KIND"), at(&row, "tree"));
     assert_eq!(at(&heading(), "TOUCHED"), at(&row, "3m ago"));
     assert_eq!(heading().chars().count(), row.chars().count() + "AGENT STATUS".len());
 }
@@ -421,8 +429,16 @@ fn the_kind_column_fits_its_widest_value() {
     let wide = row_prefix(&entry("proj", Kind::Worktree, "3m ago", None, false));
     let narrow = row_prefix(&entry("proj", Kind::Repo, "3m ago", None, false));
     assert_eq!(at(&wide, "3m ago"), at(&narrow, "3m ago"));
-    assert!(Kind::Worktree.word().chars().count() <= KIND_WIDTH);
-    assert!(Kind::Repo.word().chars().count() <= KIND_WIDTH);
+    assert_eq!(Kind::Worktree.cell().chars().count(), KIND_WIDTH);
+    assert_eq!(Kind::Repo.cell().chars().count(), KIND_WIDTH);
+}
+
+#[test]
+fn the_kind_column_spends_four_characters_and_no_more() {
+    assert_eq!(KIND_WIDTH, 4);
+    assert_eq!(Kind::Worktree.cell(), "tree");
+    assert_eq!(Kind::Repo.cell(), "repo");
+    assert_eq!(at(&heading(), "TOUCHED"), Some(LABEL_WIDTH + 1 + KIND_WIDTH + 1));
 }
 
 #[test]
@@ -490,10 +506,121 @@ fn a_row_carries_its_own_age_rather_than_one_for_the_whole_list() {
 
 #[test]
 fn a_row_carries_its_own_kind_rather_than_a_constant() {
-    assert!(row_prefix(&entry("w", Kind::Worktree, "1m ago", None, false)).contains("worktree"));
+    assert!(row_prefix(&entry("w", Kind::Worktree, "1m ago", None, false)).contains("tree"));
     let repo = row_prefix(&entry("r", Kind::Repo, "1m ago", None, false));
     assert!(repo.contains("repo"));
-    assert!(!repo.contains("worktree"));
+    assert!(!repo.contains("tree"));
+}
+
+#[test]
+fn the_haystack_keeps_the_whole_word_worktree_even_though_the_column_says_tree() {
+    let row = entry("w", Kind::Worktree, "1m ago", None, false);
+    assert!(row.haystack().contains("worktree"), "{}", row.haystack());
+    assert!(!row_prefix(&row).contains("worktree"), "{}", row_prefix(&row));
+}
+
+#[test]
+fn a_worktree_row_says_which_repository_it_belongs_to() {
+    let row = row_prefix(&worktree_of("tru-data", "feat-x"));
+    assert!(row.starts_with("tru-data/feat-x"), "{}", row);
+}
+
+#[test]
+fn the_repository_is_a_prefix_of_its_own_and_the_branch_stands_apart_from_it() {
+    let cells = row_cells(&worktree_of("tru-data", "feat-x"));
+    assert_eq!(cells.repo, "tru-data/");
+    assert!(cells.name.starts_with("feat-x"), "{}", cells.name);
+    assert!(!cells.name.contains("tru-data"), "{}", cells.name);
+}
+
+#[test]
+fn a_repository_row_carries_no_prefix_at_all() {
+    let cells = row_cells(&entry("alpha", Kind::Repo, "3m ago", None, false));
+    assert_eq!(cells.repo, "");
+    assert!(cells.name.starts_with("alpha"), "{}", cells.name);
+}
+
+#[test]
+fn a_prefixed_row_is_exactly_as_wide_as_an_unprefixed_one() {
+    let plain = row_prefix(&entry("feat-x", Kind::Worktree, "3m ago", None, false));
+    let prefixed = row_prefix(&worktree_of("tru-data", "feat-x"));
+    let long = row_prefix(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    assert_eq!(plain.chars().count(), prefixed.chars().count());
+    assert_eq!(plain.chars().count(), long.chars().count());
+}
+
+#[test]
+fn a_prefix_too_long_for_the_row_is_cut_at_its_end_and_the_branch_survives_whole() {
+    let row = row_prefix(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    assert!(row.starts_with("laravel-model-cach…/fix-cache-gaps"), "{}", row);
+    assert_eq!(at(&row, "3m ago"), at(&row_prefix(&worktree_of("x", "y")), "3m ago"));
+}
+
+#[test]
+fn a_cut_prefix_keeps_the_separator_after_the_mark_so_the_branch_still_stands_apart() {
+    let cells = row_cells(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    assert!(cells.repo.ends_with("…/"), "{}", cells.repo);
+    assert_eq!(cells.repo.matches('…').count(), 1, "{}", cells.repo);
+    assert!(cells.name.starts_with("fix-cache-gaps"), "{}", cells.name);
+}
+
+#[test]
+fn a_cut_prefix_keeps_the_head_of_the_repository_name_rather_than_its_tail() {
+    let cells = row_cells(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    assert!(cells.repo.starts_with("laravel-model-"), "{}", cells.repo);
+    assert!(!cells.repo.contains("caching"), "{}", cells.repo);
+}
+
+#[test]
+fn a_prefix_with_one_column_to_spend_is_the_mark_alone() {
+    let branch = "b".repeat(LABEL_WIDTH - 1);
+    let cells = row_cells(&worktree_of("tru-data", &branch));
+    assert_eq!(cells.repo, "…");
+    assert!(cells.name.starts_with(&branch), "{}", cells.name);
+}
+
+#[test]
+fn a_multibyte_repository_name_is_cut_by_character_not_by_byte() {
+    let branch = "b".repeat(LABEL_WIDTH - 4);
+    let cells = row_cells(&worktree_of("ααααα", &branch));
+    assert_eq!(cells.repo, "αα…/");
+}
+
+#[test]
+fn the_kind_cell_stands_on_its_own_so_it_can_be_styled_apart_from_the_row() {
+    let tree = row_cells(&worktree_of("tru-data", "feat-x"));
+    let repo = row_cells(&entry("alpha", Kind::Repo, "3m ago", None, false));
+    assert_eq!(tree.kind, "tree");
+    assert_eq!(repo.kind, "repo");
+    assert!(!tree.name.contains("tree"), "{}", tree.name);
+    assert!(!tree.age.contains("tree"), "{}", tree.age);
+}
+
+#[test]
+fn a_branch_that_fills_the_label_leaves_the_prefix_no_room_rather_than_losing_a_character() {
+    let branch = "b".repeat(LABEL_WIDTH);
+    let row = row_prefix(&worktree_of("tru-data", &branch));
+    assert!(row.starts_with(&branch), "{}", row);
+    assert!(!row.contains('…'), "{}", row);
+}
+
+#[test]
+fn a_branch_longer_than_the_label_is_still_cut_from_the_right() {
+    let branch = "b".repeat(LABEL_WIDTH + 10);
+    let row = row_prefix(&worktree_of("tru-data", &branch));
+    assert!(row.starts_with(&format!("{}…", "b".repeat(LABEL_WIDTH - 1))), "{}", row);
+}
+
+#[test]
+fn the_repository_prefix_is_never_matched_on_because_it_is_only_drawn() {
+    let rows = vec![
+        worktree_of("tru-data", "feat-x"),
+        entry("other", Kind::Repo, "1m ago", None, false),
+    ];
+    assert!(!rows[0].haystack().contains("tru-data"), "{}", rows[0].haystack());
+    let mut picker = Picker::new(rows);
+    type_in(&mut picker, "tru-data");
+    assert!(shown(&picker).is_empty(), "{:?}", shown(&picker));
 }
 
 #[test]
@@ -580,6 +707,70 @@ fn a_row_that_is_not_open_is_drawn_with_no_status_at_all() {
     let row = screen.iter().find(|l| l.contains("beta")).unwrap();
     assert!(!row.contains('●'), "{:?}", row);
     assert!(!row.contains("idle"), "{:?}", row);
+}
+
+fn drawn_styles(picker: &Picker, width: u16, row: u16) -> Vec<(String, ratatui::style::Style)> {
+    use pick_project::config::HerdrConfig;
+    use pick_project::theme::resolve_theme;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let theme = resolve_theme(&HerdrConfig::default(), &|_| false);
+    let mut terminal = Terminal::new(TestBackend::new(width, row + 1)).unwrap();
+    terminal
+        .draw(|frame| pick_project::ui::draw(frame, picker, &theme, ""))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..width)
+        .map(|x| {
+            let cell = &buffer[(x, row)];
+            (cell.symbol().to_string(), cell.style())
+        })
+        .collect()
+}
+
+#[test]
+fn the_drawn_row_leads_with_the_repository_and_dims_it_against_the_branch() {
+    use ratatui::style::Modifier;
+
+    let picker = Picker::new(vec![worktree_of("tru-data", "feat-x")]);
+    let cells = drawn_styles(&picker, 160, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    assert!(text.trim_start().starts_with("tru-data/feat-x"), "{}", text);
+    let prefix_at = text.find("tru-data").unwrap();
+    let branch_at = text.find("feat-x").unwrap();
+    assert!(cells[prefix_at].1.add_modifier.contains(Modifier::DIM));
+    assert!(cells[prefix_at + 8].1.add_modifier.contains(Modifier::DIM));
+    assert!(!cells[branch_at].1.add_modifier.contains(Modifier::DIM));
+}
+
+#[test]
+fn the_repository_prefix_is_dimmed_by_the_modifier_rather_than_by_a_palette_colour() {
+    let picker = Picker::new(vec![worktree_of("tru-data", "feat-x")]);
+    let cells = drawn_styles(&picker, 160, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let prefix_at = text.find("tru-data").unwrap();
+    assert_eq!(cells[prefix_at].1.fg, Some(ratatui::style::Color::Reset));
+}
+
+#[test]
+fn a_worktree_kind_cell_is_drawn_in_the_accent_and_a_repository_one_is_left_alone() {
+    use pick_project::config::HerdrConfig;
+    use pick_project::theme::resolve_theme;
+    use pick_project::ui::ratatui_colour;
+
+    let theme = resolve_theme(&HerdrConfig::default(), &|_| false);
+    let accent = ratatui_colour(theme.accent);
+    let tree = drawn_styles(&Picker::new(vec![worktree_of("tru-data", "feat-x")]), 160, 5);
+    let text: String = tree.iter().map(|(s, _)| s.as_str()).collect();
+    let at = text.find("tree").unwrap();
+    assert_eq!(tree[at].1.fg, Some(accent));
+
+    let repo = drawn_styles(&Picker::new(plain(&["alpha"])), 160, 5);
+    let text: String = repo.iter().map(|(s, _)| s.as_str()).collect();
+    let at = text.find("repo").unwrap();
+    assert_eq!(repo[at].1.fg, Some(ratatui::style::Color::Reset));
+    assert_ne!(repo[at].1.fg, Some(accent));
 }
 
 #[test]

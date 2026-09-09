@@ -9,8 +9,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Frame;
 
 use crate::config::Environment;
+use crate::discover::Kind;
 use crate::layout::which;
-use crate::picker::{heading, row_prefix, Action, Entry, Picker, GUTTER, LEGEND, MARKER, PROMPT};
+use crate::picker::{heading, row_cells, Action, Entry, Picker, GUTTER, LEGEND, MARKER, PROMPT};
 use crate::theme::{Colour, Theme};
 
 pub fn ratatui_colour(colour: Colour) -> Color {
@@ -163,9 +164,17 @@ fn draw_list(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
         .map(|at| {
             let entry = &picker.entries[*at];
             let marker = if entry.selected { MARKER } else { GUTTER };
+            let cells = row_cells(entry);
+            let kind = match entry.kind {
+                Kind::Worktree => Style::default().fg(ratatui_colour(theme.accent)),
+                Kind::Repo => Style::default(),
+            };
             let mut spans = vec![
                 Span::styled(marker, Style::default().fg(Color::Indexed(2))),
-                Span::raw(row_prefix(entry)),
+                Span::styled(cells.repo, Style::default().add_modifier(Modifier::DIM)),
+                Span::raw(cells.name),
+                Span::styled(cells.kind, kind),
+                Span::raw(cells.age),
             ];
             if let Some(status) = &entry.status {
                 spans.push(Span::styled(

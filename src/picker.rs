@@ -7,7 +7,7 @@ use nucleo::{Matcher, Utf32Str};
 use crate::discover::{elide, Kind};
 
 pub const LABEL_WIDTH: usize = 34;
-pub const KIND_WIDTH: usize = 8;
+pub const KIND_WIDTH: usize = 4;
 pub const AGE_WIDTH: usize = 9;
 
 pub const PROMPT: &str = "filter projects > ";
@@ -24,6 +24,7 @@ pub const GUTTER: &str = "  ";
 pub struct Entry {
     pub label: String,
     pub path: PathBuf,
+    pub repo: Option<String>,
     pub kind: Kind,
     pub age: String,
     pub status: Option<String>,
@@ -61,13 +62,46 @@ pub fn heading() -> String {
     )
 }
 
+fn repo_prefix(entry: &Entry, taken: usize) -> String {
+    let Some(name) = &entry.repo else {
+        return String::new();
+    };
+    let room = LABEL_WIDTH.saturating_sub(taken);
+    let whole = format!("{}/", name);
+    if whole.chars().count() <= room {
+        return whole;
+    }
+    match room {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => format!("{}/", elide(name, room - 1)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cells {
+    pub repo: String,
+    pub name: String,
+    pub kind: String,
+    pub age: String,
+}
+
+pub fn row_cells(entry: &Entry) -> Cells {
+    let label = elide(&entry.label, LABEL_WIDTH);
+    let repo = repo_prefix(entry, label.chars().count());
+    let padding =
+        " ".repeat(LABEL_WIDTH.saturating_sub(repo.chars().count() + label.chars().count()));
+    Cells {
+        repo,
+        name: format!("{}{} ", label, padding),
+        kind: pad(entry.kind.cell(), KIND_WIDTH),
+        age: format!(" {} ", pad(&entry.age, AGE_WIDTH)),
+    }
+}
+
 pub fn row_prefix(entry: &Entry) -> String {
-    format!(
-        "{} {} {} ",
-        pad(&elide(&entry.label, LABEL_WIDTH), LABEL_WIDTH),
-        pad(entry.kind.word(), KIND_WIDTH),
-        pad(&entry.age, AGE_WIDTH)
-    )
+    let cells = row_cells(entry);
+    format!("{}{}{}{}", cells.repo, cells.name, cells.kind, cells.age)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
