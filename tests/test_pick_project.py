@@ -1,20 +1,7 @@
-"""Unit tests for bin/pick-project's pure selection logic.
-
-Run: python3 -m unittest discover tests
-"""
 import importlib.machinery, importlib.util, io, os, re, sys, tempfile, time
 import unittest
 from unittest import mock
 
-# ManifestIsValidToml at the foot of this file parses herdr-plugin.toml for
-# real, which needs tomllib — added in Python 3.11. /usr/bin/python3 is 3.9 on
-# this machine, and the plugin targets it deliberately, because Herdr's server
-# runs under launchd with a minimal PATH that /opt/homebrew is not on. So the
-# check has to be skippable.
-#
-# A skip that reads as a pass would be worse than no check at all, hence the
-# banner: it is printed once, at import, on stderr, so no green run can be
-# mistaken for a checked manifest.
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -34,15 +21,6 @@ if tomllib is None:
           "!!     python3.11 -m unittest discover tests\n"
           "%(bar)s\n" % {"bar": "!" * 70, "why": NO_TOML}, file=sys.stderr)
 
-# Must be set before the loader below runs. A .pyc is treated as valid while
-# the source's (mtime truncated to whole seconds, byte size) is unchanged, so
-# editing the script to a same-size version inside one second makes this suite
-# silently execute the PREVIOUS code. macOS system python3 hides the evidence:
-# it sets sys.pycache_prefix to ~/Library/Caches/com.apple.python, so the cache
-# lives outside the repo and `find . -name '*.pyc'` reports nothing. Writing no
-# cache at all removes the failure mode; recompiling costs about a millisecond.
-# A cache written before this line existed is still read until the source mtime
-# next advances, so delete any stale one once under sys.pycache_prefix.
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -61,12 +39,6 @@ def ws(label, wid, focused=False, status="idle"):
 
 
 def make_project(path, worktree=False):
-    """Create a git project at `path`, and return it.
-
-    A repo gets a .git DIRECTORY, a worktree gets a .git FILE holding a
-    gitdir: pointer. That is the difference row_kind() reads, so a project built
-    here can be handed straight to it.
-    """
     os.makedirs(path, exist_ok=True)
     git = os.path.join(path, ".git")
     if worktree:
@@ -78,7 +50,6 @@ def make_project(path, worktree=False):
 
 
 def write_config(directory, body):
-    """A config.toml holding `body` in `directory`, returned as a path."""
     path = os.path.join(directory, "config.toml")
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
@@ -111,10 +82,8 @@ class OrderRows(unittest.TestCase):
         touched = {"/a": 30, "/b": 10, "/c": 40, "/d": 20}
         with mock.patch.object(pp, "touched_at", side_effect=lambda p: touched[p]):
             head, rest = pp.order_rows(labelled, open_ws)
-        # Sidebar order, ghost skipped. Note /a is newer than /c yet stays
-        # second: open rows are never re-sorted by touch time.
         self.assertEqual(head, [("c", "/c", 40), ("a", "/a", 30)])
-        self.assertEqual(rest, [("d", "/d", 20), ("b", "/b", 10)])   # newest first
+        self.assertEqual(rest, [("d", "/d", 20), ("b", "/b", 10)])
 
     def test_nothing_open(self):
         with mock.patch.object(pp, "touched_at", return_value=0):
@@ -123,17 +92,12 @@ class OrderRows(unittest.TestCase):
         self.assertEqual(rest, [("a", "/a", 0)])
 
     def test_equal_touch_times_keep_input_order(self):
-        # The sort key is the timestamp alone, so ties fall back to the order
-        # repos() yielded. A key including the label or path would reorder them.
         labelled = [("b", "/b"), ("a", "/a")]
         with mock.patch.object(pp, "touched_at", return_value=7):
             _, rest = pp.order_rows(labelled, [])
         self.assertEqual([l for l, _, _ in rest], ["b", "a"])
 
     def test_open_rows_carry_their_touch_time(self):
-        # An open row's timestamp is not needed for the ordering, only for the
-        # TOUCHED column. Returning 0 or None here would blank that column for
-        # exactly the projects the user is most likely looking at.
         with mock.patch.object(pp, "touched_at", return_value=99):
             head, _ = pp.order_rows([("a", "/a")], [ws("a", "w1")])
         self.assertEqual(head, [("a", "/a", 99)])
@@ -156,7 +120,6 @@ class ParseSelection(unittest.TestCase):
         self.assertEqual(pp.parse_selection(0, f"{pp.EMPTY}\n"), [])
 
     def test_sentinel_wins_over_cursor_line(self):
-        # fzf still prints the highlighted row when nothing is selected.
         out = f"{pp.EMPTY}\ncursor-row   3m ago  \t/x/cursor-row\n"
         self.assertEqual(pp.parse_selection(0, out), [])
 
@@ -165,8 +128,6 @@ class ParseSelection(unittest.TestCase):
         self.assertEqual(pp.parse_selection(0, out), ["/x/a", "/x/b"])
 
     def test_trailing_label_field_is_not_glued_onto_the_path(self):
-        # Rows carry a third field (the untruncated label) after the path. A
-        # maxsplit=1 split would yield "/x/a\ta-very-long-name" as the path.
         out = "a-very-long-na…  repo  1m ago \t/x/a\ta-very-long-name\n"
         self.assertEqual(pp.parse_selection(0, out), ["/x/a"])
 
@@ -174,8 +135,6 @@ class ParseSelection(unittest.TestCase):
         self.assertIsNone(pp.parse_selection(1, ""))
 
     def test_heading_line_is_never_a_path(self):
-        # --header-lines keeps fzf from returning it, but a line whose path
-        # field is empty must never become a workspace even if one slips out.
         self.assertIsNone(pp.parse_selection(0, pp.HEADING + "\n"))
 
     def test_heading_alongside_real_rows_is_dropped(self):
@@ -216,28 +175,11 @@ class PickFocus(unittest.TestCase):
 
 
 class CreateWorkspaceHarness:
-    """Shared by the two classes below. A mixin rather than a base TestCase,
-    which would run every inherited test a second time."""
-
-    # What open_project() answers with. The workspace id is the only field read
-    # now: the tab id and the root pane id went out with the splits, and the
-    # layout command asks Herdr for whatever else it needs from that id.
     RES = {"workspace": {"workspace_id": "w9"}}
 
-    # A resolved layout setting, as resolve_layout() answers with one: an argv
-    # whose first element is an executable path, still carrying the {workspace}
-    # token. The command is a made-up one on purpose — nothing in the picker
-    # knows which program this is, so a test that used the real default would
-    # be asserting the default rather than the mechanism.
     LAYOUT = ["/x/tool/bin/lay", "--space", pp.WORKSPACE_TOKEN, "--quiet"]
 
     def create(self, res=RES, layout=LAYOUT, label="proj", path="/x/proj"):
-        """(workspace id, the herdr calls, the Popen mock) from ONE create.
-
-        All three come out of one run on purpose: the handoff assertions hold
-        the sibling's argv against the workspace id that same call returned, and
-        taking them from two creates would compare two workspaces.
-        """
         with mock.patch.object(pp, "herdr", return_value=res) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
@@ -245,44 +187,29 @@ class CreateWorkspaceHarness:
         return wid, [c.args for c in h.call_args_list], popen
 
     def handoff(self, **kwargs):
-        """The argv the layout command is fired with, from one create."""
         return self.create(**kwargs)[2].call_args.args[0]
 
 
 class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
-    """Opening the workspace, and handing it to the layout command."""
-
     def test_the_opened_workspaces_id_is_returned(self):
         wid, calls, _ = self.create()
         self.assertEqual(wid, "w9")
         self.assertEqual(calls[0][:2], ("workspace", "create"))
 
     def test_create_failure_dies(self):
-        # The one fatal step. Everything after it is best effort, because a
-        # workspace that opened badly still beats abandoning the rest of a
-        # multi-select.
         with self.assertRaises(SystemExit):
             self.create(res=None)
 
     def test_the_picker_builds_no_part_of_the_layout(self):
-        # The whole point of the delegation, and the assertion that catches a
-        # split, a rename or a `pane run` creeping back into this file: opening
-        # the workspace is the ONLY thing this sends to Herdr.
         _, calls, _ = self.create()
         self.assertEqual(len(calls), 1)
 
     def test_no_agent_is_started_here_either(self):
-        # `agent start` went out with the panes. The detached process this
-        # fires is the configured command itself, never herdr.
         argv = self.handoff()
         self.assertEqual(argv[0], self.LAYOUT[0])
         self.assertNotIn("start", argv)
 
     def test_the_workspace_is_opened_before_it_is_handed_over(self):
-        # The command is given a workspace id, so there is nothing to hand over
-        # until the create has answered. Ordering the two the other way round
-        # is not a thing that raises — it is a NameError-free run against an id
-        # that does not exist yet, reported by nobody.
         manager = mock.Mock()
         with mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
@@ -293,17 +220,10 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
         self.assertEqual([c[0] for c in manager.mock_calls], ["herdr", "popen"])
 
     def test_the_label_is_what_the_workspace_is_opened_under(self):
-        # The label is the only stable identity Herdr's API exposes for a
-        # workspace, and it is what a layout command reading the workspace back
-        # sees. So the label reaching Herdr unchanged is the whole of the
-        # picker's remaining part in what a new workspace is called.
         _, calls, _ = self.create(label="my-proj")
         self.assertEqual(calls[0][calls[0].index("--label") + 1], "my-proj")
 
     def test_a_worktree_row_is_handed_over_exactly_like_a_repo_row(self):
-        # A worktree is opened by a different command, and the handoff must not
-        # notice. open_project() promises `worktree open` answers with the same
-        # workspace the create does, and this is where that promise is spent.
         with mock.patch.object(pp, "parent_repo", return_value="/x/myrepo"), \
              mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
@@ -317,11 +237,6 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
                          ["/x/tool/bin/lay", "--space", "w9", "--quiet"])
 
     def test_no_layout_command_still_opens_the_workspace_and_fires_nothing(self):
-        # The degraded path at this level: `layout` being None is every way the
-        # setting can fail to resolve, and a legitimate state rather than an
-        # error. A workspace with one bare pane is still a workspace, and dying
-        # over a layout would abandon the rest of a multi-select. Saying why is
-        # the CALLER's job — see ResolveLayout.
         wid, calls, popen = self.create(layout=None)
         self.assertEqual(wid, "w9")
         self.assertEqual(len(calls), 1)
@@ -329,54 +244,29 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
 
 
 class LayoutHandoff(CreateWorkspaceHarness, unittest.TestCase):
-    """The call that replaces the layout this file used to build.
-
-    The resolved argv with one substitution made in it, run detached in an
-    environment stripped of this plugin's identity. Each part is load-bearing
-    and none of it raises when it is wrong: an unsubstituted {workspace} hands
-    the command a token instead of an id, a synchronous call stalls the picker
-    for as long as the agent behind it takes to come up, and a leaked
-    HERDR_PLUGIN_CONFIG_DIR feeds the command this plugin's settings as its
-    own. All three still open the workspaces.
-    """
-
     def test_the_resolved_argv_is_run_with_the_workspace_substituted(self):
         self.assertEqual(self.handoff(),
                          ["/x/tool/bin/lay", "--space", "w9", "--quiet"])
 
     def test_the_workspace_handed_over_is_the_one_that_was_opened(self):
-        # Held against the create's own answer rather than against "w9", so a
-        # handoff that passed some other id could not satisfy it.
         wid, _, popen = self.create()
         argv = popen.call_args.args[0]
         self.assertEqual(argv[argv.index("--space") + 1], wid)
 
     def test_the_token_is_substituted_wherever_it_appears(self):
-        # The token's position is the user's, not this file's: it may be the
-        # whole of an argument, or part of one, and there may be more than one.
         argv = self.handoff(layout=["/x/tool/bin/lay", "--space=" + pp.WORKSPACE_TOKEN,
                                     "--log=/tmp/" + pp.WORKSPACE_TOKEN + ".log"])
         self.assertEqual(argv, ["/x/tool/bin/lay", "--space=w9",
                                 "--log=/tmp/w9.log"])
 
     def test_a_command_with_no_token_is_run_unchanged(self):
-        # Nothing forces the token into the setting. A command that finds its
-        # own workspace, or wants none, is a value the user is allowed to write.
         self.assertEqual(self.handoff(layout=["/x/tool/bin/lay"]),
                          ["/x/tool/bin/lay"])
 
     def test_no_flag_of_this_files_own_is_added(self):
-        # The whole argv is the user's. A flag appended here would reach every
-        # command the setting can name, including one that has no such flag.
         self.assertEqual(len(self.handoff()), len(self.LAYOUT))
 
     def test_the_call_is_detached_and_its_output_discarded(self):
-        # Laying a workspace out ends with an agent coming up, and starting one
-        # blocks until it is ready — 30s by default, and no timeout below its
-        # 3000ms minimum. Waiting on that once per selected project is the
-        # stall this picker exists not to have. start_new_session also keeps
-        # the command alive past the popup, which exits as soon as main()
-        # returns.
         _, _, popen = self.create()
         kwargs = popen.call_args.kwargs
         self.assertIs(kwargs["start_new_session"], True)
@@ -384,31 +274,17 @@ class LayoutHandoff(CreateWorkspaceHarness, unittest.TestCase):
         self.assertIs(kwargs["stderr"], pp.subprocess.DEVNULL)
 
     def test_the_command_is_run_with_the_stripped_environment(self):
-        # The strip itself is ChildEnv's; this pins that the handoff uses it
-        # rather than inheriting this process's environment, which would tell
-        # the command that THIS plugin's checkout and config directory are its
-        # own.
         _, _, popen = self.create()
         self.assertEqual(popen.call_args.kwargs["env"], pp.child_env())
 
 
 class PluginRoot(unittest.TestCase):
-    """Resolving {plugin:<id>} to a checkout directory, and failing closed.
-
-    Asked for rather than guessed at, because nothing in this plugin knows
-    where another one was installed: it may be a GitHub install under Herdr's
-    own directory or a local link anywhere on the disk.
-    """
-
     def call(self, reply):
         with mock.patch.object(pp, "herdr", return_value=reply) as h:
             got = pp.plugin_root("some.plugin")
         return got, h.call_args.args if h.call_args else None
 
     def test_the_plugin_is_asked_for_by_the_id_it_was_given(self):
-        # --json because `plugin list` prints a human table by default, unlike
-        # every other command herdr() parses. --plugin so the answer is one
-        # plugin or nothing, rather than a list to search.
         _, args = self.call({"plugins": [{"plugin_root": "/x/tool"}]})
         self.assertEqual(args, ("plugin", "list", "--plugin",
                                 "some.plugin", "--json"))
@@ -418,51 +294,28 @@ class PluginRoot(unittest.TestCase):
                          "/x/tool")
 
     def test_no_plugin_row_yields_none(self):
-        # The ordinary shape of "not installed": 0.8.2 answers an unknown
-        # --plugin id with an empty list rather than an error, so nothing here
-        # raises and nothing else distinguishes the two.
         self.assertIsNone(self.call({"plugins": []})[0])
 
     def test_a_row_with_no_root_yields_none(self):
-        # An empty root would expand the token to nothing, leaving a RELATIVE
-        # command path resolved against the picker's own cwd.
         self.assertIsNone(self.call({"plugins": [{"plugin_root": ""}]})[0])
         self.assertIsNone(self.call({"plugins": [{}]})[0])
 
     def test_an_explicitly_null_root_yields_none(self):
-        # A null is not a missing key, and it would be substituted as "None".
         self.assertIsNone(self.call({"plugins": [{"plugin_root": None}]})[0])
 
     def test_a_reply_with_no_plugins_key_yields_none(self):
         self.assertIsNone(self.call({})[0])
 
     def test_an_unreachable_server_yields_none_rather_than_raising(self):
-        # herdr() answers None for a non-zero exit or unparseable output. The
-        # picker is mid-run with workspaces to open, so this degrades like any
-        # other unresolvable setting.
         self.assertIsNone(self.call(None)[0])
 
     def test_a_disabled_plugin_is_still_resolved(self):
-        # `plugin disable` stops Herdr DISPATCHING EVENTS to a plugin. This
-        # resolves a path and then runs an executable, which is not dispatch,
-        # so refusing to lay a picker workspace out because some plugin's event
-        # hook was turned off would be a surprise from a plugin the user did
-        # not touch.
         got, _ = self.call({"plugins": [{"plugin_root": "/x/tool",
                                          "enabled": False}]})
         self.assertEqual(got, "/x/tool")
 
 
 class ResolveLayout(unittest.TestCase):
-    """The setting turned into an argv, once per run, or one notice instead.
-
-    Every value here is a string the user typed, so being wrong is ordinary
-    rather than exceptional. All three ways it can be wrong land on the same
-    degraded path: no command, one notice, and workspaces that still open. A
-    silent failure would be the wrong shape too — the user asked for a project
-    and got a bare pane, with nothing on screen to explain it.
-    """
-
     def resolve(self, setting, creating=True, root="/x/tool", executable=True):
         env = {} if setting is None else {"HERDR_PICKER_LAYOUT": setting}
         with mock.patch.dict(os.environ, env, clear=True), \
@@ -480,14 +333,10 @@ class ResolveLayout(unittest.TestCase):
         warn.assert_not_called()
 
     def test_a_quoted_argument_survives_as_one_argument(self):
-        # The reason the value is split rather than passed to a shell: a path
-        # with a space in it is one argument, and no shell gets to interpret
-        # anything else in the string.
         got, _, _ = self.resolve('"/x/my tool/lay" --title "two words"')
         self.assertEqual(got, ["/x/my tool/lay", "--title", "two words"])
 
     def test_the_workspace_token_is_left_for_the_caller(self):
-        # It changes per workspace, and this runs once per run.
         got, _, _ = self.resolve("/x/tool/lay {workspace}")
         self.assertIn(pp.WORKSPACE_TOKEN, got)
 
@@ -499,27 +348,18 @@ class ResolveLayout(unittest.TestCase):
         warn.assert_not_called()
 
     def test_an_uninstalled_plugin_yields_none_and_names_it_once(self):
-        # A toast reading "the layout could not be applied" tells the user
-        # nothing they can act on. The id is what `herdr plugin install` takes,
-        # and it is the user's own setting being quoted back at them.
         got, _, warn = self.resolve("{plugin:some.plugin}/bin/lay", root=None)
         self.assertIsNone(got)
         self.assertEqual(warn.call_count, 1)
         self.assertIn("some.plugin", warn.call_args.args[0])
 
     def test_a_command_that_cannot_be_run_yields_none_and_names_it(self):
-        # Installed and not executable, or simply mistyped: it is run as a
-        # program, so a file that cannot be executed is exactly as unusable as
-        # an absent one. Popen would otherwise raise inside a fire-and-forget
-        # call that nothing is watching.
         got, _, warn = self.resolve("/x/tool/lay", executable=False)
         self.assertIsNone(got)
         self.assertEqual(warn.call_count, 1)
         self.assertIn("/x/tool/lay", warn.call_args.args[0])
 
     def test_a_bare_name_is_resolved_on_the_path(self):
-        # The other spelling a user may write. shutil.which() covers both, and
-        # what Popen is handed is the resolved path either way.
         with mock.patch.dict(os.environ, {"HERDR_PICKER_LAYOUT": "lay"},
                              clear=True), \
              mock.patch.object(pp.shutil, "which", return_value="/opt/bin/lay"), \
@@ -527,32 +367,23 @@ class ResolveLayout(unittest.TestCase):
             self.assertEqual(pp.resolve_layout(True), ["/opt/bin/lay"])
 
     def test_an_unparseable_command_line_yields_none_and_warns(self):
-        # An unbalanced quote is a typo in a string the user typed, not a
-        # reason to stop opening their projects.
         got, _, warn = self.resolve('/x/tool/lay --title "unclosed')
         self.assertIsNone(got)
         self.assertEqual(warn.call_count, 1)
 
     def test_an_unset_setting_yields_none_in_silence(self):
-        # Nothing to run is not a failure, so there is nothing to report. It is
-        # also not the shipped state: defaults.toml supplies a value.
         got, pr, warn = self.resolve(None)
         self.assertIsNone(got)
         pr.assert_not_called()
         warn.assert_not_called()
 
     def test_an_emptied_setting_yields_none_in_silence(self):
-        # Emptying the setting is how a user says they want no command run at
-        # all, which is a choice rather than something to be warned about.
         for value in ("", "   "):
             got, _, warn = self.resolve(value)
             self.assertIsNone(got, value)
             warn.assert_not_called()
 
     def test_a_run_that_creates_nothing_asks_herdr_nothing(self):
-        # A selection that only CLOSES workspaces costs no `plugin list` call.
-        # And it raises no notice: a command that was never going to run is not
-        # something to interrupt the user about.
         got, pr, warn = self.resolve("{plugin:some.plugin}/bin/lay",
                                      creating=False)
         self.assertIsNone(got)
@@ -566,10 +397,6 @@ class ResolveLayout(unittest.TestCase):
         warn.assert_not_called()
 
     def test_the_notice_goes_to_both_channels_warn_owns(self):
-        # Not a duplicate of the warn() tests elsewhere: it pins that a setting
-        # that will not resolve is reported through warn() rather than through
-        # die(), which would stop the run, or through a bare stderr write,
-        # which the popup destroys before it can be read.
         with mock.patch.dict(os.environ,
                              {"HERDR_PICKER_LAYOUT": "{plugin:some.plugin}/lay"},
                              clear=True), \
@@ -584,31 +411,15 @@ class ResolveLayout(unittest.TestCase):
 
 
 class ChildEnv(unittest.TestCase):
-    """The environment the layout command is run with: this one, minus this
-    plugin's own identity.
-
-    Herdr injects both variables naming the PICKER, and a plugin invoked as a
-    command reads them as its own. Neither mistake raises: the command would
-    find none of its files under this plugin's root and run on its built-in
-    defaults, having silently ignored every setting the user wrote for it.
-    """
-
     def env(self, base):
         with mock.patch.dict(os.environ, base, clear=True):
             return pp.child_env()
 
     def test_the_plugin_root_is_dropped(self):
-        # Dropped rather than repointed: a plugin run as a plain command
-        # derives its own root when the variable is absent, and computing
-        # another program's paths is not this file's business.
         self.assertNotIn("HERDR_PLUGIN_ROOT",
                          self.env({"HERDR_PLUGIN_ROOT": "/x/picker"}))
 
     def test_the_config_dir_is_dropped(self):
-        # The other half: a plugin takes HERDR_PLUGIN_CONFIG_DIR as "your
-        # config directory" and only asks Herdr for its own when the variable
-        # is absent. Left in place, it would read THIS plugin's .env as its own
-        # and pick up settings meant for the picker alone.
         self.assertNotIn("HERDR_PLUGIN_CONFIG_DIR",
                          self.env({"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/cfg"}))
 
@@ -616,19 +427,11 @@ class ChildEnv(unittest.TestCase):
         self.assertEqual(self.env({}), {})
 
     def test_everything_else_passes_through(self):
-        # How a setting the layout command reads reaches it. A name exported in
-        # the real environment, or written in this plugin's .env — which the
-        # loaders at the top of the script fold into os.environ — arrives as a
-        # real environment variable. The names here are ones nothing reads, so
-        # this cannot pass by knowing any particular vocabulary.
         env = self.env({"SOME_TOOL_RATIO": "0.3", "PATH": "/usr/bin"})
         self.assertEqual(env["SOME_TOOL_RATIO"], "0.3")
         self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_the_process_environment_is_not_mutated(self):
-        # A copy, not os.environ itself. Popping from the live environment
-        # would change what every LATER call in the same run sees, including
-        # this picker's own config loaders.
         with mock.patch.dict(os.environ,
                              {"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/config",
                               "HERDR_PLUGIN_ROOT": "/x/picker"}, clear=True):
@@ -639,15 +442,6 @@ class ChildEnv(unittest.TestCase):
 
 
 class LayoutIsResolvedOncePerRun(unittest.TestCase):
-    """What driving main() shows that a unit test of resolve_layout() cannot:
-    how many times a whole selection resolves the setting, and how many notices
-    one wrong value produces.
-
-    N toasts for one wrong setting would bury the projects the user just asked
-    for, which is why the resolution sits in main() and not in
-    create_workspace(). Nothing about that placement raises if it moves.
-    """
-
     SETTING = "{plugin:some.plugin}/bin/lay --space {workspace}"
 
     def run_main(self, chosen, root):
@@ -679,8 +473,6 @@ class LayoutIsResolvedOncePerRun(unittest.TestCase):
         warn.assert_not_called()
 
     def test_a_setting_that_will_not_resolve_warns_once_for_two_workspaces(self):
-        # The user is told about one wrong setting one time, and still gets
-        # both projects.
         lc, warn, popen = self.run_main(["/x/a", "/x/b"], None)
         self.assertEqual(lc.call_count, 1)
         self.assertEqual(warn.call_count, 1)
@@ -694,20 +486,6 @@ class LayoutIsResolvedOncePerRun(unittest.TestCase):
 
 
 class ThePickerNamesNoProgram(unittest.TestCase):
-    """bin/pick-project knows nothing about any particular plugin.
-
-    That is the property the layout setting exists for, and the one that decays
-    quietly: a plugin id in a comment, a path join onto someone's bin/, a flag
-    passed because the current default happens to take it, or a setting read on
-    another plugin's behalf all work perfectly while that one plugin is
-    installed, and each one puts this repo back in the business of tracking
-    another repo's file layout.
-
-    So the whole coupling is one line of data, in defaults.toml, and this holds
-    the script to none of it. The tokens below are the ones the picker's own
-    default is written in — a default is exactly where such knowledge hides.
-    """
-
     FOREIGN = ("agentic-panes-layout", "agent-layout", "AGENT_LAYOUT",
                "mikebronner.", "--workspace", "--agent-name", "--no-agent")
 
@@ -721,10 +499,6 @@ class ThePickerNamesNoProgram(unittest.TestCase):
             self.assertNotIn(token, source, token)
 
     def test_the_script_reads_only_its_own_settings(self):
-        # The subtler half. Reading another plugin's setting here would apply
-        # it twice, from two files that cannot see each other, and this copy
-        # would win by racing the other. Every environment variable the script
-        # reads is Herdr's own or this plugin's own.
         read = set(re.findall(r'os\.environ(?:\.get)?[(\[]"(\w+)"', self.source()))
         self.assertTrue(read)
         for name in read:
@@ -733,18 +507,10 @@ class ThePickerNamesNoProgram(unittest.TestCase):
                                              "PATH")), name)
 
     def test_only_this_plugins_settings_have_a_home_in_its_config_toml(self):
-        # The ownership rule. A setting some other program reads has no key in
-        # THIS plugin's private file, because a value written into one plugin's
-        # config directory is invisible to every other one.
         for key in pp.PICKER_KEYS.values():
             self.assertTrue(key.startswith("HERDR_PICKER_"), key)
 
     def test_the_environment_reaches_the_command_whatever_it_reads(self):
-        # Why the ownership rule costs the user nothing: everything else passes
-        # through, so a setting the layout command reads still reaches it from
-        # this plugin's .env or from your shell. Filtering the environment by a
-        # list of known names is what this rules out, and it would silently
-        # drop any name added after the list was written.
         sample = {"SOME_TOOL_ALPHA": "one", "OTHER_BETA": "two"}
         with mock.patch.dict(os.environ, sample, clear=True):
             env = pp.child_env()
@@ -753,14 +519,6 @@ class ThePickerNamesNoProgram(unittest.TestCase):
 
 
 class ShippedDefaults(unittest.TestCase):
-    """defaults.toml: the one place this repo names another program.
-
-    It is read last, so every value in it is a default the user can beat, and
-    it is the same [picker] table in the same syntax they would write. The
-    default preserves what the picker did before the setting existed — an
-    unconfigured picker still lays its workspaces out the way it always has.
-    """
-
     DEFAULTS = DEFAULTS
 
     def text(self):
@@ -772,9 +530,6 @@ class ShippedDefaults(unittest.TestCase):
         self.assertTrue(got.get("picker.layout"))
 
     def test_the_default_is_what_an_unconfigured_picker_runs(self):
-        # The whole point of shipping it: with no config.toml and no .env, the
-        # setting is still set. A default that lived only in the code could not
-        # be seen here, and could not be overridden without editing the plugin.
         with mock.patch.dict(os.environ, {}, clear=True):
             pp.load_picker_config(self.DEFAULTS)
             self.assertEqual(os.environ["HERDR_PICKER_LAYOUT"],
@@ -782,18 +537,12 @@ class ShippedDefaults(unittest.TestCase):
                                           {"picker.layout"})["picker.layout"])
 
     def test_a_user_setting_beats_it(self):
-        # setdefault, and the load order at the top of the script: the shipped
-        # file is read last, so it fills in only what nothing else supplied.
         with mock.patch.dict(os.environ, {"HERDR_PICKER_LAYOUT": "/x/mine"},
                              clear=True):
             pp.load_picker_config(self.DEFAULTS)
             self.assertEqual(os.environ["HERDR_PICKER_LAYOUT"], "/x/mine")
 
     def test_the_default_still_lays_a_workspace_out_the_way_it_used_to(self):
-        # The behaviour guard, and the reason this test names another plugin
-        # where the script may not: the default is a promise that nothing
-        # changed for a user who set nothing. Resolved through the real
-        # resolve_layout(), so a default the picker could not parse fails here.
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch.object(pp, "plugin_root", return_value="/x/panes") as pr, \
              mock.patch.object(pp.shutil, "which", side_effect=lambda c: c), \
@@ -807,22 +556,13 @@ class ShippedDefaults(unittest.TestCase):
                                pp.WORKSPACE_TOKEN])
 
     def test_the_default_does_not_name_this_plugin(self):
-        # A copy-paste of this plugin's own id would ask Herdr for the picker,
-        # find it, and hand every workspace to an executable this checkout does
-        # not have.
         self.assertNotIn("project-finder", self.text())
 
     def test_the_readme_names_the_plugin_the_default_points_at(self):
-        # A default naming a plugin the README never mentions leaves the user
-        # with a setting they cannot look up.
         with open(os.path.join(HERE, "..", "README.md"), encoding="utf-8") as f:
             self.assertIn("agentic-panes-layout", f.read())
 
     def test_no_foreign_setting_is_copied_into_this_repo(self):
-        # The default names a plugin; it does not restate that plugin's own
-        # settings. A second copy of another repo's names and defaults
-        # disagrees with the original the moment one of them changes, and both
-        # copies read as authoritative while they do.
         for path in (self.DEFAULTS, os.path.join(HERE, "..", "README.md"),
                      pp.__file__, __file__):
             with open(path, encoding="utf-8") as f:
@@ -833,22 +573,9 @@ class ShippedDefaults(unittest.TestCase):
 
 
 class OpenProject(unittest.TestCase):
-    """Which herdr command opens a row, and what happens when it will not.
-
-    A linked worktree has to go through `worktree open`. It is the only command
-    that records which repo the checkout belongs to, and that record is what
-    Herdr's sidebar groups by — a worktree opened with `workspace create`
-    carries none and floats at top level as an unrelated project.
-    """
-
     RES = {"workspace": {"workspace_id": "w9"}}
 
     def open(self, parent, fails=()):
-        """(result, calls) for open_project() with parent_repo() answering `parent`.
-
-        `fails` names commands, by their first two words, that herdr() answers
-        None for; every other command answers RES.
-        """
         calls = []
 
         def fake_herdr(*args):
@@ -860,22 +587,16 @@ class OpenProject(unittest.TestCase):
             return pp.open_project("feat-x", "/x/wt/feat-x"), calls
 
     def test_a_worktree_is_opened_against_its_parent_repo(self):
-        # --cwd names the parent by PATH. The --workspace form would need the
-        # parent's own workspace open, and opening one the user did not check
-        # would break the picker's contract that the selection is the truth.
         _, calls = self.open("/x/myrepo")
         self.assertEqual(calls[0], ("worktree", "open", "--cwd", "/x/myrepo",
                                     "--path", "/x/wt/feat-x",
                                     "--label", "feat-x", "--no-focus"))
 
     def test_opening_a_worktree_never_falls_through_to_workspace_create(self):
-        # Two commands for one row would open the project twice.
         _, calls = self.open("/x/myrepo")
         self.assertEqual([c[:2] for c in calls], [("worktree", "open")])
 
     def test_the_worktree_result_is_returned_unchanged(self):
-        # create_workspace() reads tab and root_pane off whatever comes back,
-        # so a result summarised or reshaped here would lose the layout.
         res, _ = self.open("/x/myrepo")
         self.assertIs(res, self.RES)
 
@@ -885,35 +606,24 @@ class OpenProject(unittest.TestCase):
                                   "--label", "feat-x", "--no-focus")])
 
     def test_a_failed_worktree_open_falls_back_to_workspace_create(self):
-        # A Herdr that answers nothing for the command. The fallback is kept
-        # whatever the manifest's floor says: it opens the worktree exactly as
-        # every earlier version of this picker did, so the cost of the degraded
-        # path is a nesting in the sidebar and nothing else.
         res, calls = self.open("/x/myrepo", fails={("worktree", "open")})
         self.assertEqual([c[:2] for c in calls],
                          [("worktree", "open"), ("workspace", "create")])
         self.assertIs(res, self.RES)
 
     def test_both_commands_failing_yields_none_so_the_caller_dies(self):
-        # The fallback's own failure stays fatal, as it always has been.
         res, _ = self.open("/x/myrepo",
                            fails={("worktree", "open"), ("workspace", "create")})
         self.assertIsNone(res)
 
     def test_nothing_is_ever_focused(self):
-        # Opening the picker must not move the user off what they are looking
-        # at; main() picks the focus target itself, after every create.
         for parent in ("/x/myrepo", None):
             with self.subTest(parent=parent):
                 _, calls = self.open(parent)
                 self.assertIn("--no-focus", calls[0])
                 self.assertNotIn("--focus", calls[0])
 
-    # The two cases above again, over a real directory rather than a stubbed
-    # parent_repo(), so the call site is pinned to the filesystem it reads.
-
     def real(self, worktree):
-        """(repo, calls) for open_project() over a real project dir."""
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         repo = make_project(os.path.join(d.name, "myrepo"))
@@ -932,7 +642,6 @@ class OpenProject(unittest.TestCase):
         self.assertEqual(calls[0][:4], ("worktree", "open", "--cwd", repo))
 
     def test_a_real_repo_still_uses_workspace_create(self):
-        # Repo rows are untouched by this: they have no parent to name.
         repo, calls = self.real(worktree=False)
         self.assertEqual(calls, [("workspace", "create", "--cwd", repo,
                                   "--label", "feat-x", "--no-focus")])
@@ -940,7 +649,6 @@ class OpenProject(unittest.TestCase):
 
 class LoadEnv(unittest.TestCase):
     def load(self, body, env=None):
-        """Write `body` to a .env, load it over `env`, return the resulting environ."""
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, ".env")
             with open(path, "w", encoding="utf-8") as f:
@@ -962,20 +670,16 @@ class LoadEnv(unittest.TestCase):
     def test_missing_file_is_a_noop(self):
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict(os.environ, {}, clear=True):
-                pp.load_env(os.path.join(d, ".env"))   # never created
+                pp.load_env(os.path.join(d, ".env"))
                 self.assertEqual(dict(os.environ), {})
 
     def test_unreadable_path_is_a_noop(self):
-        # A directory where a file is expected: OSError, not a crash.
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict(os.environ, {}, clear=True):
                 pp.load_env(d)
                 self.assertEqual(dict(os.environ), {})
 
     def test_comments_and_blank_lines_are_skipped(self):
-        # Asserts the whole environ: a commented line that still contains "="
-        # would otherwise land as the junk key "# HERDR_PICKER_ROOT", which a
-        # bare assertNotIn("HERDR_PICKER_ROOT") would not catch.
         env = self.load("# HERDR_PICKER_ROOT=/commented\n\n"
                         "   # indented comment\n"
                         "HERDR_PICKER_HOME=base\n")
@@ -985,7 +689,7 @@ class LoadEnv(unittest.TestCase):
         env = self.load('A="/x/one"\nB=\'/x/two\'\nC="/x/three\nD=""\n')
         self.assertEqual(env["A"], "/x/one")
         self.assertEqual(env["B"], "/x/two")
-        self.assertEqual(env["C"], '"/x/three')   # unbalanced: left alone
+        self.assertEqual(env["C"], '"/x/three')
         self.assertEqual(env["D"], "")
 
     def test_hash_inside_a_value_is_not_a_comment(self):
@@ -998,8 +702,6 @@ class LoadEnv(unittest.TestCase):
         self.assertEqual(self.load("A=k=v\n")["A"], "k=v")
 
     def test_malformed_line_is_skipped_and_later_lines_still_apply(self):
-        # Whole-environ again: without the "=" check the typo'd line becomes the
-        # key "HERDR_PICKER_ROOT /x/typo" rather than being dropped.
         env = self.load("HERDR_PICKER_ROOT /x/typo\nHERDR_PICKER_HOME=base\n")
         self.assertEqual(env, {"HERDR_PICKER_HOME": "base"})
 
@@ -1008,10 +710,7 @@ class LoadEnv(unittest.TestCase):
 
 
 class LoadPickerConfig(unittest.TestCase):
-    """The [picker] table in the plugin's own config.toml."""
-
     def load(self, body, env=None):
-        """Write `body` as a config.toml, load it over `env`, return the environ."""
         with tempfile.TemporaryDirectory() as d:
             path = write_config(d, body)
             with mock.patch.dict(os.environ, env or {}, clear=True):
@@ -1025,20 +724,15 @@ class LoadPickerConfig(unittest.TestCase):
         self.assertEqual(env["HERDR_PICKER_DEBUG"], "1")
 
     def test_a_real_env_var_overrides_the_file(self):
-        # The contract at the top of the module: a variable set for one run wins.
         env = self.load('[picker]\nroot = "/from/file"\n',
                         {"HERDR_PICKER_ROOT": "/from/env"})
         self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env")
 
     def test_only_the_named_settings_are_applied(self):
-        # Whole-environ, so an unknown key under [picker] cannot quietly become
-        # an environment variable of its own.
         env = self.load('[picker]\nroot = "/x/code"\nnonsense = "boom"\n')
         self.assertEqual(env, {"HERDR_PICKER_ROOT": "/x/code"})
 
     def test_a_key_outside_the_picker_table_is_not_claimed(self):
-        # read_toml() qualifies by table, and this pins that the picker relies
-        # on it: a root under some other table must not answer for picker.root.
         env = self.load('[worktrees]\nroot = "/x/wrong"\n\n'
                         '[picker]\nroot = "/x/right"\n')
         self.assertEqual(env, {"HERDR_PICKER_ROOT": "/x/right"})
@@ -1046,19 +740,16 @@ class LoadPickerConfig(unittest.TestCase):
     def test_a_missing_file_is_a_noop(self):
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict(os.environ, {}, clear=True):
-                pp.load_picker_config(os.path.join(d, "config.toml"))  # never created
+                pp.load_picker_config(os.path.join(d, "config.toml"))
                 self.assertEqual(dict(os.environ), {})
 
     def test_an_unreadable_path_is_a_noop(self):
-        # A directory where a file is expected: OSError, not a crash.
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict(os.environ, {}, clear=True):
                 pp.load_picker_config(d)
                 self.assertEqual(dict(os.environ), {})
 
     def test_a_malformed_file_does_not_raise_and_sets_nothing(self):
-        # A new config file is one more thing a user can typo, and the picker is
-        # a popup: it has to open anyway, with the defaults it would have used.
         self.assertEqual(self.load("[picker\nroot /x/code\n}{\n"), {})
 
     def test_a_malformed_line_does_not_stop_the_valid_ones(self):
@@ -1066,14 +757,10 @@ class LoadPickerConfig(unittest.TestCase):
         self.assertEqual(env, {"HERDR_PICKER_HOME": "base"})
 
     def test_debug_false_leaves_debugging_off(self):
-        # The one setting that is a boolean rather than a string. "false" is a
-        # non-empty string, so applying it raw would switch debugging ON.
         env = self.load("[picker]\ndebug = false\n")
         self.assertEqual(env["HERDR_PICKER_DEBUG"], "")
 
     def test_debug_false_really_silences_the_debug_line(self):
-        # End to end through the real reader: the assertion above only matters
-        # because this is what the empty value buys.
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as d:
             path = write_config(d, "[picker]\ndebug = false\n")
@@ -1083,8 +770,6 @@ class LoadPickerConfig(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
 
     def test_debug_true_really_writes_the_debug_line(self):
-        # The other half of the pair, so a loader that set nothing at all would
-        # not pass the test above by accident.
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as d:
             path = write_config(d, "[picker]\ndebug = true\n")
@@ -1095,15 +780,7 @@ class LoadPickerConfig(unittest.TestCase):
 
 
 class ConfigPrecedence(unittest.TestCase):
-    """Environment variable, then config.toml, then .env — in that order.
-
-    The whole of the ordering lives in the call site at the top of the module:
-    both loaders apply values with setdefault(), so whoever writes first wins.
-    These run the two loaders in that same order over one config directory.
-    """
-
     def resolve(self, toml=None, env_file=None, environ=None):
-        """The environ after loading both files over `environ`, in order."""
         with tempfile.TemporaryDirectory() as d:
             if toml is not None:
                 write_config(d, toml)
@@ -1116,20 +793,15 @@ class ConfigPrecedence(unittest.TestCase):
                 return dict(os.environ)
 
     def test_the_env_file_alone_still_works(self):
-        # Mike has a live .env; a change that stopped reading it would present
-        # as lost settings rather than as a migration.
         env = self.resolve(env_file="HERDR_PICKER_ROOT=/from/env-file\n")
         self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env-file")
 
     def test_config_toml_wins_over_the_env_file(self):
-        # TOML is the format these settings are moving to, so a .env left behind
-        # must not quietly outrank the file that replaced it.
         env = self.resolve(toml='[picker]\nroot = "/from/toml"\n',
                            env_file="HERDR_PICKER_ROOT=/from/env-file\n")
         self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/toml")
 
     def test_the_env_file_still_supplies_what_the_toml_omits(self):
-        # The two layers merge per setting; config.toml is not all-or-nothing.
         env = self.resolve(toml='[picker]\nroot = "/from/toml"\n',
                            env_file="HERDR_PICKER_HOME=base\n")
         self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/toml")
@@ -1142,42 +814,22 @@ class ConfigPrecedence(unittest.TestCase):
         self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env")
 
     def test_debug_false_in_the_toml_beats_the_env_file_turning_it_on(self):
-        # Why the false case SETS the empty string rather than skipping the key:
-        # skipping would let a stale .env decide, which is the wrong file.
         env = self.resolve(toml="[picker]\ndebug = false\n",
                            env_file="HERDR_PICKER_DEBUG=1\n")
         self.assertEqual(env["HERDR_PICKER_DEBUG"], "")
 
     def test_a_malformed_toml_leaves_the_env_file_working(self):
-        # The degradation that matters: a typo in the new file must not take the
-        # old one down with it.
         env = self.resolve(toml="[picker\nroot /x/typo\n",
                            env_file="HERDR_PICKER_ROOT=/from/env-file\n")
         self.assertEqual(env["HERDR_PICKER_ROOT"], "/from/env-file")
 
 
 class ModuleBootstrap(unittest.TestCase):
-    """The settings the module binds at import, from a real config directory.
-
-    ConfigPrecedence above runs the two loaders in the order this class checks
-    the module actually calls them in. That call site is where the precedence
-    lives, and re-executing the module is the only way to see it: DEV and
-    HOME_LABEL are bound once, at import, so an environment set afterwards
-    changes nothing. The loader here is the suite's own, so
-    sys.dont_write_bytecode at the top of this file still holds and no .pyc is
-    written for the re-execution.
-    """
-
     def boot(self, files, environ=None):
-        """Re-execute the script over a plugin config dir holding `files`."""
         with tempfile.TemporaryDirectory() as d:
             for name, body in files.items():
                 with open(os.path.join(d, name), "w", encoding="utf-8") as f:
                     f.write(body)
-            # PATH is carried over because the script reads it at import, the
-            # way any real run has one. HERDR_CONFIG_PATH is pinned at a file
-            # that does not exist so the run cannot pick up the developer's own
-            # Herdr config.
             env = dict(environ or {}, PATH=os.environ.get("PATH", ""),
                        HERDR_PLUGIN_CONFIG_DIR=d,
                        HERDR_CONFIG_PATH=os.path.join(d, "absent.toml"))
@@ -1201,8 +853,6 @@ class ModuleBootstrap(unittest.TestCase):
             self.assertEqual(fresh.HOME_LABEL, "base")
 
     def test_the_toml_is_loaded_before_the_env_file(self):
-        # The ordering guard. Swapping the two calls at the top of the script
-        # makes this the .env's value, because both loaders use setdefault().
         with tempfile.TemporaryDirectory() as root:
             fresh = self.boot({"config.toml": '[picker]\nroot = "%s"\n' % root,
                                ".env": "HERDR_PICKER_ROOT=/from/env-file\n"})
@@ -1221,13 +871,6 @@ class ModuleBootstrap(unittest.TestCase):
         self.assertEqual(fresh.HOME_LABEL, "~")
 
     def boot_environ(self, files):
-        """The os.environ a re-execution leaves behind, read INSIDE the patch.
-
-        boot() above answers with the module, which is enough for a setting
-        bound to a constant. The layout setting is not: it is read at call
-        time, so the only trace of it at import is the environment, and that is
-        restored the moment the patch exits.
-        """
         with tempfile.TemporaryDirectory() as d:
             for name, body in files.items():
                 with open(os.path.join(d, name), "w", encoding="utf-8") as f:
@@ -1240,38 +883,22 @@ class ModuleBootstrap(unittest.TestCase):
                 return dict(os.environ)
 
     def test_the_shipped_defaults_are_loaded_at_import(self):
-        # Without this call at the top of the script, an unconfigured picker
-        # has no layout setting at all: every workspace opens bare, and the
-        # notice does not fire either, because an empty setting is silent.
-        # Nothing else in the suite would notice, since every other test
-        # supplies the setting itself.
         self.assertEqual(
             self.boot_environ({}).get("HERDR_PICKER_LAYOUT"),
             pp.read_toml(DEFAULTS, {"picker.layout"})["picker.layout"])
 
     def test_the_shipped_defaults_are_loaded_last(self):
-        # The other half of the same call site: read before the user's files,
-        # the shipped value would win over both of them and the setting could
-        # not be changed without editing the plugin.
         environ = self.boot_environ({"config.toml": '[picker]\nlayout = "/x/mine"\n'})
         self.assertEqual(environ["HERDR_PICKER_LAYOUT"], "/x/mine")
         environ = self.boot_environ({".env": "HERDR_PICKER_LAYOUT=/x/from-env-file\n"})
         self.assertEqual(environ["HERDR_PICKER_LAYOUT"], "/x/from-env-file")
 
     def test_a_malformed_toml_still_lets_the_module_import(self):
-        # The picker is a popup: a typo in optional config must never be what
-        # stops it appearing.
         fresh = self.boot({"config.toml": "[picker\nroot /x/typo\n}{\n"})
         self.assertEqual(fresh.DEV, os.path.expanduser("~"))
 
 
 class PickerConfigIsDocumented(unittest.TestCase):
-    """Doc-drift guard for the [picker] table, in LayoutSettings' shape.
-
-    A key added to PICKER_KEYS without a README line, or renamed in one place
-    only, fails here.
-    """
-
     README = os.path.join(HERE, "..", "README.md")
 
     def lines(self):
@@ -1282,8 +909,6 @@ class PickerConfigIsDocumented(unittest.TestCase):
         self.assertIn("[picker]", self.lines())
 
     def test_every_key_is_documented_exactly_once(self):
-        # Line-scoped rather than a whole-file search, because "root" and "home"
-        # are ordinary words in this README's prose.
         lines = self.lines()
         for key in pp.PICKER_KEYS:
             bare = key.split(".", 1)[1]
@@ -1291,8 +916,6 @@ class PickerConfigIsDocumented(unittest.TestCase):
             self.assertEqual(len(at), 1, key)
 
     def test_every_key_names_the_variable_it_stands_in_for(self):
-        # The two spellings have to stay findable from each other: a reader with
-        # HERDR_PICKER_ROOT in a .env needs to reach the key that replaces it.
         text = "\n".join(self.lines())
         for var in pp.PICKER_KEYS.values():
             self.assertIn(var, text, var)
@@ -1318,7 +941,6 @@ class ResolveRoot(unittest.TestCase):
             self.assertEqual(pp.resolve_root(), os.path.expanduser("~"))
 
     def test_tilde_is_expanded(self):
-        # .env values are never shell-expanded, so "~/x" arrives literally.
         with tempfile.TemporaryDirectory() as d:
             sub = os.path.join(d, "Code")
             os.mkdir(sub)
@@ -1327,8 +949,6 @@ class ResolveRoot(unittest.TestCase):
                 self.assertEqual(pp.resolve_root(), sub)
 
     def test_unexpanded_tilde_would_not_be_a_directory_and_falls_back(self):
-        # Guards the expansion above: without it "~/Code" is a relative path
-        # that does not exist, so the result would be home, not the real dir.
         with tempfile.TemporaryDirectory() as d:
             os.mkdir(os.path.join(d, "Code"))
             with mock.patch.dict(os.environ, {"HOME": d, "HERDR_PICKER_ROOT": "~/Nope"},
@@ -1337,32 +957,7 @@ class ResolveRoot(unittest.TestCase):
 
 
 class Repos(unittest.TestCase):
-    """Discovery under the root: how deep it reaches, what it skips, and what
-    each of its two passes contributed.
-
-    repos() reads the module-level DEV, which is bound at import, so each case
-    builds a scratch root and patches DEV at it.
-    """
-
     def discover(self, repos=(), worktrees=(), dirs=None, roots=None, counts=None):
-        """(root, repos()) for a scratch root holding these projects.
-
-        Both project arguments are paths relative to the root, at any depth.
-
-        `counts` is the optional per-pass tally dict, forwarded only when one is
-        given: the no-argument call is repos()' own default and every other case
-        here keeps exercising it, so dropping the argument entirely would leave
-        the default signature untested.
-
-        The container settings are patched rather than inherited, since
-        WORKTREE_DIRS is bound at import from the developer's own Herdr
-        config: unpatched, every case here would pass or fail according to a
-        file outside the repo. They default to the shipped names.
-
-        A `roots` entry is taken as-is when absolute and resolved against the
-        scratch root otherwise, so a flat root inside the root and one outside
-        it are both expressible.
-        """
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         for rel in repos:
@@ -1385,9 +980,6 @@ class Repos(unittest.TestCase):
         self.assertEqual(found, [os.path.join(root, "group-a", "myrepo")])
 
     def test_a_herdr_worktree_three_levels_down_is_found(self):
-        # Herdr creates worktrees at <worktrees.directory>/<repo>/<branch-slug>,
-        # which is three levels under the root on the default layout. Two levels
-        # of globbing never reached them.
         root, found = self.discover(repos=["myrepo"],
                                     worktrees=["worktrees/myrepo/feat-x"])
         self.assertEqual(sorted(found),
@@ -1395,20 +987,14 @@ class Repos(unittest.TestCase):
                                  os.path.join(root, "worktrees", "myrepo", "feat-x")]))
 
     def test_a_worktree_found_three_levels_down_is_tagged_worktree(self):
-        # The KIND column is the point of finding them, so the classification
-        # is pinned on a path discovery actually produced, not a handmade one.
         root, found = self.discover(worktrees=["worktrees/myrepo/feat-x"])
         self.assertEqual([pp.row_kind(p) for p in found], ["worktree"])
 
     def test_a_fourth_level_is_not_searched(self):
-        # Bounds the depth, so gaining a fifth stat pass stays a deliberate act.
         _, found = self.discover(repos=["a/b/c/d"])
         self.assertEqual(found, [])
 
     def test_a_repo_nested_inside_a_repo_is_skipped(self):
-        # The third level puts a submodule or a vendored checkout in reach for
-        # the first time, under a parent at either of the shallower depths.
-        # Shallowest-first globbing is what has the parent already in `out`.
         root, found = self.discover(repos=["myrepo", "myrepo/vendor/pkg",
                                            "group-a/repo", "group-a/repo/sub"])
         self.assertEqual(sorted(found),
@@ -1416,32 +1002,16 @@ class Repos(unittest.TestCase):
                                  os.path.join(root, "group-a", "repo")]))
 
     def test_a_nested_repo_sorting_ahead_of_its_parent_is_still_skipped(self):
-        # Pins what the depth banding buys: the skip needs the parent in `out`
-        # before anything inside it, and globbing depth by depth is what
-        # guarantees that. One flat recursive glob would not, however it is
-        # sorted, because "a/-x" sorts ahead of its own parent "a" and would
-        # leak through. Same ASCII boundary as the prefix-sibling case below:
-        # any name starting below "/" (0x2F) sorts against you.
         root, found = self.discover(repos=["a", "a/-x"])
         self.assertEqual(found, [os.path.join(root, "a")])
 
     def test_a_sibling_sharing_a_name_prefix_is_not_mistaken_for_nesting(self):
-        # The skip compares against parent + os.sep, so "myrepo_old" must not
-        # read as living inside "myrepo". The suffix has to sort AFTER "/" for
-        # this to bite: the shorter name must already be in `out` when the
-        # longer one is tested, and "myrepo-fork" would sort ahead of it.
         root, found = self.discover(repos=["myrepo", "myrepo_old"])
         self.assertEqual(sorted(found),
                          sorted([os.path.join(root, "myrepo"),
                                  os.path.join(root, "myrepo_old")]))
 
     def test_a_worktree_in_herdrs_own_container_is_found(self):
-        # Herdr's layout while [worktrees] directory is ".worktrees": the
-        # container inside the repo, then the repo's own name, then the branch
-        # slug. Relative is not what nests it — "../worktrees" is relative too
-        # and lands beside the repo instead, which the sibling case below pins.
-        # Two things hid this one — the leading dot, which no wildcard matches,
-        # and the nested skip.
         root, found = self.discover(
             repos=["myrepo"], worktrees=["myrepo/.worktrees/myrepo/feat-x"])
         self.assertEqual(
@@ -1450,8 +1020,6 @@ class Repos(unittest.TestCase):
                     os.path.join(root, "myrepo", ".worktrees", "myrepo", "feat-x")]))
 
     def test_a_worktree_in_claude_codes_container_is_found(self):
-        # The other real layout, and it does NOT nest by repo name, so both
-        # container depths have to be searched.
         root, found = self.discover(
             repos=["myrepo"], worktrees=["myrepo/.claude/worktrees/slug-1a2b"])
         self.assertEqual(
@@ -1465,9 +1033,6 @@ class Repos(unittest.TestCase):
         self.assertIn(os.path.join(root, "myrepo", "worktrees", "feat-x"), found)
 
     def test_a_nested_worktree_is_found_under_a_repo_at_any_depth(self):
-        # The container hangs off the repo, not off the root, so a repo two
-        # levels down carries its worktrees five levels down. That is past
-        # every depth band, which is the whole reason for the second pass.
         root, found = self.discover(
             repos=["group/myrepo"],
             worktrees=["group/myrepo/.worktrees/myrepo/feat-x"])
@@ -1476,32 +1041,22 @@ class Repos(unittest.TestCase):
             found)
 
     def test_a_nested_worktree_is_tagged_worktree(self):
-        # The KIND column is the point of finding them, pinned on a path
-        # discovery actually produced rather than a handmade one.
         root, found = self.discover(
             repos=["myrepo"], worktrees=["myrepo/.worktrees/myrepo/feat-x"])
         nested = [p for p in found if ".worktrees" in p]
         self.assertEqual([pp.row_kind(p) for p in nested], ["worktree"])
 
     def test_an_ordinary_repo_inside_a_container_is_still_skipped(self):
-        # The exemption is for linked worktrees, not for everything under a
-        # container name. A submodule that happens to sit there is still the
-        # parent's own content and must not become a second row.
         root, found = self.discover(repos=["myrepo", "myrepo/worktrees/vendored"])
         self.assertEqual(found, [os.path.join(root, "myrepo")])
 
     def test_a_container_under_a_repo_that_is_itself_nested_is_not_searched(self):
-        # A vendored checkout is skipped, so its containers are never reached
-        # either: the second pass runs over what the first pass kept.
         root, found = self.discover(
             repos=["myrepo", "myrepo/vendor/pkg"],
             worktrees=["myrepo/vendor/pkg/.worktrees/pkg/feat-x"])
         self.assertEqual(found, [os.path.join(root, "myrepo")])
 
     def test_a_container_named_by_herdrs_config_is_searched(self):
-        # End to end: a real config.toml, read by the real read_toml() through
-        # the real herdr_config_path(), naming a container none of the fixed
-        # names cover.
         cfg = tempfile.TemporaryDirectory()
         self.addCleanup(cfg.cleanup)
         path = write_config(cfg.name, '[worktrees]\ndirectory = "trees"\n')
@@ -1512,23 +1067,7 @@ class Repos(unittest.TestCase):
                                     dirs=dirs, roots=roots)
         self.assertIn(os.path.join(root, "myrepo", "trees", "feat-x"), found)
 
-    # A container BESIDE the repo, which is what a "../worktrees" setting
-    # produces. Herdr moved to it so that nothing walking a repository can
-    # descend into a checkout: .git/info/exclude stops git, and nothing else.
-    # A repo at <root>/<group>/<name> then keeps its worktrees at
-    # <root>/<group>/worktrees/<name>/<slug> — four levels down, past every
-    # depth band, and inside no repository at all.
-    #
-    # The container pass reaches it with no new mechanism: a container is a
-    # relative path resolved against the repo root, and normpath collapsing the
-    # ".." is the whole of the handling. These cases pin that, since nothing
-    # else states it and an innocent-looking change to either the join or the
-    # dirs list would silently drop the layout. What the ".." does change is
-    # the COST — one container now serves every repo in a parent — so the last
-    # case here counts globs rather than rows.
-
     def sibling_locations(self):
-        """(dirs, roots) for a real config.toml holding "../worktrees"."""
         cfg = tempfile.TemporaryDirectory()
         self.addCleanup(cfg.cleanup)
         path = write_config(cfg.name, '[worktrees]\ndirectory = "../worktrees"\n')
@@ -1536,12 +1075,10 @@ class Repos(unittest.TestCase):
             return pp.worktree_locations()
 
     def sibling(self, **kwargs):
-        """discover() with the sibling container read from a real config."""
         dirs, roots = self.sibling_locations()
         return self.discover(dirs=dirs, roots=roots, **kwargs)
 
     def test_a_worktree_beside_its_repo_is_found(self):
-        # End to end, through the real read_toml() and herdr_config_path().
         root, found = self.sibling(
             repos=["group-a/repo-one"],
             worktrees=["group-a/worktrees/repo-one/feat-x"])
@@ -1552,8 +1089,6 @@ class Repos(unittest.TestCase):
                                  "feat-x")]))
 
     def test_a_worktree_beside_its_repo_is_tagged_worktree(self):
-        # The KIND column is the point of finding them, pinned on a path
-        # discovery actually produced rather than a handmade one.
         root, found = self.sibling(
             repos=["group-a/repo-one"],
             worktrees=["group-a/worktrees/repo-one/feat-x"])
@@ -1561,10 +1096,6 @@ class Repos(unittest.TestCase):
         self.assertEqual([pp.row_kind(p) for p in beside], ["worktree"])
 
     def test_each_repo_resolves_its_own_sibling_container(self):
-        # The ".." is resolved against the REPO, not against the root, so two
-        # repos under different parents each get their own container. Resolving
-        # against the root would find one of these two at most, and the fixture
-        # is shaped so that neither container sits where the other repo looks.
         root, found = self.sibling(
             repos=["group-a/repo-one", "group-b/repo-two"],
             worktrees=["group-a/worktrees/repo-one/feat-x",
@@ -1579,11 +1110,6 @@ class Repos(unittest.TestCase):
                                  "feat-y")]))
 
     def test_a_sibling_container_the_depth_bands_also_reach_lists_once(self):
-        # A repo directly under the root resolves its sibling container to
-        # <root>/worktrees, which puts the checkout three levels down and in
-        # reach of the bands — an undotted container is not hidden from them
-        # the way ".worktrees" and ".claude" are. So the path arrives twice and
-        # must still produce one row, credited to the pass that found it.
         counts = {}
         dirs, roots = self.sibling_locations()
         root, found = self.discover(repos=["myrepo"],
@@ -1595,13 +1121,6 @@ class Repos(unittest.TestCase):
         self.assertEqual(counts, {"bands": 2, "containers": 0})
 
     def test_every_worktree_layout_lists_at_once(self):
-        # The migration is not atomic: while Herdr's setting changes, worktrees
-        # made under the old value stay where they are. All four shapes have to
-        # list together — Claude Code's <repo>/.claude/worktrees/<slug>, which
-        # carries one level fewer than the rest, Herdr's old nested
-        # <repo>/.worktrees/<repo>/<slug>, Herdr's older flat
-        # <root>/worktrees/<repo>/<slug>, and the new sibling
-        # <parent>/worktrees/<repo>/<slug>.
         root, found = self.sibling(
             repos=["group-a/repo-one", "repo-two"],
             worktrees=["repo-two/.claude/worktrees/slug-1a2b",
@@ -1621,11 +1140,6 @@ class Repos(unittest.TestCase):
                                  "feat-new")]))
 
     def test_a_bare_parent_container_admits_only_worktrees(self):
-        # ".." is a legal value that resolves to the grouping dir itself, so it
-        # aims the container globs at every sibling of the repo. What bounds
-        # that is the row_kind() == "worktree" test, not the container name: the
-        # ordinary repo here sits exactly where the worktree does, four levels
-        # down and past the bands, and must not become a row.
         root, found = self.discover(
             repos=["a/group/one", "a/group/trees/vendored"],
             worktrees=["a/group/trees/feat-x"],
@@ -1636,7 +1150,6 @@ class Repos(unittest.TestCase):
                     os.path.join(root, "a", "group", "trees", "feat-x")]))
 
     def globbed(self, **kwargs):
-        """((root, repos()), the patterns repos() handed to glob)."""
         patterns, real = [], pp.glob.glob
         with mock.patch.object(
                 pp.glob, "glob",
@@ -1644,12 +1157,6 @@ class Repos(unittest.TestCase):
             return self.discover(**kwargs), patterns
 
     def test_a_shared_sibling_container_is_globbed_once(self):
-        # Every repo in a parent resolves "../worktrees" to the SAME directory,
-        # so the bases list holds one copy per repo and the two container globs
-        # would re-run over it once per repo. Counted rather than timed: the
-        # saving is real work not done, and a timing assertion would be flaky.
-        # On the real 85-repo root it is 340 bases against 262 distinct ones,
-        # 28.9ms of discovery against 23.0ms.
         dirs, roots = self.sibling_locations()
         (root, found), patterns = self.globbed(
             repos=["group/one", "group/two", "group/three"],
@@ -1663,8 +1170,6 @@ class Repos(unittest.TestCase):
                       found)
 
     def test_an_absolute_worktree_root_outside_the_picker_root_is_searched(self):
-        # The old flat layout, and Herdr's shipped default. Nothing under the
-        # picker root leads to it, so it is searched on its own.
         flat = tempfile.TemporaryDirectory()
         self.addCleanup(flat.cleanup)
         wt = make_project(os.path.join(flat.name, "myrepo", "feat-x"), worktree=True)
@@ -1672,26 +1177,17 @@ class Repos(unittest.TestCase):
         self.assertEqual(sorted(found), sorted([os.path.join(root, "myrepo"), wt]))
 
     def test_a_worktree_reached_twice_is_listed_once(self):
-        # A flat root that sits inside the picker root is found by the depth
-        # bands as well, so the same path arrives twice. One row, not two.
         root, found = self.discover(repos=["myrepo"],
                                     worktrees=["worktrees/myrepo/feat-x"],
                                     roots=["worktrees"])
         self.assertEqual(found, [os.path.join(root, "myrepo"),
                                  os.path.join(root, "worktrees", "myrepo", "feat-x")])
 
-    # The per-pass tally: the same two passes seen from the other side.
-
     def tally(self, **kwargs):
-        """(repos(), counts) for a scratch root holding these projects."""
         counts = {}
         _, found = self.discover(counts=counts, **kwargs)
         return found, counts
 
-    # Both passes contribute, and the band pass returns a worktree as well as a
-    # repo: Herdr's flat <root>/worktrees/<repo>/<slug> is three levels down, so
-    # the depth bands reach it. That is the case the reported wording has to
-    # survive — "2 repos" would be a lie about this tree.
     MIXED_PASSES = {"repos": ["myrepo"],
                     "worktrees": ["worktrees/myrepo/feat-x",
                                   "myrepo/.worktrees/myrepo/feat-y"]}
@@ -1702,14 +1198,10 @@ class Repos(unittest.TestCase):
         self.assertEqual(counts, {"bands": 2, "containers": 1})
 
     def test_the_two_figures_account_for_every_row(self):
-        # The debug line reports the row total beside the split, so a split that
-        # does not add up to it would be visibly wrong.
         found, counts = self.tally(**self.MIXED_PASSES)
         self.assertEqual(counts["bands"] + counts["containers"], len(found))
 
     def test_a_pass_that_found_nothing_reports_zero(self):
-        # Both keys are always present: debug_discovery() indexes them, so an
-        # omitted key would raise instead of printing.
         found, counts = self.tally(repos=["myrepo"])
         self.assertEqual((len(found), counts), (1, {"bands": 1, "containers": 0}))
 
@@ -1719,15 +1211,8 @@ class Repos(unittest.TestCase):
 
 
 class DebugDiscovery(unittest.TestCase):
-    """The HERDR_PICKER_DEBUG line: silent by default, one line when asked for."""
-
     def report(self, flag=None, paths=("/x/a", "/x/b", "/x/c"),
                counts=None, elapsed=0.0264):
-        """What one debug_discovery() call writes, as text.
-
-        A `flag` of None leaves HERDR_PICKER_DEBUG unset. clear=True either way,
-        so the developer's own environment cannot decide the outcome.
-        """
         out = io.StringIO()
         env = {} if flag is None else {"HERDR_PICKER_DEBUG": flag}
         with mock.patch.dict(os.environ, env, clear=True):
@@ -1736,18 +1221,12 @@ class DebugDiscovery(unittest.TestCase):
         return out.getvalue()
 
     def test_unset_writes_nothing(self):
-        # The default path for every normal run: a popup pane that writes
-        # uninvited is the thing this gate exists to prevent.
         self.assertEqual(self.report(), "")
 
     def test_an_empty_value_writes_nothing(self):
-        # What "HERDR_PICKER_DEBUG=" in the .env file leaves behind. It has to
-        # read as off, the way an empty HERDR_PICKER_ROOT reads as unset.
         self.assertEqual(self.report(flag=""), "")
 
     def test_the_elapsed_seconds_are_reported_as_milliseconds(self):
-        # 0.0264s is the measured figure from the real root, in the units the
-        # repos() docstring quotes. A raw-seconds line would read "0.0ms".
         self.assertIn("26.4ms", self.report(flag="1"))
 
     def test_the_row_total_and_both_passes_are_reported(self):
@@ -1757,8 +1236,6 @@ class DebugDiscovery(unittest.TestCase):
         self.assertIn("1 from worktree containers", text)
 
     def test_the_row_total_is_the_rows_not_the_sum_of_the_passes(self):
-        # Pins which of the two the figure comes from, so an inconsistency
-        # between the list and the tally shows up instead of being smoothed.
         self.assertIn("3 rows", self.report(flag="1",
                                             counts={"bands": 1, "containers": 1}))
 
@@ -1768,12 +1245,9 @@ class DebugDiscovery(unittest.TestCase):
         self.assertTrue(text.endswith("\n"), text)
 
     def test_it_names_the_picker(self):
-        # The line can land in a shared terminal, so it says whose it is.
         self.assertTrue(self.report(flag="1").startswith("picker: "))
 
     def test_the_default_stream_is_stderr(self):
-        # Where every other writer in the script goes. Not stdout: that is the
-        # stream a caller piping the picker would be reading.
         err = io.StringIO()
         with mock.patch.dict(os.environ, {"HERDR_PICKER_DEBUG": "1"}, clear=True), \
              mock.patch.object(pp.sys, "stderr", err):
@@ -1782,20 +1256,7 @@ class DebugDiscovery(unittest.TestCase):
 
 
 class DebugLineFromARealRun(unittest.TestCase):
-    """What driving main() shows that a unit test of the line cannot: where the
-    write lands in the sequence, and what the timer is wrapped around.
-
-    fzf paints the popup over the whole pane, so anything written while it owns
-    the screen garbles the list. The write has to be on the near side of that
-    subprocess call.
-    """
-
     def run_main(self, env, delay=0):
-        """Every write and every subprocess call main() makes, in order.
-
-        `delay` is seconds that discovery is made to take, so the reported figure
-        can be held against a known floor.
-        """
         events = []
 
         class Recorder(io.StringIO):
@@ -1805,8 +1266,6 @@ class DebugLineFromARealRun(unittest.TestCase):
 
         def fake_run(argv, **kwargs):
             events.append(("run", argv[0]))
-            # 130 is Esc: parse_selection() reads it as cancelled, so main()
-            # returns without touching a workspace.
             return mock.Mock(returncode=130, stdout="")
 
         def fake_repos(counts=None):
@@ -1835,25 +1294,16 @@ class DebugLineFromARealRun(unittest.TestCase):
         self.assertEqual(events[1][1], "fzf")
 
     def test_an_ordinary_run_writes_nothing_at_all(self):
-        # The whole-run version of the gate: fzf still starts, and not one byte
-        # reaches the pane before it.
         events = self.run_main({})
         self.assertEqual(events, [("run", "fzf")])
 
     def test_the_reported_time_is_the_time_discovery_took(self):
-        # The central claim, and the one thing no assertion on the text can
-        # show: the clock has to be started before repos() and read after it.
-        # A timer that brackets anything else reports a figure near zero, so
-        # discovery is made to take a known minimum and the figure held above
-        # it. No upper bound: the scheduler owns that end.
         events = self.run_main({"HERDR_PICKER_DEBUG": "1"}, delay=0.02)
         reported = float(events[0][1].split("discovery ")[1].split("ms")[0])
         self.assertGreaterEqual(reported, 15.0, events[0][1])
 
 
 class WorktreeLocations(unittest.TestCase):
-    """Where worktrees are looked for: fixed names plus Herdr's own setting."""
-
     def locate(self, config):
         return pp.worktree_locations(config)
 
@@ -1863,7 +1313,6 @@ class WorktreeLocations(unittest.TestCase):
         self.assertEqual(roots, [])
 
     def test_both_real_layouts_are_covered_by_the_fixed_names(self):
-        # Herdr's and Claude Code's, the two that exist on this machine.
         self.assertIn(".worktrees", pp.FIXED_WORKTREE_DIRS)
         self.assertIn(".claude/worktrees", pp.FIXED_WORKTREE_DIRS)
 
@@ -1877,8 +1326,6 @@ class WorktreeLocations(unittest.TestCase):
         self.assertEqual(dirs, list(pp.FIXED_WORKTREE_DIRS))
 
     def test_a_setting_beside_the_repo_stays_relative(self):
-        # Herdr resolves a relative value against the repo root, so "../x"
-        # names a real directory beside the repo, not a nonsense one.
         dirs, roots = self.locate({"worktrees.directory": "../trees"})
         self.assertIn(os.path.join("..", "trees"), dirs)
         self.assertEqual(roots, [])
@@ -1889,8 +1336,6 @@ class WorktreeLocations(unittest.TestCase):
         self.assertEqual(roots, ["/srv/worktrees"])
 
     def test_herdrs_shipped_default_is_read_as_a_root_not_a_container(self):
-        # ~/.herdr/worktrees is absolute once expanded, and .env values are
-        # never shell-expanded, so the tilde has to be handled here.
         _, roots = self.locate({"worktrees.directory": "~/.herdr/worktrees"})
         self.assertEqual(roots, [os.path.expanduser("~/.herdr/worktrees")])
 
@@ -1900,15 +1345,11 @@ class WorktreeLocations(unittest.TestCase):
         self.assertEqual(roots, [])
 
     def test_an_unreadable_config_degrades_rather_than_raising(self):
-        # read_toml() answers {} for a missing file; nothing here may raise on
-        # it, since the picker must still open.
         with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": "/nope/config.toml"}):
             dirs, roots = pp.worktree_locations()
         self.assertEqual((dirs, roots), (list(pp.FIXED_WORKTREE_DIRS), []))
 
     def test_a_malformed_setting_line_degrades_rather_than_raising(self):
-        # An array is skipped by read_toml() rather than half-parsed, so the
-        # key reads as absent.
         with tempfile.TemporaryDirectory() as d:
             path = write_config(d, '[worktrees]\ndirectory = ["a", "b"]\n')
             with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": path}):
@@ -1917,8 +1358,6 @@ class WorktreeLocations(unittest.TestCase):
 
 
 class TouchedAt(unittest.TestCase):
-    """The TOUCHED column: newest of the git index and the working tree."""
-
     def touch(self, path, when):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -1926,7 +1365,6 @@ class TouchedAt(unittest.TestCase):
         os.utime(path, (when, when))
 
     def touched(self, build, dirs=None):
-        """touched_at() for a scratch repo `build` fills in."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         repo = make_project(os.path.join(tmp.name, "myrepo"))
@@ -1936,42 +1374,30 @@ class TouchedAt(unittest.TestCase):
             return repo, pp.touched_at(repo)
 
     def test_the_newest_working_tree_file_is_reported(self):
-        # The control the prune cases below are measured against.
         def build(repo):
             self.touch(os.path.join(repo, "old.txt"), 1000)
             self.touch(os.path.join(repo, "src", "new.txt"), 2000)
         self.assertEqual(self.touched(build)[1], 2000)
 
     def test_a_nested_worktrees_files_do_not_count_as_the_parents_touch(self):
-        # The live defect: a container one level down puts the worktree's own
-        # working tree at depth 2, which the walk reads. The worktree is its own
-        # row now, so its work must not read as work on the parent.
         def build(repo):
             self.touch(os.path.join(repo, "own.txt"), 1000)
             self.touch(os.path.join(repo, "worktrees", "feat-x", "README.md"), 9000)
         self.assertEqual(self.touched(build)[1], 1000)
 
     def test_herdrs_own_container_is_not_walked(self):
-        # Measured: under .worktrees/<repo>/<slug> a worktree's own files sit at
-        # depth 3, which the walk never reached even before the prune. So what
-        # is pinned here is the container being pruned outright — the deepest
-        # level the walk does read inside it is ignored too.
         def build(repo):
             self.touch(os.path.join(repo, "own.txt"), 1000)
             self.touch(os.path.join(repo, ".worktrees", "myrepo", "stamp"), 9000)
         self.assertEqual(self.touched(build)[1], 1000)
 
     def test_the_claude_container_is_not_walked(self):
-        # Same shape one level shallower: .claude/worktrees is itself the
-        # deepest directory the walk reads, so its contents are the fixture.
         def build(repo):
             self.touch(os.path.join(repo, "own.txt"), 1000)
             self.touch(os.path.join(repo, ".claude", "worktrees", "stamp"), 9000)
         self.assertEqual(self.touched(build)[1], 1000)
 
     def test_the_prune_is_by_path_so_the_rest_of_dot_claude_still_counts(self):
-        # ".claude" itself is ordinary repo content. Pruning by name would
-        # silently stop settings edits counting as a touch.
         def build(repo):
             self.touch(os.path.join(repo, "own.txt"), 1000)
             self.touch(os.path.join(repo, ".claude", "settings.json"), 9000)
@@ -1989,9 +1415,6 @@ class TouchedAt(unittest.TestCase):
         self.assertEqual(self.touched(build)[1], 9000)
 
     def test_the_same_name_somewhere_else_in_the_tree_still_counts(self):
-        # The other half of "by path, not by name": a container is only a
-        # container at the place repos() looks for it. A matching name deeper
-        # in the tree is ordinary content, and pruning it would lose real work.
         def build(repo):
             self.touch(os.path.join(repo, "src", "worktrees", "f.txt"), 9000)
         self.assertEqual(self.touched(build)[1], 9000)
@@ -2004,10 +1427,7 @@ class TouchedAt(unittest.TestCase):
 
 
 class Kind(unittest.TestCase):
-    """Repo vs. linked worktree, decided by the shape of .git."""
-
     def kind_of(self, make):
-        """Build a project dir, run `make` on its .git path, classify it."""
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "proj")
             os.mkdir(p)
@@ -2024,28 +1444,17 @@ class Kind(unittest.TestCase):
         self.assertEqual(self.kind_of(write_pointer), "worktree")
 
     def test_worktree_with_a_deleted_parent_still_classifies(self):
-        # `git -C` fails outright on these, which is why row_kind() only stats.
         def dangling(g):
             with open(g, "w", encoding="utf-8") as f:
                 f.write("gitdir: /x/deleted/.git/worktrees/proj\n")
         self.assertEqual(self.kind_of(dangling), "worktree")
 
     def test_absent_dot_git_reads_as_a_repo(self):
-        # repos() only ever yields paths that have a .git, so this is
-        # unreachable today. Pinned so a future caller sees the fallback.
         self.assertEqual(self.kind_of(lambda g: None), "repo")
 
 
 class ParentRepo(unittest.TestCase):
-    """The repo a linked worktree belongs to, read out of its gitdir pointer.
-
-    open_project() names that repo to Herdr so the sidebar can nest the
-    checkout under it. A wrong answer nests it under an unrelated repo, so
-    every shape that is not exactly git's must come back None.
-    """
-
     def derive(self, pointer):
-        """(checkout, parent_repo(checkout)) for a .git holding `pointer`."""
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         checkout = os.path.join(d.name, "feat-x")
@@ -2054,24 +1463,12 @@ class ParentRepo(unittest.TestCase):
             f.write(pointer)
         return checkout, pp.parent_repo(checkout)
 
-    # The three pointer shapes a real machine writes, over placeholder paths.
-    # All three layouts place the CHECKOUT differently and the admin path
-    # identically, which is the whole reason one parse serves them all.
-    # Herdr's sibling <parent>/worktrees/<repo>/<slug> gets no fixture of its
-    # own for exactly that reason: its pointer is byte-identical in shape to
-    # the flat one below, so a fourth copy would assert the same parse twice.
-
     def test_the_repository_nested_layout_yields_the_parent(self):
-        # Herdr's, while [worktrees] directory is ".worktrees": the checkout
-        # lives at <repo>/.worktrees/<repo>/<slug>.
         _, parent = self.derive(
             "gitdir: /x/code/group-a/repo-one/.git/worktrees/feat-x\n")
         self.assertEqual(parent, "/x/code/group-a/repo-one")
 
     def test_the_flat_layout_yields_the_parent(self):
-        # The checkout sits under <root>/worktrees/<repo>/<slug>, nowhere near
-        # its repo. These rows nest correctly in the sidebar today only because
-        # Herdr opened them; through the picker they floated like the rest.
         _, parent = self.derive(
             "gitdir: /x/code/group-b/repo-two/.git/worktrees/feat-y\n")
         self.assertEqual(parent, "/x/code/group-b/repo-two")
@@ -2082,39 +1479,24 @@ class ParentRepo(unittest.TestCase):
         self.assertEqual(parent, "/x/code/repo-three")
 
     def test_a_relative_pointer_is_resolved_against_the_checkout(self):
-        # `git worktree add --relative-paths`, and the worktree.useRelativePaths
-        # setting, write one of these. Handed to Herdr as --cwd unresolved it
-        # would name a directory relative to wherever the picker happens to run.
         checkout, parent = self.derive("gitdir: ../myrepo/.git/worktrees/feat-x\n")
         self.assertEqual(parent,
                          os.path.join(os.path.dirname(checkout), "myrepo"))
 
     def test_an_ordinary_repo_has_no_worktree_parent(self):
-        # Its .git is a directory, so the read raises before any parsing. This
-        # is what keeps repo rows on `workspace create` without a second stat.
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(pp.parent_repo(make_project(os.path.join(d, "r"))))
 
     def test_a_submodule_pointer_yields_none(self):
-        # A submodule's .git is a FILE too, so row_kind() calls it a
-        # worktree, but it points into .git/modules and has no worktree parent
-        # to name.
-        # Nesting it under the superproject would be a different claim entirely.
         self.assertIsNone(self.derive("gitdir: /x/super/.git/modules/sub\n")[1])
 
     def test_an_admin_dir_outside_dot_git_yields_none(self):
-        # "worktrees" alone is not the shape: the component above it has to be
-        # .git. A prefix or a single-name test would admit this.
         self.assertIsNone(self.derive("gitdir: /x/parent/git/worktrees/wt\n")[1])
 
     def test_an_admin_dir_with_no_worktrees_component_yields_none(self):
         self.assertIsNone(self.derive("gitdir: /x/parent/.git\n")[1])
 
     def test_a_line_whose_key_is_not_gitdir_yields_none(self):
-        # The KEY is checked, not merely the value's shape. The fixture is
-        # shaped to make that visible: an admin path that passes every shape
-        # check below, behind a key that is not "gitdir". A .git file holding
-        # anything else is malformed, and malformed must not name a parent.
         self.assertIsNone(
             self.derive("worktreedir: /x/parent/.git/worktrees/wt\n")[1])
 
@@ -2129,17 +1511,10 @@ class ParentRepo(unittest.TestCase):
             self.assertIsNone(pp.parent_repo(os.path.join(d, "gone")))
 
     def test_surrounding_whitespace_around_the_target_is_ignored(self):
-        # Git pads neither end, but a file edited by hand may. Unstripped, the
-        # padded path stops looking absolute and gets joined onto the checkout.
         _, parent = self.derive("gitdir:  /x/parent/.git/worktrees/wt  \n")
         self.assertEqual(parent, "/x/parent")
 
     def test_only_the_first_line_is_read(self):
-        # The fixture is shaped to make the difference visible: read whole, the
-        # two lines splice into one path that still passes every shape check
-        # and yields "/x/parent/.git/worktrees/wt\n/x/other" as the repo to
-        # nest under. A second line is not a shape git writes, so anything
-        # carrying one is malformed and must not produce a parent by accident.
         _, parent = self.derive("gitdir: /x/parent/.git/worktrees/wt\n"
                                 "/x/other/.git/worktrees/wt2\n")
         self.assertEqual(parent, "/x/parent")
@@ -2150,14 +1525,10 @@ class ParentRepo(unittest.TestCase):
 
 
 class Elide(unittest.TestCase):
-    """Long labels are cut so they cannot shift the columns after them."""
-
     def test_short_text_is_untouched(self):
         self.assertEqual(pp.elide("proj", 10), "proj")
 
     def test_text_exactly_at_the_width_is_untouched(self):
-        # Off-by-one guard: cutting here would spend a column on an ellipsis
-        # that hides nothing.
         self.assertEqual(pp.elide("0123456789", 10), "0123456789")
 
     def test_longer_text_is_cut_to_the_width_and_marked(self):
@@ -2168,20 +1539,12 @@ class Elide(unittest.TestCase):
             self.assertLessEqual(len(pp.elide("x" * n, 10)), 10)
 
     def test_the_front_is_kept_not_the_tail(self):
-        # Dupe labels carry a "parent/" prefix that makes them unique, so the
-        # head is the one part that must survive.
         cut = pp.elide("group-a/a-project-with-a-very-long-name", 12)
         self.assertTrue(cut.startswith("group-a/"))
 
 
 class Row(unittest.TestCase):
-    """The row format and the label width must stay in step."""
-
     def test_label_field_is_padded_to_label_width(self):
-        # elide() trims to LABEL_WIDTH, so a ROW whose first field is padded to
-        # some other width would either clip early or still let rows overflow.
-        # Field 1 spans columns 0..W-1, a separating space sits at W, so the
-        # second field starts at W+1.
         row = pp.ROW.format("x", "KIND", "", "", "", "")
         self.assertEqual(row.index("KIND"), pp.LABEL_WIDTH + 1)
 
@@ -2201,8 +1564,6 @@ class Row(unittest.TestCase):
 
 
 class FzfInstaller(unittest.TestCase):
-    """Which installer to use here, and whether it is ours to run."""
-
     def which(self, *present):
         return mock.patch.object(pp.shutil, "which",
                                  side_effect=lambda b: f"/bin/{b}" if b in present else None)
@@ -2212,7 +1573,6 @@ class FzfInstaller(unittest.TestCase):
             self.assertEqual(pp.fzf_installer(), (["brew", "install", "fzf"], True))
 
     def test_apt_is_found_but_not_runnable(self):
-        # sudo cannot prompt sensibly from a popup pane, so we only advise.
         with self.which("apt-get"):
             argv, runnable = pp.fzf_installer()
         self.assertIn("apt-get", argv)
@@ -2238,8 +1598,6 @@ class FzfInstaller(unittest.TestCase):
 
 
 class CheckDeps(unittest.TestCase):
-    """The --check-deps preflight the manifest's [[build]] step runs."""
-
     def run_check(self, fzf, brew=False):
         def which(b):
             return "/bin/fzf" if (b == "fzf" and fzf) else ("/bin/brew" if (b == "brew" and brew) else None)
@@ -2253,7 +1611,6 @@ class CheckDeps(unittest.TestCase):
         self.assertIn("/bin/fzf", text)
 
     def test_missing_fzf_exits_non_zero(self):
-        # A zero exit would let an unusable plugin install cleanly.
         code, _ = self.run_check(fzf=False)
         self.assertEqual(code, 1)
 
@@ -2266,14 +1623,11 @@ class CheckDeps(unittest.TestCase):
         self.assertIn("github.com/junegunn/fzf", text)
 
     def test_it_never_prompts(self):
-        # A build step has no terminal; a prompt here would hang the install.
         with mock.patch("builtins.input", side_effect=AssertionError("prompted")):
             self.run_check(fzf=False)
 
 
 class EnsureFzf(unittest.TestCase):
-    """First-run install offer. Anything short of a working fzf must die()."""
-
     def run_ensure(self, answer, fzf_after=False, brew=True, rc=0):
         calls = {"which": 0}
 
@@ -2315,7 +1669,6 @@ class EnsureFzf(unittest.TestCase):
         run.assert_not_called()
 
     def test_empty_answer_is_a_decline(self):
-        # The prompt is [y/N]: bare Enter must not install anything.
         ok, run = self.run_ensure("")
         self.assertIsNone(ok)
         run.assert_not_called()
@@ -2327,11 +1680,6 @@ class EnsureFzf(unittest.TestCase):
         self.assertIsNone(self.run_ensure("y", fzf_after=False, rc=0)[0])
 
     def test_a_sudo_installer_is_never_run_only_advised(self):
-        # `input` is asserted un-called rather than made to raise: ensure_fzf()
-        # catches Exception around the prompt and treats it as a decline, so a
-        # raising stub would be swallowed and this would pass on a regression.
-        # The die() message is checked too, since the not-runnable branch and
-        # the declined branch both end in SystemExit but say different things.
         def which(b):
             return "/bin/apt-get" if b == "apt-get" else None
         run = mock.Mock()
@@ -2348,9 +1696,6 @@ class EnsureFzf(unittest.TestCase):
         self.assertIn("apt-get", msg)
 
     def test_ask_is_resolved_at_call_time_not_bound_at_definition(self):
-        # Guards the `ask = ask or input` line. A signature default would
-        # capture the real builtin, and a regression that reaches the prompt
-        # would block the suite on stdin instead of failing it.
         with mock.patch.object(pp.shutil, "which", return_value=None), \
              mock.patch.object(pp.sys, "stderr", io.StringIO()), \
              mock.patch("builtins.input", return_value="n") as patched, \
@@ -2363,17 +1708,10 @@ class EnsureFzf(unittest.TestCase):
 
 
 class BytecodeCache(unittest.TestCase):
-    """Guards the sys.dont_write_bytecode line at the top of this module."""
-
     def test_bytecode_writing_stays_disabled(self):
-        # Removal guard, not a behavior test. Without the flag, a same-size
-        # edit within one second makes this suite run the previous version of
-        # bin/pick-project and report failures against code that is correct.
         self.assertTrue(sys.dont_write_bytecode)
 
     def test_no_cache_was_written_for_the_script(self):
-        # The real behavior. The cache path is mirrored under pycache_prefix
-        # when set (macOS system python), or a sibling __pycache__ otherwise.
         stem = os.path.splitext(os.path.basename(SCRIPT))[0]
         if sys.pycache_prefix:
             d = sys.pycache_prefix + os.path.dirname(os.path.abspath(SCRIPT))
@@ -2385,20 +1723,7 @@ class BytecodeCache(unittest.TestCase):
 
 
 class BuildLines(unittest.TestCase):
-    """Assembling one fzf input line per row.
-
-    row_kind() hits the filesystem, so it is stubbed per path: these tests are
-    about which value lands in which field, not about how it is derived.
-
-    touched_at() is stubbed to RAISE. The touch time reaches build_lines on the
-    row, computed once by order_rows; a build_lines that reaches for the
-    filesystem instead walks every working tree a second time. Every test in
-    this class therefore doubles as the guard on that.
-    """
-
     def build(self, rows, status=None, kinds=None, touched=None):
-        """`rows` are (label, path) pairs here; the touch time is attached from
-        `touched` (keyed by path, default 0) to keep the fixtures readable."""
         triples = [(l, p, (touched or {}).get(p, 0)) for l, p in rows]
         with mock.patch.object(pp, "row_kind",
                                side_effect=lambda p: (kinds or {}).get(p, "repo")), \
@@ -2419,8 +1744,6 @@ class BuildLines(unittest.TestCase):
         self.assertEqual(self.build([]), [])
 
     def test_kind_comes_from_kind_not_a_constant(self):
-        # The whole point of the extraction: a hardcoded "repo" here would make
-        # every worktree invisible, and nothing else in the suite would notice.
         visible = [f[0] for f in self.fields([("w", "/x/w"), ("r", "/x/r")],
                                              kinds={"/x/w": "worktree"})]
         self.assertIn("worktree", visible[0])
@@ -2428,14 +1751,10 @@ class BuildLines(unittest.TestCase):
         self.assertNotIn("worktree", visible[1])
 
     def test_age_comes_from_the_row_touch_time(self):
-        # now=100 and touched=40 is 60s, which human_age renders as "1m ago".
         self.assertIn("1m ago",
                       self.fields([("a", "/x/a")], touched={"/x/a": 40})[0][0])
 
     def test_the_touch_time_is_read_per_row_not_once_for_all(self):
-        # Guards against the third element being read from the first row and
-        # reused: two rows with different times must render different ages.
-        # now=100, so 40 is "1m ago" and 99 is "0m ago".
         ages = [f[0] for f in self.fields([("a", "/x/a"), ("b", "/x/b")],
                                           touched={"/x/a": 40, "/x/b": 99})]
         self.assertIn("1m ago", ages[0])
@@ -2459,8 +1778,6 @@ class BuildLines(unittest.TestCase):
         self.assertEqual(visible[0].index("repo"), visible[1].index("repo"))
 
     def test_open_rows_get_their_rendered_status_cell(self):
-        # `status` holds cells status_cell() already rendered, so build_lines
-        # places the string verbatim and adds no marker of its own.
         f = self.fields([("a", "/x/a")], status={"a": "● idle"})[0]
         self.assertIn("● idle", f[0])
 
@@ -2470,24 +1787,13 @@ class BuildLines(unittest.TestCase):
         self.assertNotIn("●", f[1][0])
 
     def test_status_is_matched_on_the_full_label_not_the_elided_one(self):
-        # The elided label is what gets displayed, but `status` is keyed by the
-        # real workspace label, so a truncated name must still find its agent.
         long = "w" * (pp.LABEL_WIDTH + 20)
         f = self.fields([(long, "/x/w")], status={long: "● busy"})[0]
         self.assertIn("● busy", f[0])
 
 
 class TouchTimeIsComputedOncePerRun(unittest.TestCase):
-    """The startup cost this pair of functions is arranged to avoid.
-
-    touched_at() walks each repo's working tree two levels deep and dominates
-    the wait before the picker paints. order_rows() computes it and build_lines()
-    consumes it, so the whole run must walk every repo exactly once. Measured on
-    27 repos: the second walk cost 65 ms of a 194 ms startup.
-    """
-
     def walk_counts(self, labelled, open_ws):
-        """Every path touched_at() is called on, across the real call sequence."""
         calls = []
 
         def counted(path):
@@ -2503,12 +1809,9 @@ class TouchTimeIsComputedOncePerRun(unittest.TestCase):
     def test_each_repo_is_walked_exactly_once(self):
         labelled = [("a", "/x/a"), ("b", "/x/b"), ("c", "/x/c")]
         calls = self.walk_counts(labelled, [ws("a", "w1")])
-        # sorted() rather than a set: a set hides a repeat, which is the defect.
         self.assertEqual(sorted(calls), ["/x/a", "/x/b", "/x/c"])
 
     def test_open_repos_are_not_walked_twice(self):
-        # The open rows are the specific regression: they skip the sort's walk,
-        # so a build_lines that recomputes shows up here first.
         calls = self.walk_counts([("a", "/x/a")], [ws("a", "w1")])
         self.assertEqual(calls, ["/x/a"])
 
@@ -2518,8 +1821,6 @@ class TouchTimeIsComputedOncePerRun(unittest.TestCase):
 
 
 class ReadToml(unittest.TestCase):
-    """The TOML subset reader. Only scalars under [table] headers."""
-
     WANTED = frozenset(["ui.status_indicators", "theme.name", "theme.custom.red"])
 
     def read(self, body, wanted=None):
@@ -2534,8 +1835,6 @@ class ReadToml(unittest.TestCase):
                          {"theme.name": "dracula"})
 
     def test_the_same_key_in_two_tables_does_not_collide(self):
-        # Keys are qualified by table: a bare-key match would let [ui] name
-        # answer for [theme] name.
         got = self.read('[ui]\nname = "wrong"\n\n[theme]\nname = "nord"\n')
         self.assertEqual(got, {"theme.name": "nord"})
 
@@ -2544,8 +1843,6 @@ class ReadToml(unittest.TestCase):
                          {"theme.custom.red": "#ff0000"})
 
     def test_keys_before_any_table_header_are_not_claimed(self):
-        # A root-level key belongs to table "", so it must not answer for a
-        # qualified name. onboarding = false sits above [ui] in a real config.
         self.assertEqual(self.read('name = "root"\n[theme]\nname = "nord"\n'),
                          {"theme.name": "nord"})
 
@@ -2562,8 +1859,6 @@ class ReadToml(unittest.TestCase):
                          {"ui.status_indicators": "symbols"})
 
     def test_a_quoted_value_ends_at_its_closing_quote(self):
-        # A "#" inside quotes is a hex colour, not a comment. Stripping from the
-        # first "#" would leave the empty string and silently drop the override.
         self.assertEqual(self.read('[theme.custom]\nred = "#ff8800"  # accent\n'),
                          {"theme.custom.red": "#ff8800"})
 
@@ -2580,7 +1875,6 @@ class ReadToml(unittest.TestCase):
                          {"theme.name": "nord"})
 
     def test_a_missing_file_is_empty_not_an_error(self):
-        # Herdr's config is optional; the picker must still open without one.
         self.assertEqual(pp.read_toml("/x/does/not/exist.toml", self.WANTED), {})
 
     def test_an_unreadable_path_is_empty_not_an_error(self):
@@ -2588,35 +1882,23 @@ class ReadToml(unittest.TestCase):
             self.assertEqual(pp.read_toml(d, self.WANTED), {})
 
     def test_a_quoted_value_that_opens_with_a_brace_is_a_string(self):
-        # What the quotes are FOR. An inline table is skipped by how a value
-        # starts, and the layout setting's {plugin:<id>} token starts the same
-        # way — read as a table it would vanish, and the picker would fall back
-        # to laying nothing out with nothing to explain it.
         self.assertEqual(
             self.read('[picker]\nlayout = "{plugin:x.y}/bin/lay {workspace}"\n',
                       {"picker.layout"}),
             {"picker.layout": "{plugin:x.y}/bin/lay {workspace}"})
 
     def test_a_key_with_no_value_contributes_nothing_and_does_not_raise(self):
-        # A wanted key left empty is a half-finished edit, and this file is a
-        # popup's optional config: it has to survive one. The empty string is
-        # not a value to apply either, so the setting stays unset and its
-        # default stands.
         self.assertEqual(self.read("[theme]\nname =\n"), {})
         self.assertEqual(self.read('[theme]\nname = ""\n'), {})
 
 
 class HerdrConfigPath(unittest.TestCase):
-    """Which config.toml the picker reads Herdr's theme out of."""
-
     def test_the_documented_override_wins(self):
         with mock.patch.dict(os.environ, {"HERDR_CONFIG_PATH": "/x/other.toml"},
                              clear=True):
             self.assertEqual(pp.herdr_config_path(), "/x/other.toml")
 
     def test_the_override_beats_the_plugin_config_dir(self):
-        # The server is reading whatever HERDR_CONFIG_PATH names, so deriving a
-        # different path from the plugin dir would read a file nobody is using.
         with tempfile.TemporaryDirectory() as d:
             plugin_dir = os.path.join(d, "plugins", "config", "x.y")
             os.makedirs(plugin_dir)
@@ -2666,8 +1948,6 @@ class HerdrConfigPath(unittest.TestCase):
 
 
 class HerdrRejectsTheme(unittest.TestCase):
-    """Reading Herdr's own verdict on a theme name out of `config check`."""
-
     DIAGNOSTIC = ('config: issues found\nunknown theme name theme.name = '
                   '"monokai"; using "catppuccin"; valid themes: catppuccin, terminal\n')
 
@@ -2684,8 +1964,6 @@ class HerdrRejectsTheme(unittest.TestCase):
         self.assertFalse(self.probe(stdout="config: ok\n"))
 
     def test_a_diagnostic_about_a_different_field_is_not_a_rejection(self):
-        # theme.name and theme.dark_name are diagnosed separately. Matching on
-        # "unknown theme name" alone would let one answer for the other.
         self.assertFalse(self.probe(field="theme.dark_name",
                                     stdout=self.DIAGNOSTIC))
 
@@ -2693,8 +1971,6 @@ class HerdrRejectsTheme(unittest.TestCase):
         self.assertTrue(self.probe(stderr=self.DIAGNOSTIC))
 
     def test_an_unrunnable_herdr_is_not_a_rejection(self):
-        # Fail towards UNKNOWN_THEME: a picker that could not ask must not
-        # claim the name was a typo and draw catppuccin over a real theme.
         self.assertFalse(self.probe(boom=True))
 
 
@@ -2718,8 +1994,6 @@ class CanonicalTheme(unittest.TestCase):
         self.assertIsNone(pp.canonical_theme(None))
 
     def test_every_alias_target_is_a_real_palette(self):
-        # A typo in THEME_ALIASES would otherwise make that alias fall back to
-        # the default theme silently.
         for alias, target in pp.THEME_ALIASES.items():
             with self.subTest(alias=alias):
                 self.assertIn(target, pp.PALETTES)
@@ -2731,8 +2005,6 @@ class CanonicalTheme(unittest.TestCase):
 
 
 class ParseColor(unittest.TestCase):
-    """Port of Herdr's parse_color. Ints are 256-colour indexes, tuples are Rgb."""
-
     def test_six_digit_hex(self):
         self.assertEqual(pp.parse_color("#8899aa"), (0x88, 0x99, 0xaa))
 
@@ -2743,7 +2015,6 @@ class ParseColor(unittest.TestCase):
         self.assertEqual(pp.parse_color("rgb(137, 180, 250)"), (137, 180, 250))
 
     def test_named_colors_map_to_their_crossterm_index(self):
-        # ratatui Yellow -> crossterm DarkYellow -> 3, LightRed -> Red -> 9.
         self.assertEqual(pp.parse_color("yellow"), 3)
         self.assertEqual(pp.parse_color("lightred"), 9)
         self.assertEqual(pp.parse_color("gray"), 7)
@@ -2758,8 +2029,6 @@ class ParseColor(unittest.TestCase):
                 self.assertIsNone(pp.parse_color(value))
 
     def test_an_unknown_value_is_cyan_matching_herdr(self):
-        # Herdr warns and defaults to cyan rather than failing. Diverging would
-        # colour a typo differently from the sidebar this is matching.
         self.assertEqual(pp.parse_color("chartreuse"), pp.parse_color("cyan"))
 
     def test_malformed_hex_falls_through_to_the_named_default(self):
@@ -2782,19 +2051,14 @@ class Paint(unittest.TestCase):
 
 
 class ResolveTheme(unittest.TestCase):
-    """Reading icons and colours out of a Herdr config."""
-
     def resolve(self, rejects=False, **config):
-        """`rejects` stands in for `herdr config check`: True means Herdr turns
-        the configured theme name down too."""
         return pp.resolve_theme(config, rejects=lambda field: rejects)
 
     def test_defaults_are_dots_on_catppuccin(self):
-        # Herdr's own defaults when [ui] and [theme] say nothing.
         icons, colours = self.resolve()
         self.assertEqual(icons["working"], "●")
         self.assertEqual(icons["idle"], "○")
-        self.assertEqual(colours["working"], (249, 226, 175))   # catppuccin yellow
+        self.assertEqual(colours["working"], (249, 226, 175))
 
     def test_symbols_style_changes_every_glyph_herdr_changes(self):
         icons, _ = self.resolve(**{"ui.status_indicators": "symbols"})
@@ -2809,33 +2073,24 @@ class ResolveTheme(unittest.TestCase):
         self.assertEqual(icons, pp.STATUS_ICONS["dots"])
 
     def test_the_terminal_theme_yields_ansi_indexes_not_hexes(self):
-        # The whole point of theme = "terminal": indexes 0-15 resolve through
-        # the host terminal profile, exactly as Herdr's own rendering does.
         _, colours = self.resolve(**{"theme.name": "terminal"})
         self.assertEqual(colours, {"working": 3, "blocked": 9, "done": 6,
                                    "idle": 2, "unknown": 7})
 
     def test_each_status_reads_its_own_role(self):
-        # Guards the STATUS_ROLES wiring: a role swap would still produce five
-        # colours, just the wrong ones on the wrong statuses.
         _, colours = self.resolve(**{"theme.name": "gruvbox"})
-        self.assertEqual(colours["working"], (250, 189, 47))   # yellow
-        self.assertEqual(colours["blocked"], (251, 73, 52))    # red
-        self.assertEqual(colours["done"], (142, 192, 124))     # teal
-        self.assertEqual(colours["idle"], (184, 187, 38))      # green
-        self.assertEqual(colours["unknown"], (146, 131, 116))  # overlay0
+        self.assertEqual(colours["working"], (250, 189, 47))
+        self.assertEqual(colours["blocked"], (251, 73, 52))
+        self.assertEqual(colours["done"], (142, 192, 124))
+        self.assertEqual(colours["idle"], (184, 187, 38))
+        self.assertEqual(colours["unknown"], (146, 131, 116))
 
     def test_a_name_herdr_also_rejects_uses_herdrs_own_default(self):
-        # A typo. Herdr's diagnostic says it falls back to catppuccin, so
-        # matching that is exactly right.
         _, typo = self.resolve(rejects=True, **{"theme.name": "monokai"})
         _, default = self.resolve()
         self.assertEqual(typo, default)
 
     def test_a_name_herdr_accepts_but_this_table_lacks_uses_the_terminal_palette(self):
-        # Herdr gained a theme since PALETTES was copied. Its colours cannot be
-        # read from anywhere at runtime, so fall back to the terminal palette
-        # rather than confidently drawing catppuccin's.
         _, newer = self.resolve(rejects=False, **{"theme.name": "brand-new-theme"})
         _, terminal = self.resolve(**{"theme.name": "terminal"})
         _, default = self.resolve()
@@ -2843,8 +2098,6 @@ class ResolveTheme(unittest.TestCase):
         self.assertNotEqual(newer, default)
 
     def test_an_unset_name_never_asks_herdr(self):
-        # Unset is not unknown: Herdr documents catppuccin as the default, so
-        # spending a subprocess to confirm it would be waste on the normal path.
         asked = []
         pp.resolve_theme({}, rejects=lambda f: asked.append(f) or False)
         self.assertEqual(asked, [])
@@ -2856,8 +2109,6 @@ class ResolveTheme(unittest.TestCase):
         self.assertEqual(asked, [])
 
     def test_the_probe_is_told_which_field_to_look_for(self):
-        # Herdr diagnoses theme.name and theme.dark_name separately, so probing
-        # the wrong field would read as "accepted" and mask a typo.
         asked = []
         pp.resolve_theme({"theme.auto_switch": "true", "theme.dark_name": "nope"},
                          rejects=lambda f: asked.append(f) or False)
@@ -2866,12 +2117,10 @@ class ResolveTheme(unittest.TestCase):
     def test_a_custom_override_replaces_only_its_role(self):
         _, colours = self.resolve(**{"theme.name": "terminal",
                                      "theme.custom.red": "#ff8800"})
-        self.assertEqual(colours["blocked"], (255, 136, 0))   # red role
-        self.assertEqual(colours["working"], 3)               # yellow untouched
+        self.assertEqual(colours["blocked"], (255, 136, 0))
+        self.assertEqual(colours["working"], 3)
 
     def test_every_status_role_is_overridable(self):
-        # with_overrides() covers all five, so a role missing from the override
-        # loop would silently ignore the user's setting.
         for role, status in (("green", "idle"), ("yellow", "working"),
                              ("red", "blocked"), ("teal", "done"),
                              ("overlay0", "unknown")):
@@ -2884,20 +2133,20 @@ class ResolveTheme(unittest.TestCase):
         _, colours = self.resolve(**{"theme.name": "terminal",
                                      "theme.auto_switch": "true",
                                      "theme.dark_name": "gruvbox"})
-        self.assertEqual(colours["working"], (250, 189, 47))   # gruvbox yellow
+        self.assertEqual(colours["working"], (250, 189, 47))
 
     def test_auto_switch_off_ignores_dark_name(self):
         _, colours = self.resolve(**{"theme.name": "terminal",
                                      "theme.auto_switch": "false",
                                      "theme.dark_name": "gruvbox"})
-        self.assertEqual(colours["working"], 3)                # terminal yellow
+        self.assertEqual(colours["working"], 3)
 
     def test_mode_overrides_apply_only_under_auto_switch(self):
         keys = {"theme.name": "terminal", "theme.custom.dark.yellow": "#010203"}
         _, off = self.resolve(**keys)
         _, on = self.resolve(**dict(keys, **{"theme.auto_switch": "true"}))
-        self.assertEqual(off["working"], 3)             # ignored while off
-        self.assertEqual(on["working"], (1, 2, 3))      # applied while on
+        self.assertEqual(off["working"], 3)
+        self.assertEqual(on["working"], (1, 2, 3))
 
     def test_a_mode_override_beats_the_unqualified_one(self):
         _, colours = self.resolve(**{"theme.name": "terminal",
@@ -2907,8 +2156,6 @@ class ResolveTheme(unittest.TestCase):
         self.assertEqual(colours["working"], (0x22, 0x22, 0x22))
 
     def test_theme_keys_covers_every_key_resolve_theme_reads(self):
-        # THEME_KEYS is the filter read_toml applies, so a key absent from it is
-        # unreachable no matter how the resolver is written.
         for role in pp.STATUS_ROLE_ORDER:
             self.assertIn(f"theme.custom.{role}", pp.THEME_KEYS)
             self.assertIn(f"theme.custom.dark.{role}", pp.THEME_KEYS)
@@ -2925,7 +2172,6 @@ class StatusCell(unittest.TestCase):
         return pp.status_cell(status, self.ICONS, colours or self.COLOURS)
 
     def escape(self, status, colours=None):
-        """The opening SGR escape of a rendered cell."""
         return self.cell(status, colours).split("m", 1)[0] + "m"
 
     def test_glyph_word_and_colour_are_all_present(self):
@@ -2933,45 +2179,30 @@ class StatusCell(unittest.TestCase):
                          "\033[38;5;3m" + "◐ working".ljust(pp.STATUS_WIDTH) + "\033[39m")
 
     def test_the_status_word_is_kept_so_the_filter_can_match_it(self):
-        # fzf searches the visible text; dropping the word to match Herdr's
-        # glyph-only sidebar would make typing "idle" match nothing.
         self.assertIn("idle", self.cell("idle"))
 
     def test_visible_text_is_padded_not_the_escaped_string(self):
-        # Padding after the escapes would count them and pad by ~9 too few.
         import re as _re
         visible = _re.sub(r"\033\[[0-9;]*m", "", self.cell("idle"))
         self.assertEqual(len(visible), pp.STATUS_WIDTH)
 
     def test_an_unrecognised_status_takes_the_unknown_glyph_and_colour(self):
-        # A status Herdr adds later must still render, not raise KeyError. A
-        # colours.get() fallback would hand it the DEFAULT foreground instead of
-        # the unknown role's colour, so both halves are asserted.
         self.assertIn("·", self.cell("brand-new"))
         self.assertEqual(self.escape("brand-new"), self.escape("unknown"))
 
     def test_a_reset_colour_is_kept_distinct_from_a_missing_one(self):
-        # parse_color returns None for "reset", which is a real colour choice.
-        # It must render SGR 39 rather than being treated as an absent status.
         reset = {"working": 3, "idle": 2, "unknown": None}
         self.assertEqual(self.escape("unknown", reset), "\033[39m")
 
 
 class Heading(unittest.TestCase):
-    """The column heading fzf consumes via --header-lines=1."""
-
     def test_is_exactly_one_line(self):
-        # --header-lines=1 consumes one line; a second would become a project.
         self.assertNotIn("\n", pp.HEADING)
 
     def test_hidden_fields_are_empty(self):
-        # Keeps the heading from parsing as a selectable repo path.
         self.assertEqual(pp.HEADING.split("\t")[1:], ["", ""])
 
     def test_columns_line_up_with_a_row(self):
-        # Guards against the heading being rewritten as a hand-padded literal.
-        # Match the full label, not "STATUS": that substring also occurs inside
-        # "AGENT STATUS" and would report the wrong column offset.
         row = pp.ROW.format("proj", "worktree", "3m ago", "\u25cf idle",
                             "/x/proj", "proj")
         self.assertEqual(pp.HEADING.index("KIND"), row.index("worktree"))
@@ -2979,8 +2210,6 @@ class Heading(unittest.TestCase):
         self.assertEqual(pp.HEADING.index("AGENT STATUS"), row.index("\u25cf idle"))
 
     def test_kind_column_fits_its_widest_value(self):
-        # "worktree" is 8 chars; a narrower column would shove TOUCHED right on
-        # worktree rows only, which the fixed-width test above would not see.
         row = pp.ROW.format("proj", "worktree", "3m ago", "", "/x/proj", "proj")
         self.assertEqual(row.index("3m ago"),
                          pp.ROW.format("proj", "repo", "3m ago", "", "/x", "proj")
@@ -2994,12 +2223,7 @@ class Heading(unittest.TestCase):
 
 
 class KeyBindings(unittest.TestCase):
-    """What the picker binds, and what the legend claims it binds."""
-
     def test_space_is_not_bound(self):
-        # Space is fzf's AND separator between query terms. Binding it toggles
-        # rows while you type a multi-word filter, which silently changes the
-        # selection and can close a workspace on enter.
         self.assertNotIn("space:", pp.KEYS)
 
     def test_select_all_and_none_stay_bound(self):
@@ -3007,8 +2231,6 @@ class KeyBindings(unittest.TestCase):
         self.assertIn("ctrl-d:deselect-all", pp.KEYS)
 
     def test_legend_agrees_with_the_bindings_about_space(self):
-        # Doc-drift guard: re-binding space without updating the legend, or
-        # advertising it without binding it, both fail here.
         self.assertEqual("space" in pp.KEYS, "space" in pp.HEADER)
 
     def test_legend_names_every_bound_key(self):
@@ -3017,36 +2239,11 @@ class KeyBindings(unittest.TestCase):
 
 
 class ManifestIsValidToml(unittest.TestCase):
-    """The manifest has to PARSE. Nothing else here opens it at all.
-
-    Measured on 0.8.2, 2026-09-08: Herdr re-reads herdr-plugin.toml from disk
-    when it dispatches, rather than trusting the copy it cached in
-    plugins.json. An edit takes effect on the very next dispatch — no re-link,
-    no restart, no reload-config. This is the other half of that: a syntax
-    error in the manifest stops every dispatch for this plugin, with no toast,
-    no error and nothing surfaced. It simply goes quiet, and every route into
-    this plugin runs through the one [[panes]] entry the manifest declares, so
-    what goes quiet is the picker itself.
-
-    read_toml() in the picker cannot answer this question and is deliberately
-    not used here. It extracts a fixed set of wanted scalars out of Herdr's own
-    config and ignores every line it does not recognise, so it returns happily
-    on a file no TOML parser would accept. That tolerance is right for optional
-    user config and wrong for a validity check.
-
-    Skipped, loudly, where tomllib is unavailable: see the banner at the top of
-    this file. A skip is not a pass — and this suite already skips one other
-    test when the sibling plugin is not checked out beside it, so the skip
-    COUNT in the summary cannot tell you which checks did not run. The banner
-    is what distinguishes this one.
-    """
-
     def setUp(self):
         if tomllib is None:
             self.skipTest("herdr-plugin.toml was NOT parsed: " + NO_TOML)
 
     def parse(self, path):
-        """The manifest at `path`, read exactly as Herdr's loader would."""
         with open(path, "rb") as f:
             return tomllib.load(f)
 
@@ -3057,14 +2254,6 @@ class ManifestIsValidToml(unittest.TestCase):
             self.fail("herdr-plugin.toml is not valid TOML: %s" % e)
 
     def test_a_typo_in_the_manifest_is_really_caught(self):
-        """A canary on the test above, which would pass for two very different
-        reasons: the manifest is valid, or nothing is really parsing it.
-
-        The fixture is the REAL manifest plus one unterminated string, which is
-        what a typo looks like, written to a temporary directory. Corrupting
-        the real file to prove the point would be the same class of mistake
-        this test exists to catch.
-        """
         with open(MANIFEST, "rb") as f:
             typo = f.read() + b'\nname = "unterminated\n'
         tmp = tempfile.TemporaryDirectory()

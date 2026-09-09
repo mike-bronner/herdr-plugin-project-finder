@@ -1,51 +1,8 @@
 #!/usr/bin/env python3
-"""Fuzzy-pick git repos under a root folder and make them the open Herdr workspaces.
-
-The list is the desired set of open projects. Everything already open (other
-than the pinned home workspace) is listed first and pre-selected, so what you
-see checked is exactly what is loaded. On Enter the selection becomes the
-truth: deselected projects are closed, newly selected ones are created, and an
-empty selection closes every project so only home remains. Esc changes nothing.
-
-The search root is HERDR_PICKER_ROOT, defaulting to the home folder. The home
-workspace (label "~", override with HERDR_PICKER_HOME) is never listed and
-never closed. Setting HERDR_PICKER_DEBUG reports what finding the repos cost,
-on one line; unset, the picker writes nothing at all.
-
-Every setting may also come from a file under HERDR_PLUGIN_CONFIG_DIR: a
-[picker] table in this plugin's own config.toml, or the older .env. Both are
-optional and both still work. Under them sits defaults.toml in this plugin's
-own checkout, holding the same table. Precedence is real environment variable,
-then config.toml, then .env, then those shipped defaults — see
-load_picker_config() for why in that order.
-
-Each open project's row carries its agent status, drawn with the glyph and
-colour Herdr's own sidebar would use, read out of Herdr's config.toml. See the
-"Herdr's agent-status indicator" section below.
-
-Each new workspace is handed to the command in HERDR_PICKER_LAYOUT, run
-detached with the id of the workspace just opened. The picker builds no layout
-of its own and knows nothing about what that command does: panes, agents and
-their settings are the command's business, and a workspace whose command
-cannot be run still opens with the one bare pane Herdr gives it. See
-resolve_layout() for how the setting becomes an argv and create_workspace() for
-the handoff. The shipped defaults.toml is what makes an unconfigured picker lay
-its workspaces out, and it is the only file here that names any program.
-
-A linked worktree is opened as a worktree rather than as a bare directory, so
-Herdr's sidebar nests it under the repo it belongs to instead of floating it at
-top level. See open_project().
-"""
 import glob, json, os, re, shlex, shutil, subprocess, sys, time
 
 
 def load_env(path):
-    """Apply KEY=VALUE lines from `path` to os.environ. Real env vars win.
-
-    Blank lines and lines starting with "#" are skipped, and so is any line
-    without an "=". The skip is deliberate: the file is optional user config,
-    so a typo must never stop the picker from opening.
-    """
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -64,17 +21,6 @@ def load_env(path):
 
 
 def read_toml(path, wanted):
-    """Values for the "table.key" names in `wanted`, as raw strings.
-
-    A deliberate subset of TOML: scalar values under [table] headers, which is
-    every setting read here. Arrays, inline tables and multi-line values are
-    skipped rather than half-parsed, and an unreadable file yields {}. Python
-    3.9 ships no tomllib and this plugin has no dependencies, so a full parser
-    would have to be vendored to read four keys.
-
-    Like load_env(), nothing here may raise: Herdr's config is the user's to
-    edit, and a syntax error in it must never stop the picker from opening.
-    """
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -94,16 +40,9 @@ def read_toml(path, wanted):
             continue
         value = value.strip()
         if value[:1] and value[0] in "\"'":
-            # Quoted: take up to the closing quote, so a trailing comment that
-            # contains no quote cannot be glued onto the value. The quotes are
-            # also what says this is a STRING, however it starts — a value
-            # opening with a brace is only a table when nothing quoted it.
             end = value.find(value[0], 1)
             value = value[1:end] if end > 0 else value[1:]
         elif value.startswith(("[", "{")):
-            # Arrays and inline tables: skipped rather than half-parsed. This
-            # subset reads scalars, and half of a structure would be worse than
-            # none of it.
             continue
         else:
             value = value.partition("#")[0].strip()
@@ -112,9 +51,6 @@ def read_toml(path, wanted):
     return found
 
 
-# The [picker] table in this plugin's own config.toml, mapped to the environment
-# variable each key stands in for. One table, because the plugin owns the whole
-# file and has nothing else to keep in it.
 PICKER_KEYS = {"picker.root": "HERDR_PICKER_ROOT",
                "picker.home": "HERDR_PICKER_HOME",
                "picker.debug": "HERDR_PICKER_DEBUG",
@@ -122,33 +58,8 @@ PICKER_KEYS = {"picker.root": "HERDR_PICKER_ROOT",
 
 
 def load_picker_config(path):
-    """Apply the [picker] table in `path` to os.environ. Real env vars win.
-
-    `path` is this plugin's OWN config.toml, in the directory Herdr hands the
-    plugin. Herdr's config.toml is not the place for these: its schema names no
-    plugin table, so a section added there makes `herdr config check` report
-    issues for good. The plugin docs say to put user config in the plugin config
-    dir and leave the format to the plugin, which is what this is.
-
-    Call this BEFORE load_env(), which is the whole of why config.toml beats a
-    .env naming the same setting. Both apply values with setdefault(), so the
-    first writer wins and a real environment variable, already in os.environ,
-    got there before either. TOML is the format these settings are moving to, so
-    a .env left behind must not quietly outrank the file that replaced it.
-
-    Like load_env(), nothing here may raise: read_toml() answers {} for a file
-    that is missing or unreadable and skips a line it cannot parse, so a typo in
-    this file must never stop the picker from opening.
-    """
     config = read_toml(path, frozenset(PICKER_KEYS))
     if "picker.debug" in config:
-        # A TOML boolean arrives as the raw string "true" or "false" — the same
-        # shape resolve_theme() reads auto_switch in, so it is read the same way
-        # rather than a second idiom being invented for one key. The flag itself
-        # is a plain truthy environment variable, and "false" is a non-empty
-        # string, so it has to become the empty one here or `debug = false` would
-        # switch debugging ON. Empty is still SET rather than skipped, so an
-        # explicit false beats a stale HERDR_PICKER_DEBUG in a .env.
         on = config["picker.debug"].strip().lower() == "true"
         config["picker.debug"] = "1" if on else ""
     for key, var in PICKER_KEYS.items():
@@ -157,14 +68,6 @@ def load_picker_config(path):
 
 
 def herdr_config_path():
-    """Herdr's own config.toml.
-
-    HERDR_CONFIG_PATH wins, because Herdr documents it as the override for this
-    exact file (`herdr --help`) and the server is reading whatever it names.
-    Otherwise it is derived from the plugin config dir Herdr passes in, which is
-    <config root>/plugins/config/<plugin id>, so a relocated config root is
-    followed rather than guessed at. Failing both, the documented default.
-    """
     override = os.environ.get("HERDR_CONFIG_PATH")
     if override:
         return os.path.expanduser(override)
@@ -177,36 +80,10 @@ def herdr_config_path():
     return os.path.expanduser("~/.config/herdr/config.toml")
 
 
-# Container paths a linked worktree sits in, each RESOLVED AGAINST the root of
-# the repo it belongs to. The rule is the resolution, not the destination: all
-# three fixed names land inside the repo, but a "../x" added by the setting
-# below lands beside it, and repos() searches whatever the join produces.
-# ".worktrees" is Herdr's own layout while [worktrees] directory is ".worktrees",
-# ".claude/worktrees" is Claude Code's, and "worktrees" is the same idea spelled
-# without the dot. Fixed names rather than a search: see repos() for what looking
-# harder costs.
 FIXED_WORKTREE_DIRS = (".worktrees", ".claude/worktrees", "worktrees")
 
 
 def worktree_locations(config=None):
-    """(dirs, roots): the two shapes a linked worktree is kept in.
-
-    `dirs` are RELATIVE paths, each resolved against every repo that was found.
-    A leading "../" is therefore not a special case here: it resolves to a
-    directory BESIDE the repo instead of inside it, and repos() searches it the
-    same way. `roots` are absolute directories holding worktrees for many repos,
-    searched on their own because they may sit outside the picker root entirely.
-
-    On top of the fixed names, Herdr's own [worktrees] directory is read, so
-    the picker follows the setting instead of guessing at it — while never
-    depending on that one setting, which is why the fixed names stay. Herdr
-    resolves a relative value against each repo root, which is exactly a
-    container, so it joins `dirs`; an absolute one (Herdr's shipped default is
-    ~/.herdr/worktrees) is a flat root and joins `roots`.
-
-    Like read_toml() itself, nothing here may raise: an unset, unreadable or
-    malformed setting simply contributes nothing and the fixed names remain.
-    """
     if config is None:
         config = read_toml(herdr_config_path(), {"worktrees.directory"})
     setting = os.path.expanduser(config.get("worktrees.directory", "").strip())
@@ -214,14 +91,6 @@ def worktree_locations(config=None):
     if os.path.isabs(setting):
         roots.append(os.path.normpath(setting))
     elif setting:
-        # normpath so "./trees" and "trees" cannot both be searched. A "../x"
-        # is kept, and normpath keeps its leading "..": Herdr resolves the value
-        # against the repo root too, so "../worktrees" names a real container
-        # beside the repo rather than a nonsense one. That is the layout Herdr
-        # moved to so that no filesystem-walking tool descends into a worktree,
-        # and repos() carries the two consequences of it — the container is
-        # SHARED by every repo in that parent, and it can fall inside the depth
-        # bands' reach because it has no leading dot.
         norm = os.path.normpath(setting)
         if norm not in dirs:
             dirs.append(norm)
@@ -229,89 +98,29 @@ def worktree_locations(config=None):
 
 
 def resolve_root():
-    """Where to look for repos: HERDR_PICKER_ROOT, else the home folder.
-
-    A leading "~" is expanded, since neither config file has its values
-    shell-expanded, whichever of the two supplied this one. A root that is not
-    an existing directory falls back to the home folder rather than dying, so a
-    stale override still leaves the picker usable.
-    """
     root = os.path.expanduser(os.environ.get("HERDR_PICKER_ROOT") or "~")
     return root if os.path.isdir(root) else os.path.expanduser("~")
 
 
-# THIS plugin's own checkout — not to be confused with plugin_root() below,
-# which asks Herdr about somebody else's. Derived from this file rather than
-# read from HERDR_PLUGIN_ROOT: the variable is Herdr's to inject and a run
-# started by hand has none, while __file__ is right in both cases. Used for one
-# thing, the shipped defaults below.
 OWN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# User-editable config lives in the plugin's config dir, per the Herdr docs.
-# Loaded before the settings below so the files can supply them. config.toml is
-# read FIRST because both loaders use setdefault(): see load_picker_config().
 if os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
     load_picker_config(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], "config.toml"))
     load_env(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], ".env"))
 
-# Last, so every value in it is a default a user file can beat. It is read by
-# the same loader, from the same [picker] table, in the same syntax the user
-# writes: a default is then a value to override rather than a fallback buried in
-# the code. That is also what keeps this file free of any particular program's
-# name — see resolve_layout(). A checkout without the file, or with a broken
-# one, degrades exactly like a user's: the loader answers nothing and the
-# settings keep their in-code defaults.
 load_picker_config(os.path.join(OWN_ROOT, "defaults.toml"))
 
 DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
 
-# Bound here, beside DEV, for the same two reasons: the files above may supply
-# the variables herdr_config_path() reads, and Herdr's config must be read once
-# per run rather than once per repo — touched_at() consults these too.
 WORKTREE_DIRS, WORKTREE_ROOTS = worktree_locations()
 
-# Column layout for the list. The heading is built from the same format string
-# as every row, so the two cannot drift out of alignment. Only field 1 is shown
-# (--with-nth=1); the two tab-separated fields after it are hidden payload that
-# the preview reads — field 2 is the repo path, field 3 the untruncated label.
-#
-# Field 3 exists for the preview alone, NOT for filtering. fzf calculates --nth
-# against the transformed line, so a hidden field cannot be searched at all:
-# "fzf doesn't allow searching against the hidden fields" (fzf(1), --nth). The
-# preview is the exception, and reads fields from the original line. So a label
-# elide() cuts is unmatchable past the ellipsis, and the preview showing it in
-# full is the compensation.
-#
-# KIND is spelled out rather than iconified because fzf searches the visible
-# field, so typing "worktree" filters the list to worktrees.
 LABEL_WIDTH = 34
 STATUS_WIDTH = 12
 ROW = f"{{:<{LABEL_WIDTH}}} {{:<9}} {{:<9}} {{}}\t{{}}\t{{}}"
 HEADING = ROW.format("PROJECT", "KIND", "TOUCHED", "AGENT STATUS", "", "")
 
-# The AGENT STATUS field is NOT padded by ROW. It carries colour escapes, and
-# str.format pads by character count, so a padded format spec would count the
-# escapes and pad by the wrong amount. status_cell() pads the visible text to
-# STATUS_WIDTH before wrapping it. Nothing visible follows the field, so this
-# costs no alignment either way — it is done so the width stays one number.
 
-# ---------------------------------------------------------------------------
-# Herdr's agent-status indicator, reproduced.
-#
-# The picker draws the same glyph in the same colour Herdr's own spaces sidebar
-# draws, resolved from the user's config rather than assumed. Everything below
-# is a port of Herdr 0.8.2; each table cites the source it came from so a future
-# upstream change can be diffed against it rather than guessed at.
-#
-# Herdr renders through ratatui, whose crossterm backend writes a named colour
-# as the 256-colour form "38;5;<index>" (ratatui-crossterm/src/lib.rs:421 into
-# crossterm src/style/types/colored.rs:132) and an Rgb as "38;2;r;g;b". Emitting
-# the identical escape means the terminal resolves it identically — which is the
-# whole point under theme.name = "terminal", where indexes 0-15 follow the host
-# terminal profile that Herdr is following too.
-
-# src/client/shell.rs:182, keyed by [ui] status_indicators. Default "dots".
 STATUS_ICONS = {
     "dots":    {"working": "●", "blocked": "●", "done": "●",
                 "idle": "○", "unknown": "·"},
@@ -319,13 +128,9 @@ STATUS_ICONS = {
                 "idle": "○", "unknown": "·"},
 }
 
-# src/client/shell.rs:229 — which palette role colours which status.
 STATUS_ROLES = {"working": "yellow", "blocked": "red", "done": "teal",
                 "idle": "green", "unknown": "overlay0"}
 
-# The five roles above for each built-in theme, in STATUS_ROLE_ORDER, from the
-# Palette constructors in src/app/state.rs:78-525. A string is a ratatui named
-# colour, a triple is Rgb.
 STATUS_ROLE_ORDER = ("green", "yellow", "red", "teal", "overlay0")
 PALETTES = {
     "catppuccin":       ((166, 227, 161), (249, 226, 175), (243, 139, 168), (148, 226, 213), (108, 112, 134)),
@@ -348,7 +153,6 @@ PALETTES = {
     "vesper":           ((153, 255, 228), (255, 199, 153), (255, 128, 128), (102, 221, 204), (92, 92, 92)),
 }
 
-# src/config/theme.rs:25. Aliases and the "-"/"_"/" " and case folding it does.
 THEME_ALIASES = {
     "catppuccin-mocha": "catppuccin", "latte": "catppuccin-latte",
     "light": "catppuccin-latte", "tokyonight": "tokyo-night",
@@ -358,8 +162,6 @@ THEME_ALIASES = {
     "rosepine": "rose-pine", "rosepine-dawn": "rose-pine-dawn", "dawn": "rose-pine-dawn",
 }
 
-# src/config/theme.rs:197, ratatui name -> the crossterm 256-colour index that
-# ratatui's backend converts it to. "reset" is the SGR default-foreground 39.
 NAMED_COLORS = {
     "black": 0, "red": 1, "green": 2, "yellow": 3, "blue": 4, "magenta": 5,
     "purple": 5, "cyan": 6, "gray": 7, "grey": 7, "darkgray": 8, "darkgrey": 8,
@@ -368,56 +170,23 @@ NAMED_COLORS = {
 }
 RESET_ALIASES = ("reset", "default", "none", "transparent")
 
-# Herdr's own default, used when [theme] name is unset and when Herdr rejects
-# the configured name — in both cases catppuccin is what Herdr itself draws
-# (src/config/theme.rs:62, and the "using ..." in its config-check diagnostic).
 DEFAULT_THEME = "catppuccin"
 
-# What to draw when Herdr ACCEPTS a theme name that PALETTES does not carry,
-# which means Herdr has gained a theme since this table was copied. Its colours
-# are unknowable from here: the palette never crosses the socket API, and there
-# is no theme event to subscribe to (verified against the 0.8.2 API schema —
-# no theme, palette, colour, or appearance surface anywhere in it).
-#
-# The terminal palette is the least-wrong answer available. It keeps the
-# semantics right (green idle, yellow working, red blocked) and follows the host
-# terminal profile, so the row still reads correctly even though it cannot be
-# guaranteed to match the sidebar. Refresh PALETTES from src/app/state.rs when
-# this fires.
 UNKNOWN_THEME = "terminal"
 
-# Key bindings and the legend above the list. Space is deliberately NOT bound:
-# it is fzf's AND separator between query terms, so binding it to toggle flips
-# rows while you type a multi-word filter. Tab is fzf's own toggle key and is
-# left at its default. The legend must keep agreeing with what is bound here.
 KEYS = "ctrl-a:select-all,ctrl-d:deselect-all"
 HEADER = ("enter apply  ·  tab toggle  ·  ctrl-a all  ·  ctrl-d none  ·  esc cancel\n"
           "checked = open  ·  unchecked open projects are closed on enter\n"
-          " ")   # fzf trims a trailing empty line; a space survives
+          " ")
 
-# fzf prints the line under the cursor when Enter is hit with nothing selected.
-# The enter binding queues this sentinel in that case so an intentionally empty
-# selection can be told apart from "open the highlighted project".
 EMPTY = "__pick_project_empty__"
 
-# Popups do not load ~/.zshrc, and /opt/homebrew/bin is absent from the system
-# default PATH, so Homebrew binaries are otherwise unfindable here.
 for d in ("/opt/homebrew/bin", "/usr/local/bin"):
     if os.path.isdir(d) and d not in os.environ["PATH"].split(":"):
         os.environ["PATH"] = d + ":" + os.environ["PATH"]
 
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
 
-# The setting naming what each new workspace is handed to, and the two tokens
-# its value may carry. NOTHING HERE KNOWS WHAT THAT COMMAND IS: the picker reads
-# no setting belonging to it, names no program, and passes no flag of its own —
-# the whole value, flags included, is the user's, and the shipped defaults.toml
-# holds the one this plugin arrives with.
-#
-# {workspace} is substituted per workspace, in create_workspace(), because it is
-# the only part of the command that changes between two workspaces in one run.
-# {plugin:<id>} is substituted once per run, in resolve_layout(), because
-# resolving it costs a call to Herdr.
 LAYOUT_SETTING = "HERDR_PICKER_LAYOUT"
 WORKSPACE_TOKEN = "{workspace}"
 PLUGIN_TOKEN = re.compile(r"\{plugin:([^{}\s]+)\}")
@@ -433,34 +202,12 @@ def die(msg):
 
 
 def warn(msg):
-    """Tell the user something is wrong, without stopping the run.
-
-    Two channels, because neither alone reaches anybody. The picker is a POPUP
-    pane that closes when this process exits, so anything written to stderr at
-    the end of a run is gone before it can be read; the Herdr toast is what the
-    user actually sees. stderr is still written because that is what lands in
-    `herdr plugin log list`, which is where the message is read afterwards.
-
-    The toast is best effort and its failure is ignored — a picker that cannot
-    raise a notification must still finish opening the workspaces. die() is the
-    other half of this pair, for what is worth stopping over.
-
-    Call this only where fzf is not on the screen, the rule debug_discovery()
-    states in full: fzf paints over the whole pane, so a write arriving
-    mid-render garbles the list.
-    """
     sys.stderr.write(f"picker: {msg}\n")
     subprocess.run([HERDR, "notification", "show", "project finder",
                     "--body", msg], capture_output=True)
 
 
 def fzf_installer():
-    """(argv, may_we_run_it) for installing fzf here, or (None, False).
-
-    Only a privilege-free installer is ours to run. Asking for a sudo password
-    from a popup pane is both hostile and unreliable, so a command that needs
-    one is printed for the user to run themselves instead.
-    """
     if shutil.which("brew"):
         return ["brew", "install", "fzf"], True
     for mgr, argv in (("apt-get", ["sudo", "apt-get", "install", "-y", "fzf"]),
@@ -472,19 +219,12 @@ def fzf_installer():
 
 
 def install_advice(argv):
-    """What to tell someone who has to install fzf by hand."""
     if argv:
         return "Install it with:\n\n    " + " ".join(argv) + "\n"
     return "See https://github.com/junegunn/fzf#installation\n"
 
 
 def check_deps(out=None):
-    """`--check-deps`: the preflight the manifest's [[build]] step runs.
-
-    Returns a process exit code, 0 when every prerequisite is present. Kept
-    non-interactive: a build step has no terminal to prompt at, so it only
-    reports. The picker itself offers to install, see ensure_fzf().
-    """
     out = out or sys.stderr
     found = shutil.which("fzf")
     if found:
@@ -497,16 +237,6 @@ def check_deps(out=None):
 
 
 def ensure_fzf(ask=None):
-    """True when fzf is usable, offering to install it when it is not.
-
-    Declining, an installer we may not run, and a failed install all fall
-    through to die(), so the picker never starts without its dependency.
-
-    `ask` is resolved here rather than defaulting to `input` in the signature:
-    a default is bound once at definition, which would capture the real
-    builtin and leave a test that patches `builtins.input` blocking on stdin
-    instead of failing.
-    """
     ask = ask or input
     if shutil.which("fzf"):
         return True
@@ -527,7 +257,6 @@ def ensure_fzf(ask=None):
 
 
 def herdr(*args):
-    """Run a herdr CLI command and return its parsed JSON result."""
     r = subprocess.run([HERDR, *args], capture_output=True, text=True)
     if r.returncode != 0:
         return None
@@ -538,36 +267,6 @@ def herdr(*args):
 
 
 def debug_discovery(elapsed, paths, counts, out=None):
-    """Report what repos() cost and what it found, one line, when asked to.
-
-    Silent unless HERDR_PICKER_DEBUG holds something, which is the whole point:
-    every normal run must write nothing at all, because this is a popup pane and
-    unbidden output sits on top of the thing the user opened. Read from
-    os.environ like the other settings here, so either config file the loaders
-    at the top fold into it can turn this on for good.
-
-    `elapsed` is discovery's elapsed time in SECONDS, reported as milliseconds.
-    Those are the units the figures quoted in repos() are in, and a tenth of a
-    millisecond is already finer than the run-to-run spread.
-
-    The two passes are named by WHERE THEY LOOK, not by what they return.
-    Calling the first figure "repos" would be false on a real tree: the depth
-    bands find worktrees too, every one that falls within three levels of the
-    root and carries no leading dot on the way. Herdr's flat
-    <root>/worktrees/<repo>/<slug> is that, and so is a "../worktrees"
-    container beside a repo directly under the root. Only the container pass is
-    worktrees exclusively, and the two are counted where they were FOUND, not
-    where they belong. Each figure reads "N from X"
-    rather than "N Xs" so that a count of one needs no singular form. `paths`
-    supplies the row total rather than a sum of the two, so the line reports
-    what was actually listed.
-
-    Call this only where fzf is not on the screen. fzf paints the popup over the
-    whole pane, so a write arriving mid-render garbles the list the user is
-    trying to read. The rule every writer in this file keeps, rather than a list
-    of them: none runs inside fzf's lifetime. They write before it starts or
-    after it has exited, and this one is on the near side of that call.
-    """
     if not os.environ.get("HERDR_PICKER_DEBUG"):
         return
     (out or sys.stderr).write(
@@ -577,97 +276,16 @@ def debug_discovery(elapsed, paths, counts, out=None):
 
 
 def repos(counts=None):
-    """Every git repo up to 3 levels under the root, plus the worktrees kept in
-    a container resolved against each of them.
-
-    Two passes, because the two things live in different places.
-
-    The first is the depth bands. Deliberately not hardcoded to any grouping
-    folder: repos live both directly under the root and inside grouping dirs,
-    and those groupings get reorganised. Anything nested inside a repo is
-    skipped there, so a submodule or a vendored checkout is not listed twice.
-    A worktree kept beside its parent is a project in its own right and is
-    listed, tagged "worktree" by row_kind(). A fourth level is not searched: the
-    depths are globbed shallowest first, and each one costs a full stat pass
-    over everything at that level, so they are not free to keep adding — a
-    fourth measured 93-164ms across runs on the real 85-repo root, against
-    18ms for the three kept, and matched nothing at all.
-
-    Globbing shallowest first is also what makes the nested skip work, since a
-    parent is always reached before anything inside it.
-
-    The second pass is the exemption to that skip, and the only one: a LINKED
-    WORKTREE in a well-known container is listed. A container is a relative
-    path RESOLVED AGAINST each repo root, which is what makes one pass serve
-    every layout on this machine however differently each places the checkout:
-    Herdr's <repo>/.worktrees/<repo>/<slug> while its [worktrees] directory is
-    ".worktrees", Claude Code's <repo>/.claude/worktrees/<slug>, which carries
-    one level fewer, and Herdr's <parent>/worktrees/<repo>/<slug> once that
-    setting becomes "../worktrees" — the value that keeps checkouts out of the
-    repo entirely, so that no filesystem-walking tool descends into them. The
-    skip alone lost every one of them. The containers come from
-    worktree_locations(): fixed names plus whatever Herdr's own setting adds,
-    so the picker follows that setting without hanging off it. Only
-    row_kind() == "worktree" is admitted, which is what keeps the exemption from
-    re-admitting the submodule the skip exists for.
-
-    A DOTTED container is unreachable by the depth bands whatever the number:
-    glob never matches a leading dot with a wildcard, so ".worktrees" and
-    ".claude" are invisible to "*/*/*". An undotted one is reachable whenever
-    it happens to fall within three levels, which is why the loop below tests
-    `w not in out` rather than assuming a fresh path — "../worktrees" beside a
-    repo directly under the root is exactly that case. Naming the containers
-    literally is also what makes this cheap. On the real root the two container
-    depths under all 85 repos cost 9ms on top of the bands' 18ms, 26ms in total
-    against a ~70ms budget. Re-measured there on 2026-09-08, when the setting
-    moved beside the repo: 22.5ms in total at ".worktrees" and 23.0ms at
-    "../worktrees", so the move costs 0.5ms. Both figures are the whole of
-    repos(), which is why they sit below the 26ms recorded for the same tree in
-    v0.6.1 rather than contradicting it.
-
-    Not a recursive glob, for four reasons. It costs tens of seconds: "**/.git"
-    with recursive=True measured between 23 and 37 seconds across runs on that
-    root, because it descends every node_modules and vendor tree. It found
-    nothing the two passes here do not, and could not have: the leading-dot
-    rule binds "**" as well, so it walks past a .worktrees the same way a band
-    does — verified, not assumed. It would break the skip, which needs a
-    parent accumulated before its children — banding by depth guarantees that
-    and a single flat sort does not, because any name sorting below "/" (0x2F)
-    comes out ahead of its own parent, so "a/-x" precedes "a". And "**"
-    silently means "*" without recursive=True, so "**/*/.git" reads as bounded
-    while being either two levels or unbounded depending on a flag set
-    elsewhere.
-
-    `counts` is an optional dict, MUTATED when given: "bands" and "containers"
-    receive how many paths each pass contributed. The split is free while the
-    passes run and unrecoverable afterwards, since the return value is one flat
-    list, and debug_discovery() reports both figures. Nothing that is found
-    depends on it.
-    """
     out = []
     for depth in ("*", "*/*", "*/*/*"):
         for g in sorted(glob.glob(os.path.join(DEV, depth, ".git"))):
             p = os.path.dirname(g)
             if any(p.startswith(o + os.sep) for o in out):
-                continue          # nested inside a repo we already have
+                continue
             if p not in out:
                 out.append(p)
     banded = len(out)
 
-    # Every container layout in one pass, because the two depths cover all of
-    # them: Claude Code puts the worktree straight in the container, Herdr puts
-    # it under the repo's own name whether the container sits inside the repo
-    # or beside it.
-    #
-    # normpath is what resolves a "../x" container, and dict.fromkeys is what
-    # pays for it. A container beside the repo is SHARED by every repo in that
-    # parent, so the join produces the same directory once per repo, and the
-    # globs below would re-run over it that many times. Deduped first-seen, so
-    # the order the appends rely on is unchanged. Measured on the real 85-repo
-    # root with directory = "../worktrees": 340 bases collapse to 262, and
-    # discovery drops from 28.9ms to 23.0ms. It pays for itself only there: at
-    # ".worktrees" all 255 bases are already distinct, and building the dict
-    # instead of the list costs 0.3ms for nothing.
     bases = dict.fromkeys(os.path.normpath(os.path.join(p, d))
                           for p in list(out) for d in WORKTREE_DIRS)
     for base in list(bases) + WORKTREE_ROOTS:
@@ -677,67 +295,19 @@ def repos(counts=None):
                 if w not in out and row_kind(w) == "worktree":
                     out.append(w)
     if counts is not None:
-        # The second pass only ever appends, so the first pass's share is the
-        # length taken before it ran.
         counts["bands"], counts["containers"] = banded, len(out) - banded
     return out
 
 
 def elide(text, width):
-    """`text` cut to `width` columns, ending in "…" when anything was removed.
-
-    The tail goes rather than the head: these labels are identified by their
-    front ("invoice-pdf-export-service…"), and a dupe label carries its parent
-    dir as a prefix, which head-truncation would be the one thing to destroy.
-    The result is never wider than `width`, so a long label cannot push the
-    columns after it out of alignment.
-    """
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
 def row_kind(path):
-    """"worktree" for a linked git worktree, otherwise "repo".
-
-    A worktree's .git is a FILE holding a "gitdir:" pointer at the parent
-    repo's admin dir, where an ordinary repo's .git is a directory. Telling
-    them apart is therefore one stat per row instead of a git subprocess, and
-    it still classifies a worktree whose parent repo has been deleted — git
-    itself errors out on those.
-    """
     return "worktree" if os.path.isfile(os.path.join(path, ".git")) else "repo"
 
 
 def parent_repo(path):
-    """The root of the repo a linked worktree at `path` belongs to, or None.
-
-    Read out of the worktree's own .git — the FILE row_kind() classifies on.
-    It holds one "gitdir:" line naming the parent's admin directory for this
-    checkout, which git spells <repo-root>/.git/worktrees/<name>. So the parent
-    is three components up from the pointer. Where the checkout itself sits does
-    not enter into it, which is why one parse serves every layout on this
-    machine: Herdr's nested .worktrees/<repo>/<slug>, Herdr's sibling
-    <parent>/worktrees/<repo>/<slug>, Herdr's older flat
-    <root>/worktrees/<repo>/<slug>, and Claude Code's .claude/worktrees/<slug>.
-    A layout added later needs nothing here.
-
-    One file read and no `git` subprocess, the same trade row_kind() makes
-    for the same information, and for the same reason: this is paid per row
-    opened.
-
-    None whenever the shape is not exactly that, and the caller then opens the
-    checkout unnested. An ordinary repo answers None because its .git is a
-    directory, so the read raises before any parsing. A SUBMODULE answers None
-    too, and deliberately: its .git is a file as well, so row_kind() calls it a
-    worktree, but it points at <super>/.git/modules/<name> and has no worktree
-    parent to name. Nothing obliges other tooling to write git's shape either,
-    and a wrongly-derived parent is worse than none — it would nest the
-    checkout under some unrelated repo.
-
-    A relative pointer is resolved against the checkout. Git writes an absolute
-    one by default, but `git worktree add --relative-paths` and the
-    worktree.useRelativePaths setting write a relative one, and a relative path
-    would then be resolved by Herdr against the wrong directory entirely.
-    """
     try:
         with open(os.path.join(path, ".git"), encoding="utf-8") as f:
             pointer = f.read()
@@ -756,25 +326,6 @@ def parent_repo(path):
 
 
 def touched_at(path):
-    """Newest of the git index and the newest working-tree file (depth 2).
-
-    A worktree container is pruned along with the rest: its contents belong to
-    the worktrees repos() lists as rows of their own, so counting them here
-    would report work done on a branch as work done on its parent. A container
-    one level down is where that actually bit, since it puts the worktree's own
-    working tree at depth 2 — under the deeper .worktrees/<repo>/<slug> and
-    .claude/worktrees/<slug> layouts the files were already past the walk's
-    reach. Pruning the container makes it true of every layout, and stops the
-    walk entering it at all.
-
-    Pruned by full path, not by name, so ".claude" keeps counting while
-    ".claude/worktrees" does not, and a "worktrees" deeper in the tree is left
-    alone — a container is only a container where repos() looks for one. That
-    same full-path rule makes a container BESIDE the repo, which a "../x"
-    setting produces, inert here rather than a special case: it resolves to a
-    path the walk below never reaches, and it needs no pruning because a
-    sibling directory was never counted as this repo's work in the first place.
-    """
     newest = 0
     try:
         newest = os.path.getmtime(os.path.join(path, ".git", "index"))
@@ -810,23 +361,12 @@ def human_age(ts, now):
 
 
 def open_workspaces():
-    """(home, others): the pinned home workspace (or None) and every other open
-    workspace in sidebar order."""
     ws = (herdr("workspace", "list") or {}).get("workspaces", [])
     home = next((w for w in ws if w.get("label") == HOME_LABEL), None)
     return home, [w for w in ws if w is not home]
 
 
 def order_rows(labelled, open_ws):
-    """(label, path, touched) rows: open projects first in sidebar order, then
-    the rest by most recently touched. Open workspaces with no matching repo are
-    not listed (they still get closed on accept, since they cannot be selected).
-
-    The touch time is carried on the row rather than looked up again later.
-    touched_at() walks each working tree, which is the single largest cost of
-    starting the picker, so every repo is walked exactly once per run: sorting
-    needs the value here and build_lines() needs it for the TOUCHED column.
-    """
     by_label = dict(labelled)
     head = [(w["label"], by_label[w["label"]], touched_at(by_label[w["label"]]))
             for w in open_ws if w["label"] in by_label]
@@ -837,13 +377,6 @@ def order_rows(labelled, open_ws):
 
 
 def preselect_bind(n):
-    """fzf --bind that marks the first n rows selected once the list is loaded.
-
-    Must be the load event: start fires before any rows exist, so pos+select
-    there is a silent no-op (verified against fzf 0.74 in a pty). load fires
-    exactly once for a static list and does not re-fire when the query changes,
-    so the positional selects cannot leak onto filtered rows (counted with
-    execute-silent in a pty on 0.74.3)."""
     if n <= 0:
         return []
     chain = "+".join(f"pos({i})+select" for i in range(1, n + 1))
@@ -851,21 +384,16 @@ def preselect_bind(n):
 
 
 def parse_selection(returncode, stdout):
-    """None = cancelled (leave everything alone). [] = deliberately empty.
-    Otherwise the chosen repo paths."""
     if returncode == 130:
         return None
     lines = stdout.splitlines()
     if EMPTY in lines:
         return []
-    # Split on every tab, not just the first: field 3 (the untruncated label)
-    # follows the path, and a maxsplit of 1 would hand back "path\tlabel".
     paths = [f[1] for f in (l.split("\t") for l in lines) if len(f) > 1 and f[1]]
     return paths or None
 
 
 def plan(selected_labels, open_ws):
-    """What to close and what to create so open == selected."""
     keep = set(selected_labels)
     to_close = [w for w in open_ws if w["label"] not in keep]
     open_labels = {w["label"] for w in open_ws}
@@ -874,8 +402,6 @@ def plan(selected_labels, open_ws):
 
 
 def pick_focus(created_ids, closed_ids, focused_id, surviving_ids, home_id):
-    """Newly created wins. If the focused workspace was closed, fall back to the
-    first surviving selection, then home. Otherwise leave focus alone."""
     if created_ids:
         return created_ids[-1]
     if focused_id in closed_ids:
@@ -884,27 +410,15 @@ def pick_focus(created_ids, closed_ids, focused_id, surviving_ids, home_id):
 
 
 def canonical_theme(name):
-    """A config theme name folded to its canonical key, or None if unknown.
-
-    Port of canonical_theme_name (src/config/theme.rs:25): lowercase, then
-    spaces and underscores to hyphens, then the alias table.
-    """
     key = re.sub(r"[ _]", "-", (name or "").strip().lower())
     key = THEME_ALIASES.get(key, key)
     return key if key in PALETTES else None
 
 
 def parse_color(value):
-    """A config colour string as a ratatui colour, in the picker's own shape:
-    an int (a 256-colour index) or an (r, g, b) triple.
-
-    Port of parse_color (src/config/theme.rs:155), including its final branch:
-    an unrecognised value is cyan, NOT an error. Diverging there would colour a
-    typo differently from the sidebar it is meant to match.
-    """
     s = (value or "").strip().lower()
     if s in RESET_ALIASES:
-        return None                       # SGR 39, the default foreground
+        return None
     if s.startswith("#"):
         hexpart = s[1:]
         if len(hexpart) == 6 and re.fullmatch(r"[0-9a-f]{6}", hexpart):
@@ -919,8 +433,6 @@ def parse_color(value):
     return NAMED_COLORS.get(s, NAMED_COLORS["cyan"])
 
 
-# Every config key resolve_theme() reads, built from the tables above so a role
-# added there cannot be silently left unreadable.
 THEME_KEYS = frozenset(
     ["ui.status_indicators", "theme.name", "theme.auto_switch", "theme.dark_name"]
     + [f"theme.custom.{r}" for r in STATUS_ROLE_ORDER]
@@ -928,19 +440,6 @@ THEME_KEYS = frozenset(
 
 
 def herdr_rejects_theme(field):
-    """True when Herdr itself will not accept the theme name at `field`.
-
-    `herdr config check` diagnoses an unknown theme name, naming both the field
-    and the fallback it uses ("unknown theme name theme.name = ...; using
-    "catppuccin""). That is the only way to tell a TYPO apart from a theme newer
-    than PALETTES: on a typo Herdr draws its own default, so matching it means
-    drawing that default too, while a name Herdr accepts and this table lacks
-    means the table is stale.
-
-    Called only when PALETTES has no entry for the name, so the normal path
-    never pays for the subprocess. Any failure answers False, which routes to
-    UNKNOWN_THEME: a picker that cannot ask must not claim the name was a typo.
-    """
     try:
         r = subprocess.run([HERDR, "config", "check"], capture_output=True, text=True)
     except OSError:
@@ -949,19 +448,6 @@ def herdr_rejects_theme(field):
 
 
 def resolve_theme(config=None, rejects=None):
-    """(icons, colours) for the current Herdr config.
-
-    `icons` maps a status to its glyph, `colours` maps a status to a colour in
-    parse_color()'s shape. Reads [ui] status_indicators, [theme] name, and any
-    [theme.custom] override of the five status roles.
-
-    auto_switch is the one thing this cannot follow. Herdr picks between
-    dark_name and light_name from the HOST TERMINAL's appearance, which it
-    learns over the client connection and does not expose on the API or the
-    CLI. A popup pane has no way to ask. When auto_switch is on, dark_name is
-    used (Herdr's own dark default, and the overwhelmingly common case for a
-    terminal), and [theme.custom.dark] overrides are applied with it.
-    """
     if config is None:
         config = read_toml(herdr_config_path(), THEME_KEYS)
     rejects = rejects or herdr_rejects_theme
@@ -973,15 +459,10 @@ def resolve_theme(config=None, rejects=None):
     name = config.get(field)
     key = canonical_theme(name)
     if key is None:
-        # Unset means Herdr's default. A name Herdr also rejects means Herdr is
-        # drawing that same default, so match it. A name Herdr accepts and this
-        # table lacks is a stale table, which is what UNKNOWN_THEME is for.
         key = DEFAULT_THEME if not name or rejects(field) else UNKNOWN_THEME
     palette = PALETTES[key]
 
     roles = dict(zip(STATUS_ROLE_ORDER, palette))
-    # A mode override wins over the unqualified one, matching the order
-    # with_overrides() applies them (src/app/state.rs:551).
     tables = ["theme.custom"] + (["theme.custom.dark"] if auto else [])
     for role in STATUS_ROLE_ORDER:
         for table in tables:
@@ -991,14 +472,11 @@ def resolve_theme(config=None, rejects=None):
     colours = {}
     for status, role in STATUS_ROLES.items():
         value = roles[role]
-        # A built-in Rgb is already in shape; a named colour and every config
-        # override are strings that still need parsing.
         colours[status] = value if isinstance(value, tuple) else parse_color(value)
     return icons, colours
 
 
 def paint(text, colour):
-    """`text` wrapped in the SGR foreground escape ratatui would have written."""
     if colour is None:
         code = "39"
     elif isinstance(colour, tuple):
@@ -1009,37 +487,12 @@ def paint(text, colour):
 
 
 def status_cell(status, icons, colours):
-    """The AGENT STATUS column for one open workspace: Herdr's glyph and colour,
-    then the status word.
-
-    The word is kept even though Herdr's sidebar shows the glyph alone, because
-    fzf searches the visible text: typing "blocked" has to narrow the list. The
-    visible text is padded to STATUS_WIDTH before the escapes go on, since ROW
-    cannot pad a string whose length it would measure wrongly.
-    """
     icon = icons.get(status, icons["unknown"])
-    # .get() would be wrong here: a reset colour is legitimately None, so a
-    # status Herdr adds later must fall back explicitly, not by absence.
     colour = colours[status] if status in colours else colours["unknown"]
     return paint(f"{icon} {status}".ljust(STATUS_WIDTH), colour)
 
 
 def build_lines(rows, status, now):
-    """One fzf input line per (label, path, touched) row, in the order given.
-
-    Field 1 holds the visible columns, with the label elided so a long name
-    cannot push the columns after it out of alignment. Fields 2 and 3 are
-    hidden payload the preview reads: the repo path, then the label again,
-    untruncated, since field 1 may have lost the end of it.
-
-    `status` maps an open workspace's label to its rendered AGENT STATUS cell,
-    already glyphed, coloured and padded by status_cell(). A row absent from it
-    is not open and gets a blank column.
-
-    The touch time arrives on the row from order_rows(). Nothing here may reach
-    for the filesystem to recompute it: doing so walks every working tree a
-    second time and doubles the wait before the picker paints.
-    """
     lines = []
     for label, path, touched in rows:
         lines.append(ROW.format(elide(label, LABEL_WIDTH), row_kind(path),
@@ -1049,31 +502,6 @@ def build_lines(rows, status, now):
 
 
 def open_project(label, path):
-    """Ask Herdr to open `path` as a workspace; its result, or None on failure.
-
-    A linked worktree goes through `worktree open`, which is the only command
-    that records which repo the checkout belongs to. `workspace create` records
-    nothing, so a worktree opened with it carries no repo metadata at all and
-    Herdr's sidebar has nothing to group it by: it floats at top level as if it
-    were an unrelated project, while the same worktree opened by Herdr itself
-    nests under its repo. That was true of every worktree the picker opened, in
-    every layout, not only the nested ones.
-
-    The parent is named by PATH (--cwd), not by workspace id. The id form would
-    need the parent's own workspace open, and opening one the user did not check
-    would break this picker's contract that the selection is the truth.
-
-    `worktree open` returns the same workspace the create call does, so the
-    caller hands either answer to the layout identically.
-
-    Falls back to `workspace create` in both the cases where the nesting cannot
-    be had: a checkout whose parent parent_repo() cannot derive, and a Herdr
-    that answers nothing for the command. The second is kept whatever the
-    manifest's floor says, because the fallback opens the worktree exactly as
-    every version of this picker already did — a degraded row costs the user a
-    nesting, and nothing else. Only the fallback failing is fatal, which is the
-    same failure the caller has always died on.
-    """
     parent = parent_repo(path)
     if parent:
         res = herdr("worktree", "open", "--cwd", parent, "--path", path,
@@ -1084,27 +512,6 @@ def open_project(label, path):
 
 
 def plugin_root(plugin_id):
-    """`plugin_id`'s own checkout directory, or None when Herdr reports none.
-
-    Asked for rather than guessed at, which is why the setting has a token for
-    it at all. `herdr plugin list` reports every linked plugin's own checkout as
-    `plugin_root`, and that is the only thing that knows where a plugin was
-    installed — it may be a GitHub install under Herdr's own directory or a
-    local link anywhere on the disk. This plugin's root says nothing about
-    another's, and neither does the config directory, which is Herdr's.
-
-    Filtered with --plugin so the answer is one plugin or nothing at all. --json
-    is needed HERE and nowhere else in this file: `plugin list` prints a human
-    table by default, unlike `workspace list` and the other commands herdr()
-    parses, and 0.8.2 answers an unknown id with an empty list rather than an
-    error.
-
-    `enabled` is deliberately NOT consulted. `plugin disable` stops Herdr
-    DISPATCHING EVENTS to a plugin; this resolves a path and then runs an
-    executable, which is not dispatch. Refusing to lay a picker workspace out
-    because some plugin's event hook was turned off would be a surprise from a
-    plugin the user did not touch.
-    """
     plugins = (herdr("plugin", "list", "--plugin", plugin_id, "--json")
                or {}).get("plugins", [])
     for p in plugins:
@@ -1115,40 +522,6 @@ def plugin_root(plugin_id):
 
 
 def resolve_layout(creating):
-    """The argv for this whole run's layout command, or None with one notice.
-
-    The value of HERDR_PICKER_LAYOUT is a command line: split the way a shell
-    would split it, so flags and quoted arguments work as they read, and then
-    resolved once here rather than once per workspace. Two substitutions are
-    defined on it, and both are the picker's whole vocabulary:
-
-      {plugin:<id>}   the checkout directory Herdr reports for that plugin, so
-                      a command living inside another plugin survives being
-                      installed from GitHub or linked from anywhere on disk.
-                      Done here, since each one costs a call to Herdr.
-      {workspace}     the id of the workspace just opened. Left alone here and
-                      substituted per workspace by create_workspace().
-
-    `creating` is whether anything is actually being opened. Nothing is asked of
-    Herdr when it is false, so a selection that only closes workspaces costs no
-    `plugin list` call and raises no notice about a command it was never going
-    to run.
-
-    NOTHING HERE IS FATAL, and every failure lands on the same degraded path:
-    no command, one notice, and workspaces that still open with the one bare
-    pane Herdr gives them. The setting is a string a user typed, so all three
-    ways it can be wrong are ordinary — unbalanced quotes, a plugin that is not
-    installed, and a command that is not an executable file. A bare pane is
-    still a usable workspace, and refusing to open the rest of a multi-select
-    over a layout would cost the user far more than the layout does.
-
-    The notice is per RUN, not per workspace: N toasts for one wrong setting
-    would bury the projects the user just asked for, which is why this is
-    resolved here rather than inside create_workspace().
-
-    An EMPTY setting is silent, and is the one absence that raises nothing. It
-    says the user wants no command run, which is a choice rather than a failure.
-    """
     if not creating:
         return None
     setting = os.environ.get(LAYOUT_SETTING, "").strip()
@@ -1179,12 +552,6 @@ def resolve_layout(creating):
              "Install that plugin, or point the setting somewhere else.")
         return None
 
-    # Executable, not merely present: this is run as a program, so a file that
-    # lost its mode bit is exactly as unusable as an absent one. shutil.which()
-    # covers both spellings a user may write — a bare name found on the PATH,
-    # and a path checked where it stands — and answers None unless the result
-    # can actually be executed. Popen would otherwise raise inside a
-    # fire-and-forget call that nothing is watching.
     command = shutil.which(argv[0])
     if not command:
         warn(f"{LAYOUT_SETTING} names a command that cannot be run, so new "
@@ -1194,32 +561,6 @@ def resolve_layout(creating):
 
 
 def child_env():
-    """This process's environment, minus THIS plugin's own identity.
-
-    Herdr injects HERDR_PLUGIN_ROOT and HERDR_PLUGIN_CONFIG_DIR naming the
-    picker, and a Herdr plugin invoked as a command reads those two as "my
-    checkout" and "my config directory". Left in place they tell the layout
-    command that the picker's checkout holds its files and that the picker's
-    .env holds its settings, so it looks in the wrong repo and reads config
-    meant for the picker alone. Neither mistake raises: it degrades to a program
-    running on its built-in defaults, having silently ignored everything the
-    user configured for it.
-
-    Removed rather than repointed, and that is the general rule — do not leak
-    your own identity into a command you invoke — rather than a fact about any
-    particular program. A plugin run as a plain command derives its own root
-    when the variable is absent, and computing another program's paths is not
-    this file's business.
-
-    Everything else passes through, which is how a setting the layout command
-    reads reaches it: a name exported in the real environment, or written in
-    this plugin's .env — which the loaders at the top of this file fold into
-    os.environ — arrives at the command as a real environment variable.
-
-    A copy, not os.environ itself. Popping from the live environment would
-    change what every LATER call in the same run sees, including this picker's
-    own config loaders.
-    """
     env = dict(os.environ)
     for var in ("HERDR_PLUGIN_ROOT", "HERDR_PLUGIN_CONFIG_DIR"):
         env.pop(var, None)
@@ -1227,38 +568,6 @@ def child_env():
 
 
 def create_workspace(label, path, layout):
-    """Open a workspace for `path` and hand it over to be laid out; its id.
-
-    `layout` is resolve_layout()'s answer: the argv for this run, or None when
-    there is nothing to run, in which case the workspace still opens — with the
-    one bare pane Herdr gives it — and nothing else happens here. The caller
-    says why once per run rather than once per workspace.
-
-    THE WORKSPACE ID IS THE ONLY THING PASSED, wherever the setting puts its
-    {workspace} token, and no flag of this file's own goes with it. The picker
-    opens every workspace with --no-focus, so at the moment it wants one laid
-    out none of them is focused and the id is the only thing that identifies it.
-    Everything else the command needs, it reads from its own environment.
-
-    DETACHED, which is what a per-workspace command has to be here: laying a
-    workspace out ends with an agent coming up, and starting an agent blocks
-    until it is ready. Waiting on that once per selected project is the stall
-    this picker exists not to have. start_new_session also keeps the command
-    alive past the popup, which exits as soon as main() returns.
-
-    Fire-and-forget therefore means the command's own failures are its own to
-    report, and nothing here reads them: its output goes to DEVNULL, because
-    this popup is about to be painted over by nothing at all.
-
-    Nothing about the handoff is fatal, unlike the create above: a layout that
-    does not happen leaves a usable workspace, and dying over it would abandon
-    the rest of a multi-select.
-
-    `label` is what open_project() names the workspace with, and naming it
-    correctly is this file's whole remaining part in what the workspace is
-    called — a label is the only stable identity Herdr's API exposes for one,
-    and it is what a command reading the workspace back sees.
-    """
     res = open_project(label, path)
     if not res:
         die(f"failed to create workspace for {path}")
@@ -1277,11 +586,6 @@ def main():
         die("herdr not found on PATH")
     ensure_fzf()
 
-    # Timed here, and reported here, because this is the one startup cost that
-    # varies with the shape of the tree. perf_counter() rather than time(): it
-    # is monotonic, so a clock adjustment mid-run cannot produce a negative
-    # figure. Reported before the empty check below, since "0 rows" is exactly
-    # the case worth seeing, and long before fzf takes the screen.
     counts = {}
     started = time.perf_counter()
     paths = repos(counts)
@@ -1290,7 +594,6 @@ def main():
     if not paths:
         die(f"No git repositories found under {DEV}")
 
-    # Basenames appearing more than once get a parent prefix to stay unique.
     seen, dupes = set(), set()
     for p in paths:
         b = os.path.basename(p)
@@ -1309,8 +612,6 @@ def main():
     lines = build_lines(head + rest, status, time.time())
 
     sel = subprocess.run(
-        # --ansi: the AGENT STATUS cell carries Herdr's own colour escapes.
-        # Without it fzf prints them literally and the columns fall apart.
         ["fzf", "--ansi", "--delimiter=\t", "--with-nth=1", "--nth=1", "--layout=reverse",
          "--multi", "--prompt=filter projects > ",
          "--header=" + HEADER,
@@ -1319,15 +620,9 @@ def main():
                    f"&& echo 'print({EMPTY})+accept' || echo accept",
          *preselect_bind(len(head)),
          "--header-lines=1",
-         # No pointer glyph: the whole current row is highlighted instead.
-         # Selected rows get a green check; fzf has no unselected marker, so
-         # that column is simply blank on the rest.
          "--marker=\u2713 ", "--color=marker:green",
          "--pointer= ", "--gutter= ", "--highlight-line",
          "--height=100%", "--info=inline",
-         # The label heads the preview because field 1 may be elided: this is
-         # the only place a truncated name can be read in full. fzf quotes {3}
-         # and {2} for the shell, so no quoting is needed around them here.
          "--preview", "printf '%s\\n\\n' {3}; "
                       "git -C {2} log --oneline -8 2>/dev/null || ls -1 {2}",
          "--preview-window=right:52%:wrap"],
@@ -1337,7 +632,6 @@ def main():
     if chosen is None:
         return
 
-    # Re-read: the list may have changed while the picker was open.
     home, open_ws = open_workspaces()
     selected = [label_for(p) for p in chosen]
     to_close, to_create = plan(selected, open_ws)
@@ -1362,8 +656,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # --check-deps is the manifest's [[build]] entry point. It must never open
-    # the picker: a build step has no terminal to draw one in.
     if "--check-deps" in sys.argv[1:]:
         sys.exit(check_deps())
     main()
