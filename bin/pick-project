@@ -24,12 +24,13 @@ colour Herdr's own sidebar would use, read out of Herdr's config.toml. See the
 Each new workspace opens one tab holding three labelled panes, with the cursor
 on the agent: by default a tab named "agent", Claude on the left at half the
 width, lazygit filling the top 60% of the column beside it, and a bare shell
-underneath. The same three the sibling herdr-plugin-agentic-panes-layout
-builds, under the same setting names and reading its whole set of them, so
-nothing in that layout is fixed here — see the AGENT_LAYOUT_ block below.
-Claude is started plain — Herdr's own [session] resume_agents_on_restore (on by
-default) handles bringing conversations back after a server restart, so the
-picker does not pass --continue itself.
+underneath. The picker does not build that itself. It hands each workspace it
+opens to the sibling herdr-plugin-agentic-panes-layout plugin's bin/agent-layout,
+which owns the recipe and the ten AGENT_LAYOUT_ settings that shape it — see
+create_workspace() for the handoff and layout_command() for how the sibling is
+found. Claude is started plain: Herdr's own [session] resume_agents_on_restore
+(on by default) brings conversations back after a server restart, so nothing
+here passes --continue.
 
 A linked worktree is opened as a worktree rather than as a bare directory, so
 Herdr's sidebar nests it under the repo it belongs to instead of floating it at
@@ -383,42 +384,27 @@ for d in ("/opt/homebrew/bin", "/usr/local/bin"):
 
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
 
-# Every value create_workspace() lays a workspace out with: the tab's name, the
-# agent's kind, which way each of the two splits goes and how much room it
-# leaves, the tool's command, and a label on each of the three panes. Each one
-# is a default that configuration overrides, and the list is exhaustive — no
-# part of the layout is written into the call site, so nothing about it can be
-# changed only by editing this file.
+# The plugin that owns the three-pane layout, by the id in ITS manifest. The
+# picker builds no part of that layout: it opens a workspace and hands the id to
+# herdr-plugin-agentic-panes-layout's bin/agent-layout, which the sibling also
+# runs from its own worktree.created hook and from a keybinding.
 #
-# The names carry the SIBLING plugin's AGENT_LAYOUT_ prefix rather than this
-# plugin's HERDR_PICKER_ one, on purpose. herdr-plugin-agentic-panes-layout
-# builds the same three panes from a worktree.created event, and one vocabulary
-# for one layout means a value learned in either place reads the same in the
-# other. The two plugins still hold separate .env files, so a name set in one is
-# not seen by the other unless it is exported as a real environment variable —
-# in which case both lay out identically, which is the point.
+# NO AGENT_LAYOUT_ SETTING IS READ HERE, and that is the point of delegating.
+# The ten of them — _KIND, _TAB_NAME, _DIRECTION, _RATIO, _TOOL_COMMAND,
+# _TOOL_DIRECTION, _TOOL_RATIO, _AGENT_LABEL, _TOOL_LABEL and _SHELL_LABEL — are
+# one shared vocabulary documented in both READMEs, and the sibling reads them
+# for both plugins now. A value set in THIS plugin's .env still reaches it: the
+# loaders at the top of this file fold that .env into os.environ, and
+# layout_env() passes the environment through, where the sibling's own reader
+# lets a real environment variable beat its .env. So a name set here still wins
+# here, and the sibling's .env now covers what this one leaves unset.
 #
-# That shared vocabulary is why this list is the sibling's whole set rather
-# than the values this picker happened to introduce. A name that works in one
-# plugin and quietly does nothing in the other is the exact trap the borrowed
-# prefix exists to close, so the sibling's _KIND and _TAB_NAME are read here
-# too — as is its _DIRECTION and _RATIO, which name the same first split this
-# one makes. Only _RECIPE is absent: it replaces the sibling's layout with an
-# executable of the user's, which is a different feature and not a value.
-#
-# `or` rather than a default argument to get(): an .env line reading `X=` means
-# "leave it alone", exactly as an absent line does. Taking an empty value
-# literally would only hand Herdr an empty ratio to reject.
-KIND = os.environ.get("AGENT_LAYOUT_KIND") or "claude"
-TAB_NAME = os.environ.get("AGENT_LAYOUT_TAB_NAME") or "agent"
-DIRECTION = os.environ.get("AGENT_LAYOUT_DIRECTION") or "right"
-RATIO = os.environ.get("AGENT_LAYOUT_RATIO") or "0.5"
-TOOL_COMMAND = os.environ.get("AGENT_LAYOUT_TOOL_COMMAND") or "lazygit"
-TOOL_DIRECTION = os.environ.get("AGENT_LAYOUT_TOOL_DIRECTION") or "down"
-TOOL_RATIO = os.environ.get("AGENT_LAYOUT_TOOL_RATIO") or "0.6"
-AGENT_LABEL = os.environ.get("AGENT_LAYOUT_AGENT_LABEL") or "agent"
-TOOL_LABEL = os.environ.get("AGENT_LAYOUT_TOOL_LABEL") or "lazygit"
-SHELL_LABEL = os.environ.get("AGENT_LAYOUT_SHELL_LABEL") or "shell"
+# _RECIPE is the one name in that vocabulary neither plugin honours here: it
+# replaces the sibling's layout with an executable of the user's, and it is read
+# by the sibling's EVENT HOOK, which decides what to exec before bin/agent-layout
+# is reached. This picker runs bin/agent-layout directly, so it is not in the
+# path that setting sits on.
+LAYOUT_PLUGIN = "mikebronner.agentic-panes-layout"
 
 
 def die(msg):
@@ -428,6 +414,28 @@ def die(msg):
     except Exception:
         time.sleep(5)
     sys.exit(1)
+
+
+def warn(msg):
+    """Tell the user something is wrong, without stopping the run.
+
+    Two channels, because neither alone reaches anybody. The picker is a POPUP
+    pane that closes when this process exits, so anything written to stderr at
+    the end of a run is gone before it can be read; the Herdr toast is what the
+    user actually sees. stderr is still written because that is what lands in
+    `herdr plugin log list`, which is where the message is read afterwards.
+
+    The toast is best effort and its failure is ignored — a picker that cannot
+    raise a notification must still finish opening the workspaces. die() is the
+    other half of this pair, for what is worth stopping over.
+
+    Call this only where fzf is not on the screen, the rule debug_discovery()
+    states in full: fzf paints over the whole pane, so a write arriving
+    mid-render garbles the list.
+    """
+    sys.stderr.write(f"picker: {msg}\n")
+    subprocess.run([HERDR, "notification", "show", "project finder",
+                    "--body", msg], capture_output=True)
 
 
 def fzf_installer():
@@ -1088,8 +1096,8 @@ def open_project(label, path):
     need the parent's own workspace open, and opening one the user did not check
     would break this picker's contract that the selection is the truth.
 
-    `worktree open` returns the same workspace / tab / root_pane the create call
-    does, so the caller's layout is built on it identically.
+    `worktree open` returns the same workspace the create call does, so the
+    caller hands either answer to the layout identically.
 
     Falls back to `workspace create` in both the cases where the nesting cannot
     be had: a checkout whose parent parent_repo() cannot derive, and a Herdr too
@@ -1107,72 +1115,135 @@ def open_project(label, path):
     return herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
 
 
-def split_pane(pane, direction, ratio, cwd):
-    """The id of the pane a split creates, or None if the split failed.
+def layout_command():
+    """The sibling plugin's bin/agent-layout, or None when it cannot be run.
 
-    `--ratio` is the share kept by the pane named in `--pane`, and the pane
-    this RETURNS gets `1 - ratio`. Herdr documents neither half: `herdr --skill`
-    never mentions `--ratio` and the 0.8.2 API schema types it as a bare float.
-    So it was measured in an isolated server: `split right --ratio 0.7` left the
-    original pane 66 of 94 columns (0.702) and `split down --ratio 0.6` left it
-    23 of 39 rows (0.590). Both directions agree.
+    The path is asked for rather than guessed at. `herdr plugin list` reports
+    every linked plugin's own checkout as `plugin_root`, which is the only thing
+    that knows where the sibling was installed — it may be a GitHub install
+    under Herdr's own directory or a local link anywhere on the disk. The
+    picker's own root says nothing about it, and neither does the config
+    directory, which is Herdr's and not the plugin's.
 
-    That is why the caller's split ORDER is what sizes the panes, and why
-    getting it wrong is silent: a column split off the shell rather than the
-    tool pane still builds three panes, sized 40/60 instead of 60/40.
+    Filtered with --plugin so the answer is one plugin or nothing at all. --json
+    is needed HERE and nowhere else in this file: `plugin list` prints a human
+    table by default, unlike `workspace list` and the other commands herdr()
+    parses, and 0.8.2 answers an unknown id with an empty list rather than an
+    error.
 
-    `--no-focus` states the default rather than changing it, and is passed
-    deliberately. Measured 2026-09-08 in an isolated 0.8.2 server, splitting a
-    pane three ways: with `--focus` the cursor MOVES to the pane created; with
-    `--no-focus` it does not; with neither flag it does not either. It does not
-    move onto the pane being split, so a split made away from the cursor leaves
-    the cursor where it was. `herdr pane split --help` lists both flags and
-    documents neither.
-
-    So the picker's workspaces open with the agent in focus because the agent's
-    pane is the one the workspace arrives on, and nothing here moves the cursor
-    off it. The flag is kept for what it says: an accidental `--focus`, or a
-    later Herdr that focuses new panes by default, would land the user in the
-    bare shell, and the call site should read as having decided that.
-
-    The new id is not derivable from `pane` and the second split needs the first
-    one's answer, so the reply is parsed rather than discarded. 0.8.2 documents
-    it as `.result.pane` and answers with `.result.pane.pane_id`; a reply
-    missing either level yields None, which the caller treats as a failed split.
+    Executable, not merely present: the sibling is run as a program, so a file
+    that lost its mode bit is exactly as unusable as an absent one and the
+    caller's degraded path is right for both. `enabled` is deliberately NOT
+    consulted. `plugin disable` stops Herdr DISPATCHING EVENTS to a plugin,
+    which is the sibling's other way in; this is a direct call to an executable
+    and is not dispatch. Refusing to lay out a picker workspace because the
+    sibling's event hook was turned off would be a surprise from a plugin the
+    user did not touch.
     """
-    res = herdr("pane", "split", "--pane", pane, "--direction", direction,
-                "--ratio", ratio, "--cwd", cwd, "--no-focus")
-    return ((res or {}).get("pane") or {}).get("pane_id")
+    plugins = (herdr("plugin", "list", "--plugin", LAYOUT_PLUGIN, "--json")
+               or {}).get("plugins", [])
+    for p in plugins:
+        root = p.get("plugin_root") or ""
+        command = os.path.join(root, "bin", "agent-layout")
+        if root and os.access(command, os.X_OK):
+            return command
+    return None
 
 
-def create_workspace(label, path, live):
-    """Open a workspace for `path` with the agent layout; return its workspace id.
+def resolve_layout(creating):
+    """The layout command for this whole run, saying so once when there is none.
 
-    The first tab arrives with the workspace and cannot be labelled at creation
-    (`--label` names the workspace), so it is renamed to TAB_NAME right after.
-    It is then split into three labelled panes: a KIND agent keeping RATIO of
-    the width, TOOL_COMMAND filling TOOL_RATIO of the column DIRECTION of it,
-    and a bare shell taking the remainder. Drawn at the defaults, which is the
-    only shape it can be drawn at — every value in it is a setting:
+    `creating` is whether anything is actually being opened. Nothing is asked of
+    Herdr when it is false, so a selection that only closes workspaces costs no
+    `plugin list` call and raises no notice about a layout it was never going to
+    apply.
 
-        +-----------------+--------+
-        |                 | tool   |   agent   RATIO of the width
-        |      agent      | lazygit|   tool    TOOL_RATIO of the rest
-        |                 +--------+   shell   what the tool pane leaves
-        |                 | shell  |
-        +-----------------+--------+
+    The notice is per RUN, not per workspace. The sibling is a separate install
+    that nothing here declares a dependency on, so its absence is a legitimate
+    state rather than an error — but a silent one would leave the user looking
+    at a bare pane with nothing to explain it. N toasts for one missing install
+    would bury the projects they just asked for, which is why this is resolved
+    here rather than inside create_workspace().
+    """
+    if not creating:
+        return None
+    command = layout_command()
+    if not command:
+        warn(f"{LAYOUT_PLUGIN} is not installed, so new workspaces open with "
+             "one bare pane and no agent. Install it to get the agent, tool "
+             "and shell panes back.")
+    return command
 
-    The cursor is left on the agent pane: it is the pane the workspace arrives
-    on, and neither split moves it — see split_pane() for the measurement.
 
-    Every step after the workspace itself is non-fatal, unlike the create above.
-    A failed split, tool command or label leaves a workspace that is merely laid
-    out less well, and dying would abandon the rest of a multi-select over it.
+def layout_env(command):
+    """The environment `command` is run with: this one, with two corrections.
 
-    That layout is applied to every row, worktrees included. Herdr emits
-    worktree.opened for the call open_project() makes, but no plugin here acts
-    on it — the local agent-layout plugin subscribes to worktree.created alone —
-    so this stays the only thing laying the workspace out.
+    HERDR_PLUGIN_ROOT is pointed at the SIBLING's checkout. The sibling reads it
+    to find its own bin/config-env, and Herdr injects THIS plugin's root into
+    the picker, which would send it looking in the wrong repo. Deriving it from
+    the command keeps the two from disagreeing.
+
+    HERDR_PLUGIN_CONFIG_DIR is removed, for the mirror-image reason: the sibling
+    takes it as "your config directory" and only asks Herdr for its own when the
+    variable is absent. Left in place, it would read THIS plugin's .env as
+    though it were its own.
+
+    Everything else passes through, which is what keeps the shared AGENT_LAYOUT_
+    vocabulary working. A name exported in the real environment, or set in this
+    plugin's .env — which the loaders at the top of this file fold into
+    os.environ — arrives as a real environment variable and beats the sibling's
+    .env, so a value set for the picker still shapes the picker's workspaces.
+    """
+    env = dict(os.environ)
+    env.pop("HERDR_PLUGIN_CONFIG_DIR", None)
+    env["HERDR_PLUGIN_ROOT"] = os.path.dirname(os.path.dirname(command))
+    return env
+
+
+def create_workspace(label, path, live, layout):
+    """Open a workspace for `path` and have it laid out; its workspace id.
+
+    `layout` is layout_command()'s answer: the sibling plugin's bin/agent-layout,
+    or None when it is not installed, in which case the workspace still opens —
+    with the one bare pane Herdr gives it — and nothing else happens here. The
+    caller says so once per run rather than once per workspace.
+
+    The layout itself is not built here and must not be. The sibling owns that
+    recipe, applies it to worktrees it creates from an event and to a keybinding
+    press, and reads the ten AGENT_LAYOUT_ settings that shape it. A second copy
+    of the same sequence in this file is what this call replaces.
+
+    TWO ARGUMENTS ARE PASSED, and each is something this caller cannot give up:
+
+      --workspace   the picker opens every workspace with --no-focus, so at the
+                    moment it wants one laid out, none of them is focused —
+                    which is what agent-layout asks the API for by default.
+      --agent-name  `live` is the batch reservation, and only this process can
+                    see it, so only this process can hand out a name no other
+                    workspace in the same pass has taken.
+
+    ...and the third is the absent one: --no-agent is deliberately NOT passed.
+    The two are mutually exclusive by design, and this is the shape that detaches
+    the WHOLE call. The other shape — agent-layout run synchronously with
+    --no-agent, and `agent start` detached here — works too, and would put ten
+    herdr round trips back on the critical path of a multi-select for no gain.
+
+    DETACHED for the same reason the bare `agent start` was before it:
+    `agent start` blocks until the agent is ready, 30s by default, and
+    --timeout cannot be cut below its 3000ms minimum. Waiting on that once per
+    selected project is the stall this picker exists not to have. The layout is
+    therefore fire-and-forget, and the sibling reports its own failures as Herdr
+    toasts, which is more than the inline copy ever did.
+
+    Nothing about the handoff is fatal, unlike the create above: a layout that
+    does not happen leaves a usable workspace, and dying over it would abandon
+    the rest of a multi-select.
+
+    Herdr emits worktree.opened for the call open_project() makes, and the
+    sibling does subscribe to that event — but it cannot act on it twice over.
+    Its hook exits on two gates before reaching the layout: the event is not
+    worktree.created, and the workspace is not focused, which a --no-focus open
+    never is. So this call stays the only thing laying the workspace out.
 
     `live` is the set of agent names already spoken for, and is MUTATED: the
     name this call takes is reserved in it, so the caller's next create sees it.
@@ -1181,49 +1252,13 @@ def create_workspace(label, path, live):
     if not res:
         die(f"failed to create workspace for {path}")
 
-    tab = res.get("tab", {}).get("tab_id")
-    if tab:
-        herdr("tab", "rename", tab, TAB_NAME)
-
-    pane = res.get("root_pane", {}).get("pane_id")
-    if pane:
-        # The agent keeps RATIO of the width by BEING the pane the first split
-        # names, and the tool pane keeps TOOL_RATIO of the column beside it the
-        # same way. Splitting the tool pane rather than the agent pane a second
-        # time is what puts the tool above the shell — see split_pane() for the
-        # measurement that makes the order load-bearing.
-        tool = split_pane(pane, DIRECTION, RATIO, path)
-        shell = split_pane(tool, TOOL_DIRECTION, TOOL_RATIO, path) if tool else None
-
-        # No settling delay before this one. `pane run` was measured to work
-        # immediately after a split, unlike the `agent start` below, which has
-        # a real agent_pane_busy race. It types the line into the pane's own
-        # shell, which is interactive and sources the user's rc files, so a
-        # bare `lazygit` resolves there — a bare name is also the only default
-        # that can work on both platforms the manifest declares.
-        if tool:
-            herdr("pane", "run", tool, TOOL_COMMAND)
-
-        # Labels are applied before the agent starts, and labelling the agent's
-        # own pane is not wasted: `pane rename` writes a pane's `label` and
-        # `agent start` writes its `agent`, which are independent fields that
-        # neither clears the other. Measured on 0.8.2 with
-        # ui.show_agent_labels_on_pane_borders on — the agent pane carried
-        # agent="claude" and label="agent" together, six seconds later still.
-        for target, name in ((pane, AGENT_LABEL), (tool, TOOL_LABEL),
-                             (shell, SHELL_LABEL)):
-            if target:
-                herdr("pane", "rename", target, name)
-
-        # Fire and forget. `agent start` blocks until the agent is ready
-        # (default 30s), which would stall the picker on a multi-select —
-        # detaching makes that wait free. Note --timeout has a 3000ms
-        # MINIMUM, so a short value is rejected outright; omit it instead.
-        subprocess.Popen([HERDR, "agent", "start", agent_name(label, live),
-                          "--kind", KIND, "--pane", pane],
-                         start_new_session=True,
+    workspace = res["workspace"]["workspace_id"]
+    if layout:
+        subprocess.Popen([layout, "--workspace", workspace,
+                          "--agent-name", agent_name(label, live)],
+                         env=layout_env(layout), start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return res["workspace"]["workspace_id"]
+    return workspace
 
 
 def main():
@@ -1307,7 +1342,10 @@ def main():
     # land in `agent list` before the next create, so agent_name() reserving
     # into this set is the only thing keeping two new workspaces apart.
     live = live_agent_names()
-    created = [create_workspace(label, path_of[label], live) for label in to_create]
+
+    layout = resolve_layout(bool(to_create))
+    created = [create_workspace(label, path_of[label], live, layout)
+               for label in to_create]
 
     focused = next((w["workspace_id"] for w in open_ws if w.get("focused")), None)
     surviving = [w["workspace_id"] for w in open_ws

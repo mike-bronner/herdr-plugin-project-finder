@@ -356,299 +356,451 @@ class CreateWorkspaceHarness:
     """Shared by the two classes below. A mixin rather than a base TestCase,
     which would run every inherited test a second time."""
 
-    RES = {"workspace": {"workspace_id": "w9"}, "tab": {"tab_id": "w9:t1"},
-           "root_pane": {"pane_id": "p1"}}
+    # What open_project() answers with. The workspace id is the only field read
+    # now: the tab id and the root pane id went out with the splits, and the
+    # sibling asks Herdr for whatever it needs from the workspace id alone.
+    RES = {"workspace": {"workspace_id": "w9"}}
 
-    @staticmethod
-    def fake_herdr(res, splits=("p2", "p3")):
-        """A `herdr` stand-in answering each `pane split` with a NEW pane id.
+    # A resolved layout_command(), which is an absolute path to the SIBLING
+    # plugin's checkout. Its two parent directories are read by layout_env(),
+    # so it is a real-looking path rather than a bare name.
+    LAYOUT = "/x/panes/bin/agent-layout"
 
-        Every split has to answer with its own id. Which pane the SECOND split
-        names is the whole of the layout — `--ratio` sizes the pane named in
-        `--pane` — and one shared return value would make the agent pane and the
-        tool pane the same string, hiding exactly the mix-up these tests exist
-        to catch. A split past the end of `splits` answers None, which is how a
-        failed split is spelt.
+    def create(self, res=RES, layout=LAYOUT, label="proj", path="/x/proj",
+               live=None):
+        """(workspace id, the herdr calls, the Popen mock) from ONE create.
+
+        All three come out of one run on purpose: the handoff assertions hold
+        the sibling's argv against the workspace id that same call returned, and
+        taking them from two creates would compare two workspaces.
         """
-        ids = iter(splits)
-
-        def call(*args):
-            if args[:2] == ("pane", "split"):
-                new = next(ids, None)
-                return {"pane": {"pane_id": new}} if new else None
-            return res
-
-        return call
-
-    def run_create(self, res, splits=("p2", "p3")):
-        with mock.patch.object(pp, "herdr",
-                               side_effect=self.fake_herdr(res, splits)) as h, \
-             mock.patch.object(pp.subprocess, "Popen"), \
-             mock.patch.object(pp, "die", side_effect=SystemExit):
-            wid = pp.create_workspace("proj", "/x/proj", set())
-        return wid, [c.args for c in h.call_args_list]
-
-    def splits(self, calls):
-        return [c for c in calls if c[:2] == ("pane", "split")]
-
-    def renames(self, calls):
-        return [c for c in calls if c[:2] == ("pane", "rename")]
-
-    def agent_start_argv(self, label, live):
-        """The detached `herdr agent start` argv this fires for `label`."""
-        with mock.patch.object(pp, "herdr", side_effect=self.fake_herdr(self.RES)), \
+        with mock.patch.object(pp, "herdr", return_value=res) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
-            pp.create_workspace(label, "/x/proj", live)
-        return popen.call_args.args[0]
+            wid = pp.create_workspace(label, path,
+                                      set() if live is None else live, layout)
+        return wid, [c.args for c in h.call_args_list], popen
 
-    def create_watching_the_agent_pane(self, splits=("p2", "p3")):
-        """(the herdr calls, the pane `agent start` was aimed at) from ONE create.
-
-        Both halves out of the same run on purpose: the focus test compares
-        them, and taking them from two creates would compare two workspaces.
-        """
-        with mock.patch.object(pp, "herdr",
-                               side_effect=self.fake_herdr(self.RES, splits)) as h, \
-             mock.patch.object(pp.subprocess, "Popen") as popen, \
-             mock.patch.object(pp, "die", side_effect=SystemExit):
-            pp.create_workspace("proj", "/x/proj", set())
-        argv = popen.call_args.args[0]
-        return [c.args for c in h.call_args_list], argv[argv.index("--pane") + 1]
-
-    def focused_pane(self, calls, splits=("p2", "p3"), root="p1"):
-        """Which pane the cursor is on once the layout is built.
-
-        A workspace arrives focused on the single pane it arrives with, and a
-        split moves the cursor onto the pane it CREATES only when `--focus` is
-        passed. `--no-focus` and no flag at all both leave the cursor where it
-        already is. That rule was measured, not read: see split_pane(), whose
-        docstring carries the isolated-server observation it came from.
-
-        `splits` is the id the fake answers each split with, in order, because
-        the created id is not derivable from the call itself.
-        """
-        focus = root
-        for call, created in zip(self.splits(calls), splits):
-            if "--focus" in call:
-                focus = created
-        return focus
+    def handoff(self, **kwargs):
+        """The argv the sibling plugin is fired with, from one create."""
+        return self.create(**kwargs)[2].call_args.args[0]
 
 
 class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
-    def test_first_tab_is_renamed_agent(self):
-        wid, calls = self.run_create(self.RES)
-        self.assertEqual(wid, "w9")
-        self.assertIn(("tab", "rename", "w9:t1", "agent"), calls)
-        # Rename happens before the split so the tab is named as it appears.
-        self.assertLess(calls.index(("tab", "rename", "w9:t1", "agent")),
-                        next(i for i, c in enumerate(calls) if c[:2] == ("pane", "split")))
+    """Opening the workspace, and handing it to the sibling to lay out."""
 
-    def test_no_tab_id_skips_rename_but_still_builds_layout(self):
-        res = {k: v for k, v in self.RES.items() if k != "tab"}
-        wid, calls = self.run_create(res)
+    def test_the_opened_workspaces_id_is_returned(self):
+        wid, calls, _ = self.create()
         self.assertEqual(wid, "w9")
-        self.assertFalse(any(c[:2] == ("tab", "rename") for c in calls))
-        self.assertTrue(any(c[:2] == ("pane", "split") for c in calls))
+        self.assertEqual(calls[0][:2], ("workspace", "create"))
 
     def test_create_failure_dies(self):
+        # The one fatal step. Everything after it is best effort, because a
+        # workspace that opened badly still beats abandoning the rest of a
+        # multi-select.
         with self.assertRaises(SystemExit):
-            self.run_create(None)
+            self.create(res=None)
 
-    def test_the_agent_is_started_under_the_deduped_name(self):
+    def test_the_picker_builds_no_part_of_the_layout(self):
+        # The whole point of the delegation, and the assertion that catches a
+        # split, a rename or a `pane run` creeping back into this file: opening
+        # the workspace is the ONLY thing this sends to Herdr.
+        _, calls, _ = self.create()
+        self.assertEqual(len(calls), 1)
+
+    def test_no_agent_is_started_here_either(self):
+        # `agent start` moved into the sibling with the panes. The detached
+        # process this fires is the sibling itself, never herdr.
+        argv = self.handoff()
+        self.assertEqual(argv[0], self.LAYOUT)
+        self.assertNotIn("start", argv)
+
+    def test_the_workspace_is_opened_before_it_is_handed_over(self):
+        # The sibling is given a workspace id, so there is nothing to hand over
+        # until the create has answered. Ordering the two the other way round
+        # is not a thing that raises — it is a NameError-free run against an id
+        # that does not exist yet, reported only as a toast from the sibling.
+        manager = mock.Mock()
+        with mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
+             mock.patch.object(pp.subprocess, "Popen") as popen, \
+             mock.patch.object(pp, "die", side_effect=SystemExit):
+            manager.attach_mock(h, "herdr")
+            manager.attach_mock(popen, "popen")
+            pp.create_workspace("proj", "/x/proj", set(), self.LAYOUT)
+        self.assertEqual([c[0] for c in manager.mock_calls], ["herdr", "popen"])
+
+    def test_the_agent_name_handed_over_is_the_deduped_one(self):
         # The dedupe is decorative unless the deduped name is the one that
-        # reaches `agent start`; the raw label would collide instead.
-        argv = self.agent_start_argv("my-proj", {"my-proj"})
-        self.assertEqual(argv[1:4], ["agent", "start", "my-proj-2"])
+        # reaches the sibling; the raw label would collide instead.
+        argv = self.handoff(label="my-proj", live={"my-proj"})
+        self.assertEqual(argv[argv.index("--agent-name") + 1], "my-proj-2")
 
     def test_the_name_is_reserved_so_the_next_workspace_cannot_reuse_it(self):
         # Two creates out of one live set, which is how main() runs a
         # multi-select. Nothing else keeps the second off the first's name.
         live = set()
-        self.assertEqual(self.agent_start_argv("my-proj", live)[3], "my-proj")
-        self.assertEqual(self.agent_start_argv("my-proj", live)[3], "my-proj-2")
+        first = self.handoff(label="my-proj", live=live)
+        second = self.handoff(label="my-proj", live=live)
+        self.assertEqual(first[first.index("--agent-name") + 1], "my-proj")
+        self.assertEqual(second[second.index("--agent-name") + 1], "my-proj-2")
 
-    def test_a_worktree_row_gets_the_same_layout_as_a_repo_row(self):
-        # The picker stays solely responsible for the three-pane layout on
-        # every row: Herdr emits worktree.opened for this call, and the local
-        # agent-layout plugin subscribes to worktree.created alone.
+    def test_a_worktree_row_is_handed_over_exactly_like_a_repo_row(self):
+        # A worktree is opened by a different command, and the handoff must not
+        # notice. open_project() promises `worktree open` answers with the same
+        # workspace the create does, and this is where that promise is spent.
         with mock.patch.object(pp, "parent_repo", return_value="/x/myrepo"), \
-             mock.patch.object(pp, "herdr",
-                               side_effect=self.fake_herdr(self.RES)) as h, \
+             mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
              mock.patch.object(pp, "die", side_effect=SystemExit):
-            wid = pp.create_workspace("feat-x", "/x/wt/feat-x", set())
+            wid = pp.create_workspace("feat-x", "/x/wt/feat-x", set(),
+                                      self.LAYOUT)
         calls = [c.args for c in h.call_args_list]
         self.assertEqual(wid, "w9")
         self.assertEqual(calls[0][:2], ("worktree", "open"))
-        self.assertIn(("tab", "rename", "w9:t1", "agent"), calls)
-        self.assertEqual(len(self.splits(calls)), 2)
-        self.assertEqual(len(self.renames(calls)), 3)
-        popen.assert_called_once()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(popen.call_args.args[0][:3],
+                         [self.LAYOUT, "--workspace", "w9"])
+
+    def test_no_sibling_still_opens_the_workspace_and_fires_nothing(self):
+        # The absent-sibling path at this level: the sibling is a separate
+        # install that nothing here declares a dependency on, so `layout` being
+        # None is a legitimate state and not an error. A workspace with one
+        # bare pane is still a workspace, and dying over the missing layout
+        # would abandon the rest of a multi-select over a plugin the user never
+        # asked for. The notice is the CALLER's job — see ResolveLayout.
+        wid, calls, popen = self.create(layout=None)
+        self.assertEqual(wid, "w9")
+        self.assertEqual(len(calls), 1)
+        popen.assert_not_called()
 
 
-class AgentLayout(CreateWorkspaceHarness, unittest.TestCase):
-    """The three panes create_workspace() builds, and how they are sized.
+class LayoutHandoff(CreateWorkspaceHarness, unittest.TestCase):
+    """The call that replaces the layout this file used to build.
 
-    The sizing is entirely in the ORDER of the two splits, because `--ratio` is
-    the share kept by the pane named in `--pane` rather than the one the split
-    creates. Nothing about a wrong order raises: the tab still ends up with
-    three panes, sized the wrong way round. So the pane ids in these assertions
-    are the point of them, not incidental detail.
+    Two flags and no third, run detached with a corrected environment. Each
+    part of that is load-bearing and none of it raises when it is wrong: a
+    missing --workspace lays out whichever workspace happens to be focused, a
+    missing --agent-name collides two agents in one multi-select, and a
+    synchronous call stalls the picker for as long as the agent takes to come
+    up. All three still open the workspaces.
     """
 
-    def test_one_pane_becomes_three(self):
-        _, calls = self.run_create(self.RES)
-        self.assertEqual(len(self.splits(calls)), 2)
+    def test_the_sibling_is_run_with_the_workspace_and_the_agent_name(self):
+        self.assertEqual(self.handoff(),
+                         [self.LAYOUT, "--workspace", "w9",
+                          "--agent-name", "proj"])
 
-    def test_the_agent_pane_is_split_first_and_keeps_half_the_width(self):
-        # --pane p1 is the root pane the workspace arrived with, so the agent
-        # keeps 0.5 and the column beside it gets the other half. Direction and
-        # ratio are DIRECTION and RATIO at their defaults, pinned as settings
-        # by LayoutSettings below and as read-at-the-call by the last test in
-        # this class.
-        _, calls = self.run_create(self.RES)
-        self.assertEqual(self.splits(calls)[0],
-                         ("pane", "split", "--pane", "p1", "--direction", "right",
-                          "--ratio", "0.5", "--cwd", "/x/proj", "--no-focus"))
+    def test_the_workspace_handed_over_is_the_one_that_was_opened(self):
+        # Held against the create's own answer rather than against "w9", so a
+        # handoff that passed some other id could not satisfy it.
+        wid, _, popen = self.create()
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--workspace") + 1], wid)
 
-    def test_the_second_split_names_the_tool_pane(self):
-        # p2 is what the first split returned. Naming p1 here would build a
-        # third column beside the agent; naming the pane the second split
-        # CREATES would leave the tool pane 0.4 of the column instead of 0.6.
-        _, calls = self.run_create(self.RES)
-        self.assertEqual(self.splits(calls)[1],
-                         ("pane", "split", "--pane", "p2", "--direction", "down",
-                          "--ratio", "0.6", "--cwd", "/x/proj", "--no-focus"))
+    def test_no_agent_flag_is_passed(self):
+        # --no-agent and --agent-name are mutually exclusive in the sibling,
+        # and this is deliberately the shape that keeps the agent on the
+        # sibling's side. The other shape works too and would put ten herdr
+        # round trips back on the critical path of a multi-select.
+        self.assertNotIn("--no-agent", self.handoff())
 
-    def test_a_new_workspace_opens_with_the_cursor_on_the_agent(self):
-        # The wanted outcome, rather than the --no-focus flags. Those flags are
-        # only the default said out loud — a split moves the cursor when
-        # --focus is passed and not otherwise, measured rather than assumed
-        # (split_pane()). So the cursor lands on the agent for one reason:
-        # the agent is started in the pane the workspace arrived on. Start it
-        # in a pane a split created, or add --focus to either split, and the
-        # user opens a project looking at lazygit or at a bare shell — both of
-        # which satisfy every other assertion in this class. Comparing the
-        # focused pane against the pane the agent is really started in is what
-        # stops the two drifting apart.
-        calls, agent_pane = self.create_watching_the_agent_pane()
-        self.assertEqual(agent_pane, "p1")
-        self.assertEqual(self.focused_pane(calls), agent_pane)
+    def test_the_call_is_detached_and_its_output_discarded(self):
+        # `agent start` blocks until the agent is ready, 30s by default, and
+        # --timeout cannot be cut below its 3000ms minimum. Waiting on that
+        # once per selected project is the stall this picker exists not to
+        # have. start_new_session also keeps the sibling alive past the popup,
+        # which exits as soon as main() returns.
+        _, _, popen = self.create()
+        kwargs = popen.call_args.kwargs
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertIs(kwargs["stdout"], pp.subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], pp.subprocess.DEVNULL)
 
-    def test_the_focus_model_follows_a_split_that_asks_for_the_focus(self):
-        # A canary on focused_pane() itself. No real split passes --focus, so
-        # the branch that MOVES the cursor never runs in a green suite: a model
-        # that ignored the flag would answer "p1" to everything and pass the
-        # test above whatever the picker did.
-        stealing = [("pane", "split", "--pane", "p1", "--direction", "right",
-                     "--ratio", "0.5", "--cwd", "/x/proj", "--focus"),
-                    ("pane", "split", "--pane", "p2", "--direction", "down",
-                     "--ratio", "0.6", "--cwd", "/x/proj", "--focus")]
-        self.assertEqual(self.focused_pane(stealing), "p3")
-        self.assertEqual(self.focused_pane(stealing[:1]), "p2")
-        # --no-focus is not --focus by a prefix match: the picker's own calls
-        # carry the longer flag, and reading it as the shorter one would make
-        # the test above assert the exact opposite of the layout it guards.
-        no_focus = [c[:-1] + ("--no-focus",) for c in stealing]
-        self.assertEqual(self.focused_pane(no_focus), "p1")
+    def test_the_sibling_is_run_with_the_corrected_environment(self):
+        # The two corrections themselves are LayoutEnv's; this pins that the
+        # handoff uses them rather than inheriting this process's environment,
+        # which would send the sibling looking for its own files in THIS
+        # plugin's checkout and config directory.
+        _, _, popen = self.create()
+        self.assertEqual(popen.call_args.kwargs["env"],
+                         pp.layout_env(self.LAYOUT))
 
-    def test_every_split_opens_in_the_project(self):
-        _, calls = self.run_create(self.RES)
-        for call in self.splits(calls):
-            self.assertEqual(call[call.index("--cwd") + 1], "/x/proj")
 
-    def test_the_tool_command_runs_in_the_tool_pane(self):
-        # p2, never p3: lazygit belongs above the bare shell, not in it.
-        _, calls = self.run_create(self.RES)
-        self.assertIn(("pane", "run", "p2", "lazygit"), calls)
-        self.assertEqual(len([c for c in calls if c[:2] == ("pane", "run")]), 1)
+class LayoutCommand(unittest.TestCase):
+    """Finding the sibling plugin's executable, and failing closed without it.
 
-    def test_all_three_panes_are_labelled(self):
-        # p1 included. A pane's `label` and its `agent` are independent fields
-        # on 0.8.2 and neither clears the other, so labelling the agent's own
-        # pane is not wasted work left to the border to do.
-        _, calls = self.run_create(self.RES)
-        self.assertEqual(self.renames(calls),
-                         [("pane", "rename", "p1", "agent"),
-                          ("pane", "rename", "p2", "lazygit"),
-                          ("pane", "rename", "p3", "shell")])
+    The path is asked for rather than guessed at, because nothing in this
+    plugin knows where the sibling was installed: it may be a GitHub install
+    under Herdr's own directory or a local link anywhere on the disk.
+    """
 
-    def test_the_panes_are_laid_out_before_the_agent_is_started(self):
-        # `agent start` is what takes the pane busy. Every rename and the tool
-        # command land first, so none of them races it.
-        manager = mock.Mock()
+    def call(self, reply, executable=True):
+        with mock.patch.object(pp, "herdr", return_value=reply) as h, \
+             mock.patch.object(pp.os, "access", return_value=executable):
+            got = pp.layout_command()
+        return got, h.call_args.args if h.call_args else None
+
+    def test_the_sibling_is_asked_for_by_its_own_plugin_id(self):
+        # --json because `plugin list` prints a human table by default, unlike
+        # every other command herdr() parses. --plugin so the answer is one
+        # plugin or nothing, rather than a list to search.
+        _, args = self.call({"plugins": [{"plugin_root": "/x/panes"}]})
+        self.assertEqual(args, ("plugin", "list", "--plugin",
+                                "mikebronner.agentic-panes-layout", "--json"))
+
+    def test_the_id_is_the_siblings_and_not_this_plugins(self):
+        # A copy-paste of this plugin's own id here would ask Herdr for the
+        # picker, find it, and hand every workspace to a bin/agent-layout that
+        # does not exist in this checkout.
+        self.assertEqual(pp.LAYOUT_PLUGIN, "mikebronner.agentic-panes-layout")
+        with open(MANIFEST, encoding="utf-8") as f:
+            self.assertNotIn(pp.LAYOUT_PLUGIN, f.read())
+
+    def test_the_command_is_the_executable_under_the_reported_root(self):
+        got, _ = self.call({"plugins": [{"plugin_root": "/x/panes"}]})
+        self.assertEqual(got, os.path.join("/x/panes", "bin", "agent-layout"))
+
+    def test_no_plugin_row_yields_none(self):
+        # The first shape of an absent sibling, and the ordinary one: 0.8.2
+        # answers an unknown --plugin id with an empty list rather than an
+        # error, so nothing here raises and nothing distinguishes "not
+        # installed" from "installed" except this emptiness.
+        self.assertIsNone(self.call({"plugins": []})[0])
+
+    def test_a_command_that_is_not_executable_yields_none(self):
+        # The second shape: the sibling is installed and its file lost the mode
+        # bit, or the checkout is there and bin/agent-layout is not. It is run
+        # as a program, so a file that cannot be executed is exactly as unusable
+        # as an absent one and the caller's degraded path is right for both.
+        self.assertIsNone(
+            self.call({"plugins": [{"plugin_root": "/x/panes"}]},
+                      executable=False)[0])
+
+    def test_the_executable_bit_is_what_is_asked_for(self):
+        # os.F_OK would pass a present-but-unrunnable file straight through to
+        # Popen, which raises PermissionError inside a fire-and-forget call
+        # nothing is watching.
         with mock.patch.object(pp, "herdr",
-                               side_effect=self.fake_herdr(self.RES)) as h, \
-             mock.patch.object(pp.subprocess, "Popen") as popen, \
-             mock.patch.object(pp, "die", side_effect=SystemExit):
-            manager.attach_mock(h, "herdr")
-            manager.attach_mock(popen, "popen")
-            pp.create_workspace("proj", "/x/proj", set())
-        names = [c[0] for c in manager.mock_calls]
-        self.assertEqual(names.count("popen"), 1)
-        self.assertEqual(names[-1], "popen")
+                               return_value={"plugins": [{"plugin_root": "/x/p"}]}), \
+             mock.patch.object(pp.os, "access", return_value=True) as access:
+            pp.layout_command()
+        self.assertEqual(access.call_args.args[1], os.X_OK)
 
-    def test_the_agent_still_starts_when_the_first_split_fails(self):
-        # A workspace with one pane and an agent in it beats no workspace: the
-        # picker is mid-way through a multi-select and must not abandon it.
-        wid, calls = self.run_create(self.RES, splits=())
-        self.assertEqual(wid, "w9")
-        self.assertEqual(len(self.splits(calls)), 1)
-        self.assertFalse([c for c in calls if c[:2] == ("pane", "run")])
-        self.assertEqual(self.renames(calls), [("pane", "rename", "p1", "agent")])
+    def test_a_row_with_no_root_yields_none(self):
+        # An empty root would join to "bin/agent-layout", a RELATIVE path that
+        # os.access resolves against the picker's own cwd.
+        self.assertIsNone(self.call({"plugins": [{"plugin_root": ""}]})[0])
+        self.assertIsNone(self.call({"plugins": [{}]})[0])
 
-    def test_a_failed_second_split_still_fills_and_labels_the_tool_pane(self):
-        # Two panes exist and one of them is the tool pane, so lazygit and both
-        # labels that CAN be written still are. Only the shell's is skipped.
-        _, calls = self.run_create(self.RES, splits=("p2",))
-        self.assertIn(("pane", "run", "p2", "lazygit"), calls)
-        self.assertEqual(self.renames(calls),
-                         [("pane", "rename", "p1", "agent"),
-                          ("pane", "rename", "p2", "lazygit")])
+    def test_an_explicitly_null_root_yields_none(self):
+        # A null is not a missing key, and os.path.join would raise on it.
+        self.assertIsNone(self.call({"plugins": [{"plugin_root": None}]})[0])
 
-    def test_no_root_pane_builds_nothing_and_starts_nothing(self):
-        res = {k: v for k, v in self.RES.items() if k != "root_pane"}
-        wid, calls = self.run_create(res)
-        self.assertEqual(wid, "w9")
-        self.assertFalse(self.splits(calls))
-        self.assertFalse(self.renames(calls))
+    def test_a_reply_with_no_plugins_key_yields_none(self):
+        self.assertIsNone(self.call({})[0])
 
-    def test_the_settings_are_what_reach_herdr(self):
-        # Every value is read from its setting at the call, not baked into the
-        # call site. Each default below would still pass a happy-path test.
-        #
-        # The two directions are swapped for each other rather than set to
-        # "left" and "up": `herdr pane split --help` gives the flag exactly two
-        # possible values, right and down, so a fixture outside that pair could
-        # never happen in a real run.
-        with mock.patch.multiple(pp, KIND="codex", TAB_NAME="work",
-                                 DIRECTION="down", RATIO="0.3",
-                                 TOOL_COMMAND="gitui --ps", TOOL_DIRECTION="right",
-                                 TOOL_RATIO="0.75", AGENT_LABEL="claude",
-                                 TOOL_LABEL="git", SHELL_LABEL="sh"):
-            _, calls = self.run_create(self.RES)
-            argv = self.agent_start_argv("proj", set())
-        self.assertIn(("tab", "rename", "w9:t1", "work"), calls)
-        self.assertEqual(argv[argv.index("--kind") + 1], "codex")
-        self.assertEqual(self.splits(calls)[0][4:8],
-                         ("--direction", "down", "--ratio", "0.3"))
-        self.assertEqual(self.splits(calls)[1][4:8],
-                         ("--direction", "right", "--ratio", "0.75"))
-        self.assertIn(("pane", "run", "p2", "gitui --ps"), calls)
-        self.assertEqual(self.renames(calls),
-                         [("pane", "rename", "p1", "claude"),
-                          ("pane", "rename", "p2", "git"),
-                          ("pane", "rename", "p3", "sh")])
+    def test_an_unreachable_server_yields_none_rather_than_raising(self):
+        # herdr() answers None for a non-zero exit or unparseable output. The
+        # picker is mid-run with workspaces to open, so this degrades like any
+        # other absent sibling.
+        self.assertIsNone(self.call(None)[0])
+
+    def test_a_disabled_plugin_is_still_run(self):
+        # `plugin disable` stops Herdr DISPATCHING EVENTS to a plugin, which is
+        # the sibling's other way in. This is a direct call to an executable and
+        # is not dispatch, so refusing to lay out a picker workspace because the
+        # sibling's event hook was turned off would be a surprise from a plugin
+        # the user did not touch.
+        got, _ = self.call({"plugins": [{"plugin_root": "/x/panes",
+                                         "enabled": False}]})
+        self.assertEqual(got, "/x/panes/bin/agent-layout")
+
+
+class ResolveLayout(unittest.TestCase):
+    """Resolving the sibling once for a whole run, and saying so when it is not
+    there.
+
+    The sibling is a separate install and nothing in herdr-plugin.toml declares
+    a dependency on it, so its absence is a legitimate state rather than a bug.
+    A silent absence would still be wrong: the user asked for a project and got
+    a bare pane, with nothing on screen to explain it.
+    """
+
+    def resolve(self, creating, command):
+        with mock.patch.object(pp, "layout_command",
+                               return_value=command) as lc, \
+             mock.patch.object(pp, "warn") as warn:
+            got = pp.resolve_layout(creating)
+        return got, lc, warn
+
+    def test_a_present_sibling_is_returned_and_says_nothing(self):
+        got, _, warn = self.resolve(True, "/x/panes/bin/agent-layout")
+        self.assertEqual(got, "/x/panes/bin/agent-layout")
+        warn.assert_not_called()
+
+    def test_an_absent_sibling_yields_none_and_warns_once(self):
+        got, _, warn = self.resolve(True, None)
+        self.assertIsNone(got)
+        self.assertEqual(warn.call_count, 1)
+
+    def test_the_notice_names_the_plugin_to_install(self):
+        # A toast reading "the layout plugin is missing" tells the user nothing
+        # they can act on. The id is what `herdr plugin install` takes.
+        _, _, warn = self.resolve(True, None)
+        self.assertIn(pp.LAYOUT_PLUGIN, warn.call_args.args[0])
+
+    def test_a_run_that_creates_nothing_asks_herdr_nothing(self):
+        # A selection that only CLOSES workspaces costs no `plugin list` call.
+        # And it raises no notice: a layout that was never going to be applied
+        # is not something to interrupt the user about.
+        got, lc, warn = self.resolve(False, "/x/panes/bin/agent-layout")
+        self.assertIsNone(got)
+        lc.assert_not_called()
+        warn.assert_not_called()
+
+    def test_a_run_that_creates_nothing_is_silent_even_with_no_sibling(self):
+        got, lc, warn = self.resolve(False, None)
+        self.assertIsNone(got)
+        lc.assert_not_called()
+        warn.assert_not_called()
+
+    def test_the_notice_goes_to_both_channels_warn_owns(self):
+        # Not a duplicate of the warn() tests elsewhere: it pins that the
+        # absent sibling is reported through warn() rather than through die(),
+        # which would stop the run, or through a bare stderr write, which the
+        # popup destroys before it can be read.
+        with mock.patch.object(pp, "layout_command", return_value=None), \
+             mock.patch.object(pp, "HERDR", "/bin/herdr"), \
+             mock.patch.object(pp.subprocess, "run") as run, \
+             mock.patch.object(pp.sys, "stderr", io.StringIO()) as err:
+            pp.resolve_layout(True)
+        self.assertIn(pp.LAYOUT_PLUGIN, err.getvalue())
+        self.assertEqual(run.call_args.args[0][:2],
+                         ["/bin/herdr", "notification"])
+
+
+class LayoutEnv(unittest.TestCase):
+    """The environment the sibling is run with: this one, with two corrections.
+
+    Both corrections exist because the sibling reads the same two variables
+    this plugin was handed by Herdr, and would read them as its own. Neither
+    mistake raises: the sibling would find no bin/config-env under this
+    plugin's root and lay out on its built-in defaults, having silently ignored
+    every setting the user wrote.
+    """
+
+    COMMAND = "/x/panes/bin/agent-layout"
+
+    def env(self, base):
+        with mock.patch.dict(os.environ, base, clear=True):
+            return pp.layout_env(self.COMMAND)
+
+    def test_the_plugin_root_is_repointed_at_the_siblings_checkout(self):
+        # Herdr injects THIS plugin's root, which is where the sibling would
+        # otherwise look for its own bin/config-env. Derived from the command
+        # so the two cannot disagree.
+        env = self.env({"HERDR_PLUGIN_ROOT": "/x/picker"})
+        self.assertEqual(env["HERDR_PLUGIN_ROOT"], "/x/panes")
+
+    def test_the_root_is_set_even_when_this_process_has_none(self):
+        self.assertEqual(self.env({})["HERDR_PLUGIN_ROOT"], "/x/panes")
+
+    def test_the_config_dir_is_dropped(self):
+        # The mirror image: the sibling takes HERDR_PLUGIN_CONFIG_DIR as "your
+        # config directory" and only asks Herdr for its own when the variable
+        # is absent. Left in place, it would read THIS plugin's .env as its own
+        # and pick up settings meant for the picker alone.
+        env = self.env({"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/config"})
+        self.assertNotIn("HERDR_PLUGIN_CONFIG_DIR", env)
+
+    def test_an_absent_config_dir_is_not_an_error(self):
+        self.assertNotIn("HERDR_PLUGIN_CONFIG_DIR", self.env({}))
+
+    def test_everything_else_passes_through(self):
+        # What keeps the shared AGENT_LAYOUT_ vocabulary working now that the
+        # picker reads none of it. A name exported in the real environment, or
+        # written in this plugin's .env — which the loaders at the top of the
+        # script fold into os.environ — arrives at the sibling as a real
+        # environment variable and beats the sibling's own .env.
+        env = self.env({"AGENT_LAYOUT_RATIO": "0.3", "PATH": "/usr/bin"})
+        self.assertEqual(env["AGENT_LAYOUT_RATIO"], "0.3")
+        self.assertEqual(env["PATH"], "/usr/bin")
+
+    def test_the_process_environment_is_not_mutated(self):
+        # A copy, not os.environ itself. Popping the config dir out of the live
+        # environment would change what every LATER call in the same run sees,
+        # including this picker's own config loaders.
+        with mock.patch.dict(os.environ,
+                             {"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/config",
+                              "HERDR_PLUGIN_ROOT": "/x/picker"}, clear=True):
+            pp.layout_env(self.COMMAND)
+            self.assertEqual(os.environ["HERDR_PLUGIN_CONFIG_DIR"],
+                             "/x/picker/config")
+            self.assertEqual(os.environ["HERDR_PLUGIN_ROOT"], "/x/picker")
+
+
+class LayoutIsResolvedOncePerRun(unittest.TestCase):
+    """What driving main() shows that a unit test of resolve_layout() cannot:
+    how many times a whole selection resolves the sibling, and how many notices
+    one absent install produces.
+
+    N toasts for one missing plugin would bury the projects the user just asked
+    for, which is why the resolution sits in main() and not in
+    create_workspace(). Nothing about that placement raises if it moves.
+    """
+
+    def run_main(self, chosen, command):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(pp, "HERDR", "/bin/herdr"), \
+             mock.patch.object(pp, "ensure_fzf", return_value=True), \
+             mock.patch.object(pp, "repos", return_value=["/x/a", "/x/b"]), \
+             mock.patch.object(pp, "open_workspaces", return_value=(None, [])), \
+             mock.patch.object(pp, "resolve_theme", return_value=({}, {})), \
+             mock.patch.object(pp, "order_rows", return_value=([], [])), \
+             mock.patch.object(pp, "build_lines", return_value=[]), \
+             mock.patch.object(pp, "parse_selection", return_value=chosen), \
+             mock.patch.object(pp, "live_agent_names", return_value=set()), \
+             mock.patch.object(pp, "layout_command", return_value=command) as lc, \
+             mock.patch.object(pp, "warn") as warn, \
+             mock.patch.object(pp, "herdr",
+                               return_value=CreateWorkspaceHarness.RES), \
+             mock.patch.object(pp.subprocess, "run"), \
+             mock.patch.object(pp.subprocess, "Popen") as popen:
+            pp.main()
+        return lc, warn, popen
+
+    def test_two_new_workspaces_resolve_the_sibling_once(self):
+        lc, warn, popen = self.run_main(["/x/a", "/x/b"],
+                                        "/x/panes/bin/agent-layout")
+        self.assertEqual(lc.call_count, 1)
+        self.assertEqual(popen.call_count, 2)
+        warn.assert_not_called()
+
+    def test_an_absent_sibling_warns_once_for_two_workspaces(self):
+        # The user is told about one missing install one time, and still gets
+        # both projects.
+        lc, warn, popen = self.run_main(["/x/a", "/x/b"], None)
+        self.assertEqual(lc.call_count, 1)
+        self.assertEqual(warn.call_count, 1)
+        popen.assert_not_called()
+
+    def test_a_selection_that_creates_nothing_never_asks(self):
+        lc, warn, popen = self.run_main([], None)
+        lc.assert_not_called()
+        warn.assert_not_called()
+        popen.assert_not_called()
 
 
 class LayoutSettings(unittest.TestCase):
-    """The layout values are settings with documented defaults.
+    """The ten AGENT_LAYOUT_ settings: documented here, applied by the sibling.
 
-    The names are the sibling herdr-plugin-agentic-panes-layout's rather than
-    this plugin's HERDR_PICKER_ prefix, because both plugins build the same
-    three panes and one vocabulary for one layout is the point. This class
-    pins that decision so a rename cannot happen in one plugin alone.
+    They carry the sibling herdr-plugin-agentic-panes-layout's prefix rather
+    than this plugin's HERDR_PICKER_ one because they are ONE vocabulary for one
+    layout, and both READMEs promise that a value learned in either place reads
+    the same in the other. That promise survived the delegation: what changed is
+    who applies them, not what they are called. So this class documents them and
+    asserts the inverse of what it used to — that the picker reads none of them
+    itself, and passes the environment carrying them straight through.
     """
 
     DEFAULTS = {"KIND": "claude", "TAB_NAME": "agent",
@@ -659,23 +811,46 @@ class LayoutSettings(unittest.TestCase):
 
     README = os.path.join(HERE, "..", "README.md")
 
-    def test_the_defaults_are_the_documented_ones(self):
-        for name, value in self.DEFAULTS.items():
-            self.assertEqual(getattr(pp, name), value, name)
+    def test_no_layout_setting_is_read_by_this_plugin(self):
+        # The inverse of the assertion this used to make, and the point of
+        # delegating: one reader for one layout. A setting read here as well
+        # would be applied twice, from two files that cannot see each other,
+        # and the picker's copy would win by racing the sibling's.
+        #
+        # Read from the source rather than from the module, because a constant
+        # bound at import leaves nothing to observe afterwards.
+        with open(pp.__file__, encoding="utf-8") as f:
+            source = f.read()
+        self.assertEqual(
+            set(re.findall(r'os\.environ\.get\("(AGENT_LAYOUT_\w+)"\)', source)),
+            set())
+
+    def test_every_setting_still_reaches_the_sibling(self):
+        # The other half: reading none of them is only correct because they are
+        # all passed on. Dropping the environment, or filtering it, would make
+        # every value in this README silently do nothing when set for the
+        # picker.
+        base = {f"AGENT_LAYOUT_{name}": value
+                for name, value in self.DEFAULTS.items()}
+        with mock.patch.dict(os.environ, base, clear=True):
+            env = pp.layout_env("/x/panes/bin/agent-layout")
+        for key, value in base.items():
+            self.assertEqual(env.get(key), value, key)
 
     def test_no_layout_setting_has_a_home_in_the_plugins_config_toml(self):
         # The ownership rule, and the reason these ten stay environment-only
         # while the picker's own three moved into [picker]: the sibling plugin
         # reads these same names, and a value written into ONE plugin's private
         # file is invisible to the other. Folding them into PICKER_KEYS would
-        # let the two lay a workspace out differently and say nothing about it.
+        # hand the sibling a setting it can never see.
         layout = {f"AGENT_LAYOUT_{name}" for name in self.DEFAULTS}
         self.assertEqual(set(pp.PICKER_KEYS.values()) & layout, set())
 
     def test_the_readme_documents_every_setting_at_its_default(self):
-        # Doc-drift guard, in the shape KeyBindings uses below: adding a
-        # setting without documenting it, or changing a default without
-        # correcting the README, both fail here.
+        # Doc-drift guard, in the shape KeyBindings uses below. The defaults
+        # are the SIBLING's now, so this cannot be checked against a constant
+        # in this file any more: the README is the only copy of them here, and
+        # a wrong one is a promise this plugin cannot keep.
         #
         # Scoped to the line naming the setting and the comment block directly
         # above it, never a whole-file search: "Default: lazygit" appears twice
@@ -691,88 +866,13 @@ class LayoutSettings(unittest.TestCase):
             above = lines[max(0, at[0] - 3):at[0]]
             self.assertTrue(any(line == f"# Default: {value}" for line in above), key)
 
-    def test_the_settings_are_read_under_the_sibling_plugins_names(self):
-        # Read from the source: the constants are bound at import, so an
-        # environment set now cannot be observed without re-executing the
-        # module. The names are the contract with the other plugin.
-        with open(pp.__file__, encoding="utf-8") as f:
-            source = f.read()
-        for name in self.DEFAULTS:
-            self.assertIn(f'os.environ.get("AGENT_LAYOUT_{name}")', source, name)
-
-    def test_nothing_is_read_that_this_class_does_not_cover(self):
-        # The closing half of the guard above, and self-contained: a setting
-        # added to the picker but not to DEFAULTS would otherwise slip past
-        # every check in this class, including the README one. Reading the
-        # source is the only way to see it — the constants are bound at import.
-        with open(pp.__file__, encoding="utf-8") as f:
-            source = f.read()
-        read = set(re.findall(r'os\.environ\.get\("(AGENT_LAYOUT_\w+)"\)', source))
-        self.assertEqual(read, {f"AGENT_LAYOUT_{n}" for n in self.DEFAULTS})
-
-    def test_every_sibling_setting_but_the_recipe_is_read(self):
-        # The other half of the vocabulary contract, and the reason there is no
-        # list of ignored names here any more: a name that works in one plugin
-        # and quietly does nothing in the other is the trap the shared prefix
-        # exists to close. Adding one to the sibling and not to DEFAULTS above
-        # fails here.
-        #
-        # _RECIPE is the single exception, and not an oversight: it points the
-        # sibling's event hook at an executable that replaces the layout, which
-        # is a feature this picker does not have rather than a value it lays
-        # out with. Reading it would promise something nothing here honours.
-        sibling = os.path.join(HERE, "..", "..",
-                               "herdr-plugin-agentic-panes-layout", "README.md")
-        if not os.path.isfile(sibling):
-            # Loud for the same reason as the banner at the top of this file: a
-            # skip that reads as a pass is worse than no check at all.
-            print("\n%(bar)s\n"
-                  "!! THE SHARED SETTING NAMES WERE NOT CHECKED: the sibling\n"
-                  "!! plugin herdr-plugin-agentic-panes-layout is not checked\n"
-                  "!! out beside this repo, so its README could not be read.\n"
-                  "!! The test is SKIPPED, not passed. Clone the sibling beside\n"
-                  "!! this repo to check that one vocabulary covers both.\n"
-                  "%(bar)s\n" % {"bar": "!" * 70}, file=sys.stderr)
-            self.skipTest("the sibling plugin is not checked out beside this one")
-        with open(sibling, encoding="utf-8") as f:
-            names = {line.split("=")[0] for line in f
-                     if line.startswith("AGENT_LAYOUT_")}
-        self.assertIn("AGENT_LAYOUT_RECIPE", names)  # the file was really read
-        expected = {f"AGENT_LAYOUT_{name}" for name in self.DEFAULTS}
-        self.assertEqual(names - {"AGENT_LAYOUT_RECIPE"}, expected)
-
-
-class SplitPane(unittest.TestCase):
-    """Reading the new pane's id out of a split, and failing closed without it."""
-
-    def call(self, reply):
-        with mock.patch.object(pp, "herdr", return_value=reply) as h:
-            got = pp.split_pane("p1", "down", "0.6", "/x/proj")
-        return got, h.call_args.args
-
-    def test_the_new_pane_id_is_returned(self):
-        got, _ = self.call({"pane": {"pane_id": "p2"}})
-        self.assertEqual(got, "p2")
-
-    def test_the_split_is_asked_for_exactly_as_given(self):
-        _, args = self.call({"pane": {"pane_id": "p2"}})
-        self.assertEqual(args, ("pane", "split", "--pane", "p1", "--direction",
-                                "down", "--ratio", "0.6", "--cwd", "/x/proj",
-                                "--no-focus"))
-
-    def test_a_failed_command_yields_none(self):
-        self.assertIsNone(self.call(None)[0])
-
-    def test_a_reply_without_a_pane_yields_none(self):
-        self.assertIsNone(self.call({})[0])
-
-    def test_an_explicitly_null_pane_yields_none(self):
-        # A null is not a missing key, and .get("pane", {}) would raise on it.
-        self.assertIsNone(self.call({"pane": None})[0])
-
-    def test_a_pane_without_an_id_yields_none(self):
-        self.assertIsNone(self.call({"pane": {}})[0])
-
+    def test_the_readme_names_the_sibling_as_the_one_that_applies_them(self):
+        # The README documents ten settings this plugin does not read. Without
+        # saying who does, that block reads as a list of things the picker
+        # applies, which is exactly what it stopped doing.
+        with open(self.README, encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("herdr-plugin-agentic-panes-layout", readme)
 
 class OpenProject(unittest.TestCase):
     """Which herdr command opens a row, and what happens when it will not.

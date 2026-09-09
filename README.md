@@ -16,22 +16,26 @@ workspace. Esc changes nothing.
 
 ```
 +-----------------+--------+
-|                 | lazygit|   agent     half the width
-|      agent      |        |   lazygit   60% of the column beside it
-|                 +--------+   shell     what lazygit leaves
+|                 | lazygit|   agent     Claude, and where the cursor lands
+|      agent      |        |   lazygit   the tool pane
+|                 +--------+   shell     a bare shell
 |                 | shell  |
 +-----------------+--------+
 ```
 
-Claude runs in the `agent` pane, `lazygit` in the one above the bare shell, and
-the cursor is on the agent when the workspace opens. That is the same layout
-the sibling
+**The picker does not build that layout.** It opens each workspace and hands it
+to the sibling
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
-plugin applies to a worktree it lays out from an event, so a project opened
-from the picker looks like one opened any other way. The drawing above is the
-default and nothing more: which way each split goes, how much room each pane
-takes, what fills the tool pane and what each pane is called are all settings,
-under the sibling plugin's names — see [Configure](#configure).
+plugin, which owns the recipe: the drawing above, the ten `AGENT_LAYOUT_`
+settings that reshape it, and every measurement behind them. So a project
+opened from the picker looks like a worktree that plugin lays out from an
+event, because the same code laid both out. Its README is where the sizes and
+the ratios are written down; this one names the settings under
+[Configure](#configure) and leaves it there.
+
+That sibling is not required. Without it a picked project still opens, as one
+bare pane with no agent in it, and the picker raises one Herdr notification for
+the run saying what to install.
 
 The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
 listed and never closed.
@@ -234,7 +238,8 @@ The picker's three settings can also be written as environment variables in a
 `.env` file in the same directory, which is where they lived before
 `config.toml`. It still works, so an existing one keeps being read.
 
-The ten `AGENT_LAYOUT_` settings have no `config.toml` key at all, and that is
+The ten `AGENT_LAYOUT_` settings below are applied by the sibling plugin rather
+than by the picker, and they have no `config.toml` key at all. Both of those are
 deliberate — see [which file a setting belongs
 in](#which-file-a-setting-belongs-in) below.
 
@@ -308,16 +313,15 @@ The split is by **who reads the setting**, not by which file is nicer to edit.
 The picker's own three — `root`, `home` and `debug` — are read by this plugin
 and nothing else, so they live in this plugin's `config.toml`.
 
-The ten `AGENT_LAYOUT_` settings are read by **two** plugins: this one, which
-lays out a workspace it opens, and the sibling
-[agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout),
-which lays out a worktree on `worktree.created`. They stay environment-only, and
-deliberately have no key in this plugin's `config.toml`. A value written into
-one plugin's private file is invisible to the other, so giving them a home here
-would let the two drift apart in silence: a workspace opened from the picker
-laid out one way, a worktree created by the sibling laid out another. Herdr's
-plugin docs say plugin commands run as your user and inherit your environment,
-so one export reaches both plugins where no file can.
+The ten `AGENT_LAYOUT_` settings are read by the sibling
+[agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
+and by nothing here. That plugin lays out a worktree on `worktree.created` and
+lays out the workspaces this picker opens, so it reads them for both. They stay
+environment-only, and deliberately have no key in this plugin's `config.toml`: a
+value written into one plugin's private file is invisible to the other, and this
+is the wrong plugin to write them into. Herdr's plugin docs say plugin commands
+run as your user and inherit your environment, so one export reaches both
+plugins where no file can.
 
 Export them wherever your Herdr server picks its environment up — your shell
 profile, or the launch agent that starts it:
@@ -350,48 +354,34 @@ the home folder instead of failing.
 
 The `AGENT_LAYOUT_` names above are the sibling
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
-plugin's, deliberately. Both plugins build the same three panes, and one
-vocabulary for one layout means a value learned in either place reads the same
-in the other. Each plugin still reads its **own** `.env`, so a name set here is
-not seen there. Export one as a real environment variable and both follow it,
-which is the point of sharing the names.
+plugin's, and so is the code that reads them. The picker reads none of them. It
+hands its own environment to that plugin's `bin/agent-layout` and lets the
+plugin apply its own settings, so one layout has one reader and the two cannot
+drift apart.
 
-That is the sibling's whole set bar one, so a name that works there works here:
-there is no `AGENT_LAYOUT_` value you can set for that plugin and watch do
-nothing for this one. The exception is `AGENT_LAYOUT_RECIPE`, which points the
-sibling's event hook at an executable that replaces its layout entirely. The
-picker has no such hook to point anywhere, so the name is not read here.
+They are documented here because this is where you meet them: a value learned in
+either place reads the same in the other, and the sibling's whole set works from
+the picker. The exception is `AGENT_LAYOUT_RECIPE`, which points the sibling's
+**event hook** at an executable that replaces its layout. The picker calls
+`bin/agent-layout` directly, past the hook that reads it, so that one name does
+nothing on this path.
 
-Both directions take `right` or `down` and nothing else — Herdr's own limit,
-not the picker's. Both ratios name the share kept by the pane **being split**,
-so a bigger `AGENT_LAYOUT_RATIO` means a bigger agent pane and a bigger
-`AGENT_LAYOUT_TOOL_RATIO` means a bigger tool pane. Herdr documents neither
-half of that, and the `0.5` default splits the width evenly enough to hide it,
-so it was measured: `split right --ratio 0.7` leaves the original pane 66 of 94
-columns and gives the new one `1 - ratio`.
+What each value means, what Herdr accepts for it, which pane a ratio sizes and
+how that was measured all live in the sibling's README, beside the code that
+reads them. Writing them down twice is what let this plugin lay a workspace out
+differently from the plugin it borrowed the names from.
 
-The cursor lands on the agent pane, whatever the rest is set to, because the
-agent is started in the pane the workspace arrives on and nothing moves the
-cursor off it. Measured on 0.8.2: `pane split --focus` moves the cursor to the
-pane it creates, while `--no-focus` and no flag at all both leave it where it
-is. The picker passes `--no-focus` anyway, to say so rather than to rely on a
-default it does not own.
+Nothing here is validated by the picker, and the sibling's failures are not the
+picker's to report. The handoff is fire-and-forget, so that a multi-select never
+waits on an agent coming up, and the sibling raises its own Herdr notifications
+for a value it cannot use.
 
-`AGENT_LAYOUT_TOOL_COMMAND` is sent to the tool pane's own shell, so flags work
-without quoting. Its default is a bare `lazygit` rather than a path: that shell
-is interactive and reads your own rc files, which is where the name resolves,
-and a bare name is the only default that can work on both declared platforms.
-
-Nothing here is validated by the picker. Herdr's own CLI rejects an unknown
-direction or a non-numeric ratio, and a rejected layout step is skipped rather
-than failing the whole selection — a workspace that came out with fewer panes
-than intended still opens with its agent in it.
-
-`AGENT_LAYOUT_KIND` is the quietest one to get wrong. The agent is started
-detached, so that a multi-select does not wait on it, and its output is
-discarded: whatever Herdr says about a value it will not accept, you will not
-see it. The symptom is three panes laid out with nothing running in the agent's
-one.
+The one failure the picker does report is the sibling being absent, which is a
+legitimate state: nothing in `herdr-plugin.toml` declares a dependency on it.
+The workspaces still open, one bare pane each, and a single notification per run
+says which plugin to install. Absent covers both a Herdr that reports no such
+plugin and one whose `bin/agent-layout` is not executable, since either way
+there is nothing to run.
 
 ### Timing the search
 
@@ -422,6 +412,11 @@ HERDR_PICKER_DEBUG=1 python3 bin/pick-project
 ## Requires
 
 [`fzf`](https://github.com/junegunn/fzf) and `python3` on the PATH.
+
+[agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
+is wanted, not required. It is what lays a picked project out, so without it
+every workspace opens as one bare pane with no agent; the picker still opens
+them, and says once per run that the plugin is missing.
 
 Herdr's manifest has no dependency field, so the requirement is declared as a
 `[[build]]` step that runs `python3 bin/pick-project --check-deps` at install
