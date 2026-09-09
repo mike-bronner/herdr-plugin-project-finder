@@ -3,6 +3,53 @@
 Fuzzy-pick git repos and open them as workspaces in
 [Herdr](https://herdr.dev), the agent-aware terminal multiplexer.
 
+## Install
+
+```sh
+herdr plugin install mike-bronner/herdr-plugin-project-finder
+```
+
+Pin a particular revision with `--ref`:
+
+```sh
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref v0.7.0
+```
+
+To work on the plugin instead, clone it and link the checkout:
+
+```sh
+git clone git@github.com:mike-bronner/herdr-plugin-project-finder.git
+herdr plugin link /absolute/path/to/herdr-plugin-project-finder
+```
+
+Bind the picker pane in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "shell"
+command = "\"$HERDR_BIN_PATH\" plugin pane open --plugin mikebronner.project-finder --entrypoint picker"
+description = "find projects"
+```
+
+There is no keybinding type that opens a plugin pane directly, so the binding
+shells out to the CLI. `$HERDR_BIN_PATH` is injected into command keybindings,
+so no absolute path is needed.
+
+### Updating
+
+Herdr v1 has no separate plugin update command. Reinstall from GitHub to refresh
+a managed install:
+
+```sh
+herdr plugin install mike-bronner/herdr-plugin-project-finder
+```
+
+A linked checkout is updated with `git pull`, since Herdr runs the plugin out of
+that directory. Note that `herdr plugin list` may still report the version the
+link was registered at, so treat the version it prints for a linked plugin as
+unreliable.
+
 ## What it does
 
 `bin/pick-project` opens an fzf popup listing every git repo up to three levels
@@ -135,33 +182,6 @@ fzf does not search hidden fields — so text past the ellipsis will not match.
 
 Pairs well with [herdr-plugin-recent-spaces](https://github.com/mike-bronner/herdr-plugin-recent-spaces),
 which keeps the sidebar in most-recently-used order.
-
-## Install
-
-```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder
-```
-
-To work on the plugin instead, clone it and link the checkout:
-
-```sh
-git clone git@github.com:mike-bronner/herdr-plugin-project-finder.git
-herdr plugin link /absolute/path/to/herdr-plugin-project-finder
-```
-
-Bind the picker pane in `~/.config/herdr/config.toml`:
-
-```toml
-[[keys.command]]
-key = "prefix+f"
-type = "shell"
-command = "\"$HERDR_BIN_PATH\" plugin pane open --plugin mikebronner.project-finder --entrypoint picker"
-description = "find projects"
-```
-
-There is no keybinding type that opens a plugin pane directly, so the binding
-shells out to the CLI. `$HERDR_BIN_PATH` is injected into command keybindings,
-so no absolute path is needed.
 
 ## Open on launch
 
