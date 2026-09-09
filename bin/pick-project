@@ -14,29 +14,29 @@ on one line; unset, the picker writes nothing at all.
 
 Every setting may also come from a file under HERDR_PLUGIN_CONFIG_DIR: a
 [picker] table in this plugin's own config.toml, or the older .env. Both are
-optional and both still work. Precedence is real environment variable, then
-config.toml, then .env — see load_picker_config() for why in that order.
+optional and both still work. Under them sits defaults.toml in this plugin's
+own checkout, holding the same table. Precedence is real environment variable,
+then config.toml, then .env, then those shipped defaults — see
+load_picker_config() for why in that order.
 
 Each open project's row carries its agent status, drawn with the glyph and
 colour Herdr's own sidebar would use, read out of Herdr's config.toml. See the
 "Herdr's agent-status indicator" section below.
 
-Each new workspace opens one tab holding three labelled panes, with the cursor
-on the agent: by default a tab named "agent", Claude on the left at half the
-width, lazygit filling the top 60% of the column beside it, and a bare shell
-underneath. The picker does not build that itself. It hands each workspace it
-opens to the sibling herdr-plugin-agentic-panes-layout plugin's bin/agent-layout,
-which owns the recipe, the ten AGENT_LAYOUT_ settings that shape it, and the
-agent's name — see create_workspace() for the handoff and layout_command() for
-how the sibling is found. Claude is started plain: Herdr's own [session]
-resume_agents_on_restore (on by default) brings conversations back after a
-server restart, so nothing here passes --continue.
+Each new workspace is handed to the command in HERDR_PICKER_LAYOUT, run
+detached with the id of the workspace just opened. The picker builds no layout
+of its own and knows nothing about what that command does: panes, agents and
+their settings are the command's business, and a workspace whose command
+cannot be run still opens with the one bare pane Herdr gives it. See
+resolve_layout() for how the setting becomes an argv and create_workspace() for
+the handoff. The shipped defaults.toml is what makes an unconfigured picker lay
+its workspaces out, and it is the only file here that names any program.
 
 A linked worktree is opened as a worktree rather than as a bare directory, so
 Herdr's sidebar nests it under the repo it belongs to instead of floating it at
 top level. See open_project().
 """
-import glob, json, os, re, shutil, subprocess, sys, time
+import glob, json, os, re, shlex, shutil, subprocess, sys, time
 
 
 def load_env(path):
@@ -93,14 +93,21 @@ def read_toml(path, wanted):
         if not sep or name not in wanted:
             continue
         value = value.strip()
-        if value[:1] in "\"'":
+        if value[:1] and value[0] in "\"'":
             # Quoted: take up to the closing quote, so a trailing comment that
-            # contains no quote cannot be glued onto the value.
+            # contains no quote cannot be glued onto the value. The quotes are
+            # also what says this is a STRING, however it starts — a value
+            # opening with a brace is only a table when nothing quoted it.
             end = value.find(value[0], 1)
             value = value[1:end] if end > 0 else value[1:]
+        elif value.startswith(("[", "{")):
+            # Arrays and inline tables: skipped rather than half-parsed. This
+            # subset reads scalars, and half of a structure would be worse than
+            # none of it.
+            continue
         else:
             value = value.partition("#")[0].strip()
-        if value and not value.startswith(("[", "{")):
+        if value:
             found.setdefault(name, value)
     return found
 
@@ -110,7 +117,8 @@ def read_toml(path, wanted):
 # file and has nothing else to keep in it.
 PICKER_KEYS = {"picker.root": "HERDR_PICKER_ROOT",
                "picker.home": "HERDR_PICKER_HOME",
-               "picker.debug": "HERDR_PICKER_DEBUG"}
+               "picker.debug": "HERDR_PICKER_DEBUG",
+               "picker.layout": "HERDR_PICKER_LAYOUT"}
 
 
 def load_picker_config(path):
@@ -232,12 +240,28 @@ def resolve_root():
     return root if os.path.isdir(root) else os.path.expanduser("~")
 
 
+# THIS plugin's own checkout — not to be confused with plugin_root() below,
+# which asks Herdr about somebody else's. Derived from this file rather than
+# read from HERDR_PLUGIN_ROOT: the variable is Herdr's to inject and a run
+# started by hand has none, while __file__ is right in both cases. Used for one
+# thing, the shipped defaults below.
+OWN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # User-editable config lives in the plugin's config dir, per the Herdr docs.
 # Loaded before the settings below so the files can supply them. config.toml is
 # read FIRST because both loaders use setdefault(): see load_picker_config().
 if os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
     load_picker_config(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], "config.toml"))
     load_env(os.path.join(os.environ["HERDR_PLUGIN_CONFIG_DIR"], ".env"))
+
+# Last, so every value in it is a default a user file can beat. It is read by
+# the same loader, from the same [picker] table, in the same syntax the user
+# writes: a default is then a value to override rather than a fallback buried in
+# the code. That is also what keeps this file free of any particular program's
+# name — see resolve_layout(). A checkout without the file, or with a broken
+# one, degrades exactly like a user's: the loader answers nothing and the
+# settings keep their in-code defaults.
+load_picker_config(os.path.join(OWN_ROOT, "defaults.toml"))
 
 DEV = resolve_root()
 HOME_LABEL = os.environ.get("HERDR_PICKER_HOME", "~")
@@ -384,27 +408,19 @@ for d in ("/opt/homebrew/bin", "/usr/local/bin"):
 
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
 
-# The plugin that owns the three-pane layout, by the id in ITS manifest. The
-# picker builds no part of that layout: it opens a workspace and hands the id to
-# herdr-plugin-agentic-panes-layout's bin/agent-layout, which the sibling also
-# runs from its own worktree.created hook and from a keybinding.
+# The setting naming what each new workspace is handed to, and the two tokens
+# its value may carry. NOTHING HERE KNOWS WHAT THAT COMMAND IS: the picker reads
+# no setting belonging to it, names no program, and passes no flag of its own —
+# the whole value, flags included, is the user's, and the shipped defaults.toml
+# holds the one this plugin arrives with.
 #
-# NO AGENT_LAYOUT_ SETTING IS READ HERE, and that is the point of delegating.
-# The ten of them — _KIND, _TAB_NAME, _DIRECTION, _RATIO, _TOOL_COMMAND,
-# _TOOL_DIRECTION, _TOOL_RATIO, _AGENT_LABEL, _TOOL_LABEL and _SHELL_LABEL — are
-# one shared vocabulary documented in both READMEs, and the sibling reads them
-# for both plugins now. A value set in THIS plugin's .env still reaches it: the
-# loaders at the top of this file fold that .env into os.environ, and
-# layout_env() passes the environment through, where the sibling's own reader
-# lets a real environment variable beat its .env. So a name set here still wins
-# here, and the sibling's .env now covers what this one leaves unset.
-#
-# _RECIPE is the one name in that vocabulary neither plugin honours here: it
-# replaces the sibling's layout with an executable of the user's, and it is read
-# by the sibling's EVENT HOOK, which decides what to exec before bin/agent-layout
-# is reached. This picker runs bin/agent-layout directly, so it is not in the
-# path that setting sits on.
-LAYOUT_PLUGIN = "mikebronner.agentic-panes-layout"
+# {workspace} is substituted per workspace, in create_workspace(), because it is
+# the only part of the command that changes between two workspaces in one run.
+# {plugin:<id>} is substituted once per run, in resolve_layout(), because
+# resolving it costs a call to Herdr.
+LAYOUT_SETTING = "HERDR_PICKER_LAYOUT"
+WORKSPACE_TOKEN = "{workspace}"
+PLUGIN_TOKEN = re.compile(r"\{plugin:([^{}\s]+)\}")
 
 
 def die(msg):
@@ -1051,10 +1067,11 @@ def open_project(label, path):
     caller hands either answer to the layout identically.
 
     Falls back to `workspace create` in both the cases where the nesting cannot
-    be had: a checkout whose parent parent_repo() cannot derive, and a Herdr too
-    old to carry the command — min_herdr_version is 0.8.0 and this is not worth
-    raising, since the fallback opens the worktree exactly as every version of
-    this picker already did. Only the fallback failing is fatal, which is the
+    be had: a checkout whose parent parent_repo() cannot derive, and a Herdr
+    that answers nothing for the command. The second is kept whatever the
+    manifest's floor says, because the fallback opens the worktree exactly as
+    every version of this picker already did — a degraded row costs the user a
+    nesting, and nothing else. Only the fallback failing is fatal, which is the
     same failure the caller has always died on.
     """
     parent = parent_repo(path)
@@ -1066,15 +1083,15 @@ def open_project(label, path):
     return herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
 
 
-def layout_command():
-    """The sibling plugin's bin/agent-layout, or None when it cannot be run.
+def plugin_root(plugin_id):
+    """`plugin_id`'s own checkout directory, or None when Herdr reports none.
 
-    The path is asked for rather than guessed at. `herdr plugin list` reports
-    every linked plugin's own checkout as `plugin_root`, which is the only thing
-    that knows where the sibling was installed — it may be a GitHub install
-    under Herdr's own directory or a local link anywhere on the disk. The
-    picker's own root says nothing about it, and neither does the config
-    directory, which is Herdr's and not the plugin's.
+    Asked for rather than guessed at, which is why the setting has a token for
+    it at all. `herdr plugin list` reports every linked plugin's own checkout as
+    `plugin_root`, and that is the only thing that knows where a plugin was
+    installed — it may be a GitHub install under Herdr's own directory or a
+    local link anywhere on the disk. This plugin's root says nothing about
+    another's, and neither does the config directory, which is Herdr's.
 
     Filtered with --plugin so the answer is one plugin or nothing at all. --json
     is needed HERE and nowhere else in this file: `plugin list` prints a human
@@ -1082,130 +1099,165 @@ def layout_command():
     parses, and 0.8.2 answers an unknown id with an empty list rather than an
     error.
 
-    Executable, not merely present: the sibling is run as a program, so a file
-    that lost its mode bit is exactly as unusable as an absent one and the
-    caller's degraded path is right for both. `enabled` is deliberately NOT
-    consulted. `plugin disable` stops Herdr DISPATCHING EVENTS to a plugin,
-    which is the sibling's other way in; this is a direct call to an executable
-    and is not dispatch. Refusing to lay out a picker workspace because the
-    sibling's event hook was turned off would be a surprise from a plugin the
-    user did not touch.
+    `enabled` is deliberately NOT consulted. `plugin disable` stops Herdr
+    DISPATCHING EVENTS to a plugin; this resolves a path and then runs an
+    executable, which is not dispatch. Refusing to lay a picker workspace out
+    because some plugin's event hook was turned off would be a surprise from a
+    plugin the user did not touch.
     """
-    plugins = (herdr("plugin", "list", "--plugin", LAYOUT_PLUGIN, "--json")
+    plugins = (herdr("plugin", "list", "--plugin", plugin_id, "--json")
                or {}).get("plugins", [])
     for p in plugins:
         root = p.get("plugin_root") or ""
-        command = os.path.join(root, "bin", "agent-layout")
-        if root and os.access(command, os.X_OK):
-            return command
+        if root:
+            return root
     return None
 
 
 def resolve_layout(creating):
-    """The layout command for this whole run, saying so once when there is none.
+    """The argv for this whole run's layout command, or None with one notice.
+
+    The value of HERDR_PICKER_LAYOUT is a command line: split the way a shell
+    would split it, so flags and quoted arguments work as they read, and then
+    resolved once here rather than once per workspace. Two substitutions are
+    defined on it, and both are the picker's whole vocabulary:
+
+      {plugin:<id>}   the checkout directory Herdr reports for that plugin, so
+                      a command living inside another plugin survives being
+                      installed from GitHub or linked from anywhere on disk.
+                      Done here, since each one costs a call to Herdr.
+      {workspace}     the id of the workspace just opened. Left alone here and
+                      substituted per workspace by create_workspace().
 
     `creating` is whether anything is actually being opened. Nothing is asked of
     Herdr when it is false, so a selection that only closes workspaces costs no
-    `plugin list` call and raises no notice about a layout it was never going to
-    apply.
+    `plugin list` call and raises no notice about a command it was never going
+    to run.
 
-    The notice is per RUN, not per workspace. The sibling is a separate install
-    that nothing here declares a dependency on, so its absence is a legitimate
-    state rather than an error — but a silent one would leave the user looking
-    at a bare pane with nothing to explain it. N toasts for one missing install
-    would bury the projects they just asked for, which is why this is resolved
-    here rather than inside create_workspace().
+    NOTHING HERE IS FATAL, and every failure lands on the same degraded path:
+    no command, one notice, and workspaces that still open with the one bare
+    pane Herdr gives them. The setting is a string a user typed, so all three
+    ways it can be wrong are ordinary — unbalanced quotes, a plugin that is not
+    installed, and a command that is not an executable file. A bare pane is
+    still a usable workspace, and refusing to open the rest of a multi-select
+    over a layout would cost the user far more than the layout does.
+
+    The notice is per RUN, not per workspace: N toasts for one wrong setting
+    would bury the projects the user just asked for, which is why this is
+    resolved here rather than inside create_workspace().
+
+    An EMPTY setting is silent, and is the one absence that raises nothing. It
+    says the user wants no command run, which is a choice rather than a failure.
     """
     if not creating:
         return None
-    command = layout_command()
+    setting = os.environ.get(LAYOUT_SETTING, "").strip()
+    if not setting:
+        return None
+
+    try:
+        argv = shlex.split(setting)
+    except ValueError:
+        argv = []
+    if not argv:
+        warn(f"{LAYOUT_SETTING} is not a command line I can read, so new "
+             f"workspaces open with one bare pane: {setting}")
+        return None
+
+    missing = []
+
+    def expand(match):
+        root = plugin_root(match.group(1))
+        if not root:
+            missing.append(match.group(1))
+        return root or match.group(0)
+
+    argv = [PLUGIN_TOKEN.sub(expand, arg) for arg in argv]
+    if missing:
+        warn(f"{LAYOUT_SETTING} names the plugin {missing[0]}, which Herdr has "
+             "no checkout for, so new workspaces open with one bare pane. "
+             "Install that plugin, or point the setting somewhere else.")
+        return None
+
+    # Executable, not merely present: this is run as a program, so a file that
+    # lost its mode bit is exactly as unusable as an absent one. shutil.which()
+    # covers both spellings a user may write — a bare name found on the PATH,
+    # and a path checked where it stands — and answers None unless the result
+    # can actually be executed. Popen would otherwise raise inside a
+    # fire-and-forget call that nothing is watching.
+    command = shutil.which(argv[0])
     if not command:
-        warn(f"{LAYOUT_PLUGIN} is not installed, so new workspaces open with "
-             "one bare pane and no agent. Install it to get the agent, tool "
-             "and shell panes back.")
-    return command
+        warn(f"{LAYOUT_SETTING} names a command that cannot be run, so new "
+             f"workspaces open with one bare pane: {argv[0]}")
+        return None
+    return [command] + argv[1:]
 
 
-def layout_env(command):
-    """The environment `command` is run with: this one, with two corrections.
+def child_env():
+    """This process's environment, minus THIS plugin's own identity.
 
-    HERDR_PLUGIN_ROOT is pointed at the SIBLING's checkout. The sibling reads it
-    to find its own bin/config-env, and Herdr injects THIS plugin's root into
-    the picker, which would send it looking in the wrong repo. Deriving it from
-    the command keeps the two from disagreeing.
+    Herdr injects HERDR_PLUGIN_ROOT and HERDR_PLUGIN_CONFIG_DIR naming the
+    picker, and a Herdr plugin invoked as a command reads those two as "my
+    checkout" and "my config directory". Left in place they tell the layout
+    command that the picker's checkout holds its files and that the picker's
+    .env holds its settings, so it looks in the wrong repo and reads config
+    meant for the picker alone. Neither mistake raises: it degrades to a program
+    running on its built-in defaults, having silently ignored everything the
+    user configured for it.
 
-    HERDR_PLUGIN_CONFIG_DIR is removed, for the mirror-image reason: the sibling
-    takes it as "your config directory" and only asks Herdr for its own when the
-    variable is absent. Left in place, it would read THIS plugin's .env as
-    though it were its own.
+    Removed rather than repointed, and that is the general rule — do not leak
+    your own identity into a command you invoke — rather than a fact about any
+    particular program. A plugin run as a plain command derives its own root
+    when the variable is absent, and computing another program's paths is not
+    this file's business.
 
-    Everything else passes through, which is what keeps the shared AGENT_LAYOUT_
-    vocabulary working. A name exported in the real environment, or set in this
-    plugin's .env — which the loaders at the top of this file fold into
-    os.environ — arrives as a real environment variable and beats the sibling's
-    .env, so a value set for the picker still shapes the picker's workspaces.
+    Everything else passes through, which is how a setting the layout command
+    reads reaches it: a name exported in the real environment, or written in
+    this plugin's .env — which the loaders at the top of this file fold into
+    os.environ — arrives at the command as a real environment variable.
+
+    A copy, not os.environ itself. Popping from the live environment would
+    change what every LATER call in the same run sees, including this picker's
+    own config loaders.
     """
     env = dict(os.environ)
-    env.pop("HERDR_PLUGIN_CONFIG_DIR", None)
-    env["HERDR_PLUGIN_ROOT"] = os.path.dirname(os.path.dirname(command))
+    for var in ("HERDR_PLUGIN_ROOT", "HERDR_PLUGIN_CONFIG_DIR"):
+        env.pop(var, None)
     return env
 
 
 def create_workspace(label, path, layout):
-    """Open a workspace for `path` and have it laid out; its workspace id.
+    """Open a workspace for `path` and hand it over to be laid out; its id.
 
-    `layout` is layout_command()'s answer: the sibling plugin's bin/agent-layout,
-    or None when it is not installed, in which case the workspace still opens —
-    with the one bare pane Herdr gives it — and nothing else happens here. The
-    caller says so once per run rather than once per workspace.
+    `layout` is resolve_layout()'s answer: the argv for this run, or None when
+    there is nothing to run, in which case the workspace still opens — with the
+    one bare pane Herdr gives it — and nothing else happens here. The caller
+    says why once per run rather than once per workspace.
 
-    The layout itself is not built here and must not be. The sibling owns that
-    recipe, applies it to worktrees it creates from an event and to a keybinding
-    press, and reads the ten AGENT_LAYOUT_ settings that shape it. A second copy
-    of the same sequence in this file is what this call replaces.
+    THE WORKSPACE ID IS THE ONLY THING PASSED, wherever the setting puts its
+    {workspace} token, and no flag of this file's own goes with it. The picker
+    opens every workspace with --no-focus, so at the moment it wants one laid
+    out none of them is focused and the id is the only thing that identifies it.
+    Everything else the command needs, it reads from its own environment.
 
-    ONE ARGUMENT IS PASSED, and it is the only one this caller cannot give up:
+    DETACHED, which is what a per-workspace command has to be here: laying a
+    workspace out ends with an agent coming up, and starting an agent blocks
+    until it is ready. Waiting on that once per selected project is the stall
+    this picker exists not to have. start_new_session also keeps the command
+    alive past the popup, which exits as soon as main() returns.
 
-      --workspace   the picker opens every workspace with --no-focus, so at the
-                    moment it wants one laid out, none of them is focused —
-                    which is what agent-layout asks the API for by default.
-
-    THE AGENT NAME IS NOT PASSED, and that is what opts this picker into the
-    sibling's dedupe. Given --agent-name, the sibling hands that name to Herdr
-    verbatim and fails loudly when a live agent already holds it. Left off, it
-    derives the name from the workspace label — by the same rules this file used
-    to apply — and retries as base-2, base-3 and so on when Herdr answers
-    agent_name_taken. That arbitration is the SERVER's, so it holds across the
-    unrelated processes this caller fires detached, and against an agent a human
-    started by hand. A set held in this one process could do neither.
-
-    --no-agent is the other absent flag, and is deliberately NOT passed. It is
-    mutually exclusive with the agent, and this is the shape that detaches the
-    WHOLE call. The other shape — agent-layout run synchronously with
-    --no-agent, and `agent start` detached here — works too, and would put ten
-    herdr round trips back on the critical path of a multi-select for no gain.
-
-    DETACHED for the same reason the bare `agent start` was before it:
-    `agent start` blocks until the agent is ready, 30s by default, and
-    --timeout cannot be cut below its 3000ms minimum. Waiting on that once per
-    selected project is the stall this picker exists not to have. The layout is
-    therefore fire-and-forget, and the sibling reports its own failures as Herdr
-    toasts, which is more than the inline copy ever did.
+    Fire-and-forget therefore means the command's own failures are its own to
+    report, and nothing here reads them: its output goes to DEVNULL, because
+    this popup is about to be painted over by nothing at all.
 
     Nothing about the handoff is fatal, unlike the create above: a layout that
     does not happen leaves a usable workspace, and dying over it would abandon
     the rest of a multi-select.
 
-    Herdr emits worktree.opened for the call open_project() makes, and the
-    sibling does subscribe to that event — but it cannot act on it twice over.
-    Its hook exits on two gates before reaching the layout: the event is not
-    worktree.created, and the workspace is not focused, which a --no-focus open
-    never is. So this call stays the only thing laying the workspace out.
-
-    `label` is still taken, and is still what open_project() names the workspace
-    with. That label is what the sibling derives the agent name from, so naming
-    the workspace correctly here is the whole of this file's remaining part in
-    naming the agent.
+    `label` is what open_project() names the workspace with, and naming it
+    correctly is this file's whole remaining part in what the workspace is
+    called — a label is the only stable identity Herdr's API exposes for one,
+    and it is what a command reading the workspace back sees.
     """
     res = open_project(label, path)
     if not res:
@@ -1213,8 +1265,9 @@ def create_workspace(label, path, layout):
 
     workspace = res["workspace"]["workspace_id"]
     if layout:
-        subprocess.Popen([layout, "--workspace", workspace],
-                         env=layout_env(layout), start_new_session=True,
+        subprocess.Popen([arg.replace(WORKSPACE_TOKEN, workspace)
+                          for arg in layout],
+                         env=child_env(), start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return workspace
 

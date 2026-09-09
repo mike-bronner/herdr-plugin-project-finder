@@ -1,0 +1,41 @@
+# The defaults this plugin ships with.
+#
+# Read last, after your own config.toml and after your .env, so every value
+# here is one you can override without editing the plugin. It is the same
+# [picker] table in the same syntax you write, which is the point: a default is
+# a value to replace rather than a fallback buried in the code.
+#
+# It is also the only file in this repo that names another program. bin/pick-project
+# carries no plugin id, no executable path and no flag belonging to anything in
+# particular, so the coupling below is data you can change rather than code you
+# would have to edit.
+
+[picker]
+# What each newly opened workspace is handed to, as one command line. It is
+# split the way a shell splits one, and two substitutions are made in it:
+#
+#   {workspace}     the id of the workspace that was just opened
+#   {plugin:<id>}   the checkout directory Herdr reports for that plugin, so
+#                   the value survives an install from GitHub or a link from
+#                   anywhere on the disk
+#
+# The default hands every workspace to the sibling agentic-panes-layout plugin,
+# which owns the recipe the picker used to build inline: one tab holding the
+# agent, a tool pane and a shell, and the agent's own name. Its README is where
+# the panes, the ratios and the AGENT_LAYOUT_ settings that reshape them are
+# written down. The picker reads none of them and passes the whole environment
+# through, so a value you export, or write in this plugin's .env, reaches it.
+#
+# Two of its flags are deliberately NOT passed here. --agent-name would take it
+# off its own dedupe: left off it derives the name from the workspace label and
+# retries as base-2, base-3 when Herdr answers agent_name_taken, and that
+# arbitration is the server's, so it holds across the detached processes the
+# picker fires and against an agent you started by hand. --no-agent would stop
+# it starting the agent at all, which would put a blocking agent start per
+# project back on the critical path of a multi-select.
+#
+# Nothing lays a picked workspace out twice. That plugin also subscribes to
+# worktree events, and its hook exits on two gates before reaching the layout:
+# the event is not worktree.created, and the workspace is not focused, which a
+# workspace the picker opened never is.
+layout = "{plugin:mikebronner.agentic-panes-layout}/bin/agent-layout --workspace {workspace}"

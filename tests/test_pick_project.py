@@ -48,6 +48,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "bin", "pick-project")
 MANIFEST = os.path.join(HERE, "..", "herdr-plugin.toml")
+DEFAULTS = os.path.join(HERE, "..", "defaults.toml")
 loader = importlib.machinery.SourceFileLoader("pick_project", SCRIPT)
 spec = importlib.util.spec_from_loader("pick_project", loader)
 pp = importlib.util.module_from_spec(spec)
@@ -220,13 +221,15 @@ class CreateWorkspaceHarness:
 
     # What open_project() answers with. The workspace id is the only field read
     # now: the tab id and the root pane id went out with the splits, and the
-    # sibling asks Herdr for whatever it needs from the workspace id alone.
+    # layout command asks Herdr for whatever else it needs from that id.
     RES = {"workspace": {"workspace_id": "w9"}}
 
-    # A resolved layout_command(), which is an absolute path to the SIBLING
-    # plugin's checkout. Its two parent directories are read by layout_env(),
-    # so it is a real-looking path rather than a bare name.
-    LAYOUT = "/x/panes/bin/agent-layout"
+    # A resolved layout setting, as resolve_layout() answers with one: an argv
+    # whose first element is an executable path, still carrying the {workspace}
+    # token. The command is a made-up one on purpose — nothing in the picker
+    # knows which program this is, so a test that used the real default would
+    # be asserting the default rather than the mechanism.
+    LAYOUT = ["/x/tool/bin/lay", "--space", pp.WORKSPACE_TOKEN, "--quiet"]
 
     def create(self, res=RES, layout=LAYOUT, label="proj", path="/x/proj"):
         """(workspace id, the herdr calls, the Popen mock) from ONE create.
@@ -242,12 +245,12 @@ class CreateWorkspaceHarness:
         return wid, [c.args for c in h.call_args_list], popen
 
     def handoff(self, **kwargs):
-        """The argv the sibling plugin is fired with, from one create."""
+        """The argv the layout command is fired with, from one create."""
         return self.create(**kwargs)[2].call_args.args[0]
 
 
 class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
-    """Opening the workspace, and handing it to the sibling to lay out."""
+    """Opening the workspace, and handing it to the layout command."""
 
     def test_the_opened_workspaces_id_is_returned(self):
         wid, calls, _ = self.create()
@@ -269,17 +272,17 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_no_agent_is_started_here_either(self):
-        # `agent start` moved into the sibling with the panes. The detached
-        # process this fires is the sibling itself, never herdr.
+        # `agent start` went out with the panes. The detached process this
+        # fires is the configured command itself, never herdr.
         argv = self.handoff()
-        self.assertEqual(argv[0], self.LAYOUT)
+        self.assertEqual(argv[0], self.LAYOUT[0])
         self.assertNotIn("start", argv)
 
     def test_the_workspace_is_opened_before_it_is_handed_over(self):
-        # The sibling is given a workspace id, so there is nothing to hand over
+        # The command is given a workspace id, so there is nothing to hand over
         # until the create has answered. Ordering the two the other way round
         # is not a thing that raises — it is a NameError-free run against an id
-        # that does not exist yet, reported only as a toast from the sibling.
+        # that does not exist yet, reported by nobody.
         manager = mock.Mock()
         with mock.patch.object(pp, "herdr", return_value=self.RES) as h, \
              mock.patch.object(pp.subprocess, "Popen") as popen, \
@@ -290,10 +293,10 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
         self.assertEqual([c[0] for c in manager.mock_calls], ["herdr", "popen"])
 
     def test_the_label_is_what_the_workspace_is_opened_under(self):
-        # This file no longer derives the agent name, and the sibling derives it
-        # from the workspace LABEL. So the label reaching Herdr unchanged is the
-        # whole of the picker's remaining part in naming the agent: pass some
-        # other string here and every agent comes up under the wrong name.
+        # The label is the only stable identity Herdr's API exposes for a
+        # workspace, and it is what a layout command reading the workspace back
+        # sees. So the label reaching Herdr unchanged is the whole of the
+        # picker's remaining part in what a new workspace is called.
         _, calls, _ = self.create(label="my-proj")
         self.assertEqual(calls[0][calls[0].index("--label") + 1], "my-proj")
 
@@ -310,16 +313,15 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
         self.assertEqual(wid, "w9")
         self.assertEqual(calls[0][:2], ("worktree", "open"))
         self.assertEqual(len(calls), 1)
-        self.assertEqual(popen.call_args.args[0][:3],
-                         [self.LAYOUT, "--workspace", "w9"])
+        self.assertEqual(popen.call_args.args[0],
+                         ["/x/tool/bin/lay", "--space", "w9", "--quiet"])
 
-    def test_no_sibling_still_opens_the_workspace_and_fires_nothing(self):
-        # The absent-sibling path at this level: the sibling is a separate
-        # install that nothing here declares a dependency on, so `layout` being
-        # None is a legitimate state and not an error. A workspace with one
-        # bare pane is still a workspace, and dying over the missing layout
-        # would abandon the rest of a multi-select over a plugin the user never
-        # asked for. The notice is the CALLER's job — see ResolveLayout.
+    def test_no_layout_command_still_opens_the_workspace_and_fires_nothing(self):
+        # The degraded path at this level: `layout` being None is every way the
+        # setting can fail to resolve, and a legitimate state rather than an
+        # error. A workspace with one bare pane is still a workspace, and dying
+        # over a layout would abandon the rest of a multi-select. Saying why is
+        # the CALLER's job — see ResolveLayout.
         wid, calls, popen = self.create(layout=None)
         self.assertEqual(wid, "w9")
         self.assertEqual(len(calls), 1)
@@ -329,131 +331,106 @@ class CreateWorkspace(CreateWorkspaceHarness, unittest.TestCase):
 class LayoutHandoff(CreateWorkspaceHarness, unittest.TestCase):
     """The call that replaces the layout this file used to build.
 
-    One flag and nothing else, run detached with a corrected environment. Each
-    part of that is load-bearing and none of it raises when it is wrong: a
-    missing --workspace lays out whichever workspace happens to be focused, an
-    --agent-name added back takes the sibling off its own dedupe and collides
-    two agents in one multi-select, and a synchronous call stalls the picker for
-    as long as the agent takes to come up. All three still open the workspaces.
+    The resolved argv with one substitution made in it, run detached in an
+    environment stripped of this plugin's identity. Each part is load-bearing
+    and none of it raises when it is wrong: an unsubstituted {workspace} hands
+    the command a token instead of an id, a synchronous call stalls the picker
+    for as long as the agent behind it takes to come up, and a leaked
+    HERDR_PLUGIN_CONFIG_DIR feeds the command this plugin's settings as its
+    own. All three still open the workspaces.
     """
 
-    def test_the_sibling_is_run_with_the_workspace_and_nothing_else(self):
-        self.assertEqual(self.handoff(), [self.LAYOUT, "--workspace", "w9"])
+    def test_the_resolved_argv_is_run_with_the_workspace_substituted(self):
+        self.assertEqual(self.handoff(),
+                         ["/x/tool/bin/lay", "--space", "w9", "--quiet"])
 
     def test_the_workspace_handed_over_is_the_one_that_was_opened(self):
         # Held against the create's own answer rather than against "w9", so a
         # handoff that passed some other id could not satisfy it.
         wid, _, popen = self.create()
         argv = popen.call_args.args[0]
-        self.assertEqual(argv[argv.index("--workspace") + 1], wid)
+        self.assertEqual(argv[argv.index("--space") + 1], wid)
 
-    def test_no_agent_name_is_passed(self):
-        # The point of this handoff. Given --agent-name the sibling hands that
-        # name to Herdr verbatim and fails loudly when a live agent holds it;
-        # left off, it derives the name from the workspace label and retries as
-        # base-2, base-3 on agent_name_taken. Passing a name here — even a
-        # correct one — is what opts the picker back out of that dedupe, and
-        # nothing about it raises: it shows up as one pane of a multi-select
-        # missing its Claude.
-        self.assertNotIn("--agent-name", self.handoff())
+    def test_the_token_is_substituted_wherever_it_appears(self):
+        # The token's position is the user's, not this file's: it may be the
+        # whole of an argument, or part of one, and there may be more than one.
+        argv = self.handoff(layout=["/x/tool/bin/lay", "--space=" + pp.WORKSPACE_TOKEN,
+                                    "--log=/tmp/" + pp.WORKSPACE_TOKEN + ".log"])
+        self.assertEqual(argv, ["/x/tool/bin/lay", "--space=w9",
+                                "--log=/tmp/w9.log"])
 
-    def test_no_agent_flag_is_passed(self):
-        # --no-agent stops the sibling starting an agent at all, and this is
-        # deliberately the shape that keeps the agent on the sibling's side. The
-        # other shape works too and would put ten herdr round trips back on the
-        # critical path of a multi-select.
-        self.assertNotIn("--no-agent", self.handoff())
+    def test_a_command_with_no_token_is_run_unchanged(self):
+        # Nothing forces the token into the setting. A command that finds its
+        # own workspace, or wants none, is a value the user is allowed to write.
+        self.assertEqual(self.handoff(layout=["/x/tool/bin/lay"]),
+                         ["/x/tool/bin/lay"])
+
+    def test_no_flag_of_this_files_own_is_added(self):
+        # The whole argv is the user's. A flag appended here would reach every
+        # command the setting can name, including one that has no such flag.
+        self.assertEqual(len(self.handoff()), len(self.LAYOUT))
 
     def test_the_call_is_detached_and_its_output_discarded(self):
-        # `agent start` blocks until the agent is ready, 30s by default, and
-        # --timeout cannot be cut below its 3000ms minimum. Waiting on that
-        # once per selected project is the stall this picker exists not to
-        # have. start_new_session also keeps the sibling alive past the popup,
-        # which exits as soon as main() returns.
+        # Laying a workspace out ends with an agent coming up, and starting one
+        # blocks until it is ready — 30s by default, and no timeout below its
+        # 3000ms minimum. Waiting on that once per selected project is the
+        # stall this picker exists not to have. start_new_session also keeps
+        # the command alive past the popup, which exits as soon as main()
+        # returns.
         _, _, popen = self.create()
         kwargs = popen.call_args.kwargs
         self.assertIs(kwargs["start_new_session"], True)
         self.assertIs(kwargs["stdout"], pp.subprocess.DEVNULL)
         self.assertIs(kwargs["stderr"], pp.subprocess.DEVNULL)
 
-    def test_the_sibling_is_run_with_the_corrected_environment(self):
-        # The two corrections themselves are LayoutEnv's; this pins that the
-        # handoff uses them rather than inheriting this process's environment,
-        # which would send the sibling looking for its own files in THIS
-        # plugin's checkout and config directory.
+    def test_the_command_is_run_with_the_stripped_environment(self):
+        # The strip itself is ChildEnv's; this pins that the handoff uses it
+        # rather than inheriting this process's environment, which would tell
+        # the command that THIS plugin's checkout and config directory are its
+        # own.
         _, _, popen = self.create()
-        self.assertEqual(popen.call_args.kwargs["env"],
-                         pp.layout_env(self.LAYOUT))
+        self.assertEqual(popen.call_args.kwargs["env"], pp.child_env())
 
 
-class LayoutCommand(unittest.TestCase):
-    """Finding the sibling plugin's executable, and failing closed without it.
+class PluginRoot(unittest.TestCase):
+    """Resolving {plugin:<id>} to a checkout directory, and failing closed.
 
-    The path is asked for rather than guessed at, because nothing in this
-    plugin knows where the sibling was installed: it may be a GitHub install
-    under Herdr's own directory or a local link anywhere on the disk.
+    Asked for rather than guessed at, because nothing in this plugin knows
+    where another one was installed: it may be a GitHub install under Herdr's
+    own directory or a local link anywhere on the disk.
     """
 
-    def call(self, reply, executable=True):
-        with mock.patch.object(pp, "herdr", return_value=reply) as h, \
-             mock.patch.object(pp.os, "access", return_value=executable):
-            got = pp.layout_command()
+    def call(self, reply):
+        with mock.patch.object(pp, "herdr", return_value=reply) as h:
+            got = pp.plugin_root("some.plugin")
         return got, h.call_args.args if h.call_args else None
 
-    def test_the_sibling_is_asked_for_by_its_own_plugin_id(self):
+    def test_the_plugin_is_asked_for_by_the_id_it_was_given(self):
         # --json because `plugin list` prints a human table by default, unlike
         # every other command herdr() parses. --plugin so the answer is one
         # plugin or nothing, rather than a list to search.
-        _, args = self.call({"plugins": [{"plugin_root": "/x/panes"}]})
+        _, args = self.call({"plugins": [{"plugin_root": "/x/tool"}]})
         self.assertEqual(args, ("plugin", "list", "--plugin",
-                                "mikebronner.agentic-panes-layout", "--json"))
+                                "some.plugin", "--json"))
 
-    def test_the_id_is_the_siblings_and_not_this_plugins(self):
-        # A copy-paste of this plugin's own id here would ask Herdr for the
-        # picker, find it, and hand every workspace to a bin/agent-layout that
-        # does not exist in this checkout.
-        self.assertEqual(pp.LAYOUT_PLUGIN, "mikebronner.agentic-panes-layout")
-        with open(MANIFEST, encoding="utf-8") as f:
-            self.assertNotIn(pp.LAYOUT_PLUGIN, f.read())
-
-    def test_the_command_is_the_executable_under_the_reported_root(self):
-        got, _ = self.call({"plugins": [{"plugin_root": "/x/panes"}]})
-        self.assertEqual(got, os.path.join("/x/panes", "bin", "agent-layout"))
+    def test_the_reported_root_is_returned(self):
+        self.assertEqual(self.call({"plugins": [{"plugin_root": "/x/tool"}]})[0],
+                         "/x/tool")
 
     def test_no_plugin_row_yields_none(self):
-        # The first shape of an absent sibling, and the ordinary one: 0.8.2
-        # answers an unknown --plugin id with an empty list rather than an
-        # error, so nothing here raises and nothing distinguishes "not
-        # installed" from "installed" except this emptiness.
+        # The ordinary shape of "not installed": 0.8.2 answers an unknown
+        # --plugin id with an empty list rather than an error, so nothing here
+        # raises and nothing else distinguishes the two.
         self.assertIsNone(self.call({"plugins": []})[0])
 
-    def test_a_command_that_is_not_executable_yields_none(self):
-        # The second shape: the sibling is installed and its file lost the mode
-        # bit, or the checkout is there and bin/agent-layout is not. It is run
-        # as a program, so a file that cannot be executed is exactly as unusable
-        # as an absent one and the caller's degraded path is right for both.
-        self.assertIsNone(
-            self.call({"plugins": [{"plugin_root": "/x/panes"}]},
-                      executable=False)[0])
-
-    def test_the_executable_bit_is_what_is_asked_for(self):
-        # os.F_OK would pass a present-but-unrunnable file straight through to
-        # Popen, which raises PermissionError inside a fire-and-forget call
-        # nothing is watching.
-        with mock.patch.object(pp, "herdr",
-                               return_value={"plugins": [{"plugin_root": "/x/p"}]}), \
-             mock.patch.object(pp.os, "access", return_value=True) as access:
-            pp.layout_command()
-        self.assertEqual(access.call_args.args[1], os.X_OK)
-
     def test_a_row_with_no_root_yields_none(self):
-        # An empty root would join to "bin/agent-layout", a RELATIVE path that
-        # os.access resolves against the picker's own cwd.
+        # An empty root would expand the token to nothing, leaving a RELATIVE
+        # command path resolved against the picker's own cwd.
         self.assertIsNone(self.call({"plugins": [{"plugin_root": ""}]})[0])
         self.assertIsNone(self.call({"plugins": [{}]})[0])
 
     def test_an_explicitly_null_root_yields_none(self):
-        # A null is not a missing key, and os.path.join would raise on it.
+        # A null is not a missing key, and it would be substituted as "None".
         self.assertIsNone(self.call({"plugins": [{"plugin_root": None}]})[0])
 
     def test_a_reply_with_no_plugins_key_yields_none(self):
@@ -462,138 +439,200 @@ class LayoutCommand(unittest.TestCase):
     def test_an_unreachable_server_yields_none_rather_than_raising(self):
         # herdr() answers None for a non-zero exit or unparseable output. The
         # picker is mid-run with workspaces to open, so this degrades like any
-        # other absent sibling.
+        # other unresolvable setting.
         self.assertIsNone(self.call(None)[0])
 
-    def test_a_disabled_plugin_is_still_run(self):
-        # `plugin disable` stops Herdr DISPATCHING EVENTS to a plugin, which is
-        # the sibling's other way in. This is a direct call to an executable and
-        # is not dispatch, so refusing to lay out a picker workspace because the
-        # sibling's event hook was turned off would be a surprise from a plugin
-        # the user did not touch.
-        got, _ = self.call({"plugins": [{"plugin_root": "/x/panes",
+    def test_a_disabled_plugin_is_still_resolved(self):
+        # `plugin disable` stops Herdr DISPATCHING EVENTS to a plugin. This
+        # resolves a path and then runs an executable, which is not dispatch,
+        # so refusing to lay a picker workspace out because some plugin's event
+        # hook was turned off would be a surprise from a plugin the user did
+        # not touch.
+        got, _ = self.call({"plugins": [{"plugin_root": "/x/tool",
                                          "enabled": False}]})
-        self.assertEqual(got, "/x/panes/bin/agent-layout")
+        self.assertEqual(got, "/x/tool")
 
 
 class ResolveLayout(unittest.TestCase):
-    """Resolving the sibling once for a whole run, and saying so when it is not
-    there.
+    """The setting turned into an argv, once per run, or one notice instead.
 
-    The sibling is a separate install and nothing in herdr-plugin.toml declares
-    a dependency on it, so its absence is a legitimate state rather than a bug.
-    A silent absence would still be wrong: the user asked for a project and got
-    a bare pane, with nothing on screen to explain it.
+    Every value here is a string the user typed, so being wrong is ordinary
+    rather than exceptional. All three ways it can be wrong land on the same
+    degraded path: no command, one notice, and workspaces that still open. A
+    silent failure would be the wrong shape too — the user asked for a project
+    and got a bare pane, with nothing on screen to explain it.
     """
 
-    def resolve(self, creating, command):
-        with mock.patch.object(pp, "layout_command",
-                               return_value=command) as lc, \
+    def resolve(self, setting, creating=True, root="/x/tool", executable=True):
+        env = {} if setting is None else {"HERDR_PICKER_LAYOUT": setting}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(pp, "plugin_root", return_value=root) as pr, \
+             mock.patch.object(pp.shutil, "which",
+                               side_effect=lambda c: c if executable else None), \
              mock.patch.object(pp, "warn") as warn:
             got = pp.resolve_layout(creating)
-        return got, lc, warn
+        return got, pr, warn
 
-    def test_a_present_sibling_is_returned_and_says_nothing(self):
-        got, _, warn = self.resolve(True, "/x/panes/bin/agent-layout")
-        self.assertEqual(got, "/x/panes/bin/agent-layout")
+    def test_a_plain_command_line_is_split_the_way_a_shell_splits_one(self):
+        got, _, warn = self.resolve("/x/tool/lay --space {workspace} --quiet")
+        self.assertEqual(got, ["/x/tool/lay", "--space", "{workspace}",
+                               "--quiet"])
         warn.assert_not_called()
 
-    def test_an_absent_sibling_yields_none_and_warns_once(self):
-        got, _, warn = self.resolve(True, None)
+    def test_a_quoted_argument_survives_as_one_argument(self):
+        # The reason the value is split rather than passed to a shell: a path
+        # with a space in it is one argument, and no shell gets to interpret
+        # anything else in the string.
+        got, _, _ = self.resolve('"/x/my tool/lay" --title "two words"')
+        self.assertEqual(got, ["/x/my tool/lay", "--title", "two words"])
+
+    def test_the_workspace_token_is_left_for_the_caller(self):
+        # It changes per workspace, and this runs once per run.
+        got, _, _ = self.resolve("/x/tool/lay {workspace}")
+        self.assertIn(pp.WORKSPACE_TOKEN, got)
+
+    def test_a_plugin_token_becomes_the_reported_checkout(self):
+        got, pr, warn = self.resolve(
+            "{plugin:some.plugin}/bin/lay --space {workspace}")
+        self.assertEqual(got, ["/x/tool/bin/lay", "--space", "{workspace}"])
+        self.assertEqual(pr.call_args.args, ("some.plugin",))
+        warn.assert_not_called()
+
+    def test_an_uninstalled_plugin_yields_none_and_names_it_once(self):
+        # A toast reading "the layout could not be applied" tells the user
+        # nothing they can act on. The id is what `herdr plugin install` takes,
+        # and it is the user's own setting being quoted back at them.
+        got, _, warn = self.resolve("{plugin:some.plugin}/bin/lay", root=None)
+        self.assertIsNone(got)
+        self.assertEqual(warn.call_count, 1)
+        self.assertIn("some.plugin", warn.call_args.args[0])
+
+    def test_a_command_that_cannot_be_run_yields_none_and_names_it(self):
+        # Installed and not executable, or simply mistyped: it is run as a
+        # program, so a file that cannot be executed is exactly as unusable as
+        # an absent one. Popen would otherwise raise inside a fire-and-forget
+        # call that nothing is watching.
+        got, _, warn = self.resolve("/x/tool/lay", executable=False)
+        self.assertIsNone(got)
+        self.assertEqual(warn.call_count, 1)
+        self.assertIn("/x/tool/lay", warn.call_args.args[0])
+
+    def test_a_bare_name_is_resolved_on_the_path(self):
+        # The other spelling a user may write. shutil.which() covers both, and
+        # what Popen is handed is the resolved path either way.
+        with mock.patch.dict(os.environ, {"HERDR_PICKER_LAYOUT": "lay"},
+                             clear=True), \
+             mock.patch.object(pp.shutil, "which", return_value="/opt/bin/lay"), \
+             mock.patch.object(pp, "warn"):
+            self.assertEqual(pp.resolve_layout(True), ["/opt/bin/lay"])
+
+    def test_an_unparseable_command_line_yields_none_and_warns(self):
+        # An unbalanced quote is a typo in a string the user typed, not a
+        # reason to stop opening their projects.
+        got, _, warn = self.resolve('/x/tool/lay --title "unclosed')
         self.assertIsNone(got)
         self.assertEqual(warn.call_count, 1)
 
-    def test_the_notice_names_the_plugin_to_install(self):
-        # A toast reading "the layout plugin is missing" tells the user nothing
-        # they can act on. The id is what `herdr plugin install` takes.
-        _, _, warn = self.resolve(True, None)
-        self.assertIn(pp.LAYOUT_PLUGIN, warn.call_args.args[0])
+    def test_an_unset_setting_yields_none_in_silence(self):
+        # Nothing to run is not a failure, so there is nothing to report. It is
+        # also not the shipped state: defaults.toml supplies a value.
+        got, pr, warn = self.resolve(None)
+        self.assertIsNone(got)
+        pr.assert_not_called()
+        warn.assert_not_called()
+
+    def test_an_emptied_setting_yields_none_in_silence(self):
+        # Emptying the setting is how a user says they want no command run at
+        # all, which is a choice rather than something to be warned about.
+        for value in ("", "   "):
+            got, _, warn = self.resolve(value)
+            self.assertIsNone(got, value)
+            warn.assert_not_called()
 
     def test_a_run_that_creates_nothing_asks_herdr_nothing(self):
         # A selection that only CLOSES workspaces costs no `plugin list` call.
-        # And it raises no notice: a layout that was never going to be applied
-        # is not something to interrupt the user about.
-        got, lc, warn = self.resolve(False, "/x/panes/bin/agent-layout")
+        # And it raises no notice: a command that was never going to run is not
+        # something to interrupt the user about.
+        got, pr, warn = self.resolve("{plugin:some.plugin}/bin/lay",
+                                     creating=False)
         self.assertIsNone(got)
-        lc.assert_not_called()
+        pr.assert_not_called()
         warn.assert_not_called()
 
-    def test_a_run_that_creates_nothing_is_silent_even_with_no_sibling(self):
-        got, lc, warn = self.resolve(False, None)
+    def test_a_run_that_creates_nothing_is_silent_with_a_broken_setting(self):
+        got, pr, warn = self.resolve('"unclosed', creating=False)
         self.assertIsNone(got)
-        lc.assert_not_called()
+        pr.assert_not_called()
         warn.assert_not_called()
 
     def test_the_notice_goes_to_both_channels_warn_owns(self):
-        # Not a duplicate of the warn() tests elsewhere: it pins that the
-        # absent sibling is reported through warn() rather than through die(),
-        # which would stop the run, or through a bare stderr write, which the
-        # popup destroys before it can be read.
-        with mock.patch.object(pp, "layout_command", return_value=None), \
+        # Not a duplicate of the warn() tests elsewhere: it pins that a setting
+        # that will not resolve is reported through warn() rather than through
+        # die(), which would stop the run, or through a bare stderr write,
+        # which the popup destroys before it can be read.
+        with mock.patch.dict(os.environ,
+                             {"HERDR_PICKER_LAYOUT": "{plugin:some.plugin}/lay"},
+                             clear=True), \
+             mock.patch.object(pp, "plugin_root", return_value=None), \
              mock.patch.object(pp, "HERDR", "/bin/herdr"), \
              mock.patch.object(pp.subprocess, "run") as run, \
              mock.patch.object(pp.sys, "stderr", io.StringIO()) as err:
             pp.resolve_layout(True)
-        self.assertIn(pp.LAYOUT_PLUGIN, err.getvalue())
+        self.assertIn("some.plugin", err.getvalue())
         self.assertEqual(run.call_args.args[0][:2],
                          ["/bin/herdr", "notification"])
 
 
-class LayoutEnv(unittest.TestCase):
-    """The environment the sibling is run with: this one, with two corrections.
+class ChildEnv(unittest.TestCase):
+    """The environment the layout command is run with: this one, minus this
+    plugin's own identity.
 
-    Both corrections exist because the sibling reads the same two variables
-    this plugin was handed by Herdr, and would read them as its own. Neither
-    mistake raises: the sibling would find no bin/config-env under this
-    plugin's root and lay out on its built-in defaults, having silently ignored
-    every setting the user wrote.
+    Herdr injects both variables naming the PICKER, and a plugin invoked as a
+    command reads them as its own. Neither mistake raises: the command would
+    find none of its files under this plugin's root and run on its built-in
+    defaults, having silently ignored every setting the user wrote for it.
     """
-
-    COMMAND = "/x/panes/bin/agent-layout"
 
     def env(self, base):
         with mock.patch.dict(os.environ, base, clear=True):
-            return pp.layout_env(self.COMMAND)
+            return pp.child_env()
 
-    def test_the_plugin_root_is_repointed_at_the_siblings_checkout(self):
-        # Herdr injects THIS plugin's root, which is where the sibling would
-        # otherwise look for its own bin/config-env. Derived from the command
-        # so the two cannot disagree.
-        env = self.env({"HERDR_PLUGIN_ROOT": "/x/picker"})
-        self.assertEqual(env["HERDR_PLUGIN_ROOT"], "/x/panes")
-
-    def test_the_root_is_set_even_when_this_process_has_none(self):
-        self.assertEqual(self.env({})["HERDR_PLUGIN_ROOT"], "/x/panes")
+    def test_the_plugin_root_is_dropped(self):
+        # Dropped rather than repointed: a plugin run as a plain command
+        # derives its own root when the variable is absent, and computing
+        # another program's paths is not this file's business.
+        self.assertNotIn("HERDR_PLUGIN_ROOT",
+                         self.env({"HERDR_PLUGIN_ROOT": "/x/picker"}))
 
     def test_the_config_dir_is_dropped(self):
-        # The mirror image: the sibling takes HERDR_PLUGIN_CONFIG_DIR as "your
+        # The other half: a plugin takes HERDR_PLUGIN_CONFIG_DIR as "your
         # config directory" and only asks Herdr for its own when the variable
         # is absent. Left in place, it would read THIS plugin's .env as its own
         # and pick up settings meant for the picker alone.
-        env = self.env({"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/config"})
-        self.assertNotIn("HERDR_PLUGIN_CONFIG_DIR", env)
+        self.assertNotIn("HERDR_PLUGIN_CONFIG_DIR",
+                         self.env({"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/cfg"}))
 
-    def test_an_absent_config_dir_is_not_an_error(self):
-        self.assertNotIn("HERDR_PLUGIN_CONFIG_DIR", self.env({}))
+    def test_neither_being_set_is_an_error(self):
+        self.assertEqual(self.env({}), {})
 
     def test_everything_else_passes_through(self):
-        # What keeps the shared AGENT_LAYOUT_ vocabulary working now that the
-        # picker reads none of it. A name exported in the real environment, or
-        # written in this plugin's .env — which the loaders at the top of the
-        # script fold into os.environ — arrives at the sibling as a real
-        # environment variable and beats the sibling's own .env.
-        env = self.env({"AGENT_LAYOUT_RATIO": "0.3", "PATH": "/usr/bin"})
-        self.assertEqual(env["AGENT_LAYOUT_RATIO"], "0.3")
+        # How a setting the layout command reads reaches it. A name exported in
+        # the real environment, or written in this plugin's .env — which the
+        # loaders at the top of the script fold into os.environ — arrives as a
+        # real environment variable. The names here are ones nothing reads, so
+        # this cannot pass by knowing any particular vocabulary.
+        env = self.env({"SOME_TOOL_RATIO": "0.3", "PATH": "/usr/bin"})
+        self.assertEqual(env["SOME_TOOL_RATIO"], "0.3")
         self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_the_process_environment_is_not_mutated(self):
-        # A copy, not os.environ itself. Popping the config dir out of the live
-        # environment would change what every LATER call in the same run sees,
-        # including this picker's own config loaders.
+        # A copy, not os.environ itself. Popping from the live environment
+        # would change what every LATER call in the same run sees, including
+        # this picker's own config loaders.
         with mock.patch.dict(os.environ,
                              {"HERDR_PLUGIN_CONFIG_DIR": "/x/picker/config",
                               "HERDR_PLUGIN_ROOT": "/x/picker"}, clear=True):
-            pp.layout_env(self.COMMAND)
+            pp.child_env()
             self.assertEqual(os.environ["HERDR_PLUGIN_CONFIG_DIR"],
                              "/x/picker/config")
             self.assertEqual(os.environ["HERDR_PLUGIN_ROOT"], "/x/picker")
@@ -601,16 +640,22 @@ class LayoutEnv(unittest.TestCase):
 
 class LayoutIsResolvedOncePerRun(unittest.TestCase):
     """What driving main() shows that a unit test of resolve_layout() cannot:
-    how many times a whole selection resolves the sibling, and how many notices
-    one absent install produces.
+    how many times a whole selection resolves the setting, and how many notices
+    one wrong value produces.
 
-    N toasts for one missing plugin would bury the projects the user just asked
+    N toasts for one wrong setting would bury the projects the user just asked
     for, which is why the resolution sits in main() and not in
     create_workspace(). Nothing about that placement raises if it moves.
     """
 
-    def run_main(self, chosen, command):
-        with mock.patch.dict(os.environ, {}, clear=True), \
+    SETTING = "{plugin:some.plugin}/bin/lay --space {workspace}"
+
+    def run_main(self, chosen, root):
+        with mock.patch.dict(os.environ,
+                             {"HERDR_PICKER_LAYOUT": self.SETTING,
+                              "PATH": "/usr/bin"}, clear=True), \
+             mock.patch.object(pp, "plugin_root", return_value=root) as lc, \
+             mock.patch.object(pp.shutil, "which", side_effect=lambda c: c), \
              mock.patch.object(pp, "HERDR", "/bin/herdr"), \
              mock.patch.object(pp, "ensure_fzf", return_value=True), \
              mock.patch.object(pp, "repos", return_value=["/x/a", "/x/b"]), \
@@ -619,7 +664,6 @@ class LayoutIsResolvedOncePerRun(unittest.TestCase):
              mock.patch.object(pp, "order_rows", return_value=([], [])), \
              mock.patch.object(pp, "build_lines", return_value=[]), \
              mock.patch.object(pp, "parse_selection", return_value=chosen), \
-             mock.patch.object(pp, "layout_command", return_value=command) as lc, \
              mock.patch.object(pp, "warn") as warn, \
              mock.patch.object(pp, "herdr",
                                return_value=CreateWorkspaceHarness.RES), \
@@ -628,15 +672,14 @@ class LayoutIsResolvedOncePerRun(unittest.TestCase):
             pp.main()
         return lc, warn, popen
 
-    def test_two_new_workspaces_resolve_the_sibling_once(self):
-        lc, warn, popen = self.run_main(["/x/a", "/x/b"],
-                                        "/x/panes/bin/agent-layout")
+    def test_two_new_workspaces_resolve_the_setting_once(self):
+        lc, warn, popen = self.run_main(["/x/a", "/x/b"], "/x/tool")
         self.assertEqual(lc.call_count, 1)
         self.assertEqual(popen.call_count, 2)
         warn.assert_not_called()
 
-    def test_an_absent_sibling_warns_once_for_two_workspaces(self):
-        # The user is told about one missing install one time, and still gets
+    def test_a_setting_that_will_not_resolve_warns_once_for_two_workspaces(self):
+        # The user is told about one wrong setting one time, and still gets
         # both projects.
         lc, warn, popen = self.run_main(["/x/a", "/x/b"], None)
         self.assertEqual(lc.call_count, 1)
@@ -650,88 +693,144 @@ class LayoutIsResolvedOncePerRun(unittest.TestCase):
         popen.assert_not_called()
 
 
-class LayoutSettings(unittest.TestCase):
-    """The ten AGENT_LAYOUT_ settings: documented here, applied by the sibling.
+class ThePickerNamesNoProgram(unittest.TestCase):
+    """bin/pick-project knows nothing about any particular plugin.
 
-    They carry the sibling herdr-plugin-agentic-panes-layout's prefix rather
-    than this plugin's HERDR_PICKER_ one because they are ONE vocabulary for one
-    layout, and both READMEs promise that a value learned in either place reads
-    the same in the other. That promise survived the delegation: what changed is
-    who applies them, not what they are called. So this class documents them and
-    asserts the inverse of what it used to — that the picker reads none of them
-    itself, and passes the environment carrying them straight through.
+    That is the property the layout setting exists for, and the one that decays
+    quietly: a plugin id in a comment, a path join onto someone's bin/, a flag
+    passed because the current default happens to take it, or a setting read on
+    another plugin's behalf all work perfectly while that one plugin is
+    installed, and each one puts this repo back in the business of tracking
+    another repo's file layout.
+
+    So the whole coupling is one line of data, in defaults.toml, and this holds
+    the script to none of it. The tokens below are the ones the picker's own
+    default is written in — a default is exactly where such knowledge hides.
     """
 
-    DEFAULTS = {"KIND": "claude", "TAB_NAME": "agent",
-                "DIRECTION": "right", "RATIO": "0.5",
-                "TOOL_COMMAND": "lazygit", "TOOL_DIRECTION": "down",
-                "TOOL_RATIO": "0.6", "AGENT_LABEL": "agent",
-                "TOOL_LABEL": "lazygit", "SHELL_LABEL": "shell"}
+    FOREIGN = ("agentic-panes-layout", "agent-layout", "AGENT_LAYOUT",
+               "mikebronner.", "--workspace", "--agent-name", "--no-agent")
 
-    README = os.path.join(HERE, "..", "README.md")
-
-    def test_no_layout_setting_is_read_by_this_plugin(self):
-        # The inverse of the assertion this used to make, and the point of
-        # delegating: one reader for one layout. A setting read here as well
-        # would be applied twice, from two files that cannot see each other,
-        # and the picker's copy would win by racing the sibling's.
-        #
-        # Read from the source rather than from the module, because a constant
-        # bound at import leaves nothing to observe afterwards.
+    def source(self):
         with open(pp.__file__, encoding="utf-8") as f:
-            source = f.read()
-        self.assertEqual(
-            set(re.findall(r'os\.environ\.get\("(AGENT_LAYOUT_\w+)"\)', source)),
-            set())
+            return f.read()
 
-    def test_every_setting_still_reaches_the_sibling(self):
-        # The other half: reading none of them is only correct because they are
-        # all passed on. Dropping the environment, or filtering it, would make
-        # every value in this README silently do nothing when set for the
-        # picker.
-        base = {f"AGENT_LAYOUT_{name}": value
-                for name, value in self.DEFAULTS.items()}
-        with mock.patch.dict(os.environ, base, clear=True):
-            env = pp.layout_env("/x/panes/bin/agent-layout")
-        for key, value in base.items():
+    def test_the_script_names_no_plugin_executable_or_flag_of_anothers(self):
+        source = self.source()
+        for token in self.FOREIGN:
+            self.assertNotIn(token, source, token)
+
+    def test_the_script_reads_only_its_own_settings(self):
+        # The subtler half. Reading another plugin's setting here would apply
+        # it twice, from two files that cannot see each other, and this copy
+        # would win by racing the other. Every environment variable the script
+        # reads is Herdr's own or this plugin's own.
+        read = set(re.findall(r'os\.environ(?:\.get)?[(\[]"(\w+)"', self.source()))
+        self.assertTrue(read)
+        for name in read:
+            self.assertTrue(name.startswith(("HERDR_PICKER_", "HERDR_PLUGIN_",
+                                             "HERDR_CONFIG_", "HERDR_BIN_",
+                                             "PATH")), name)
+
+    def test_only_this_plugins_settings_have_a_home_in_its_config_toml(self):
+        # The ownership rule. A setting some other program reads has no key in
+        # THIS plugin's private file, because a value written into one plugin's
+        # config directory is invisible to every other one.
+        for key in pp.PICKER_KEYS.values():
+            self.assertTrue(key.startswith("HERDR_PICKER_"), key)
+
+    def test_the_environment_reaches_the_command_whatever_it_reads(self):
+        # Why the ownership rule costs the user nothing: everything else passes
+        # through, so a setting the layout command reads still reaches it from
+        # this plugin's .env or from your shell. Filtering the environment by a
+        # list of known names is what this rules out, and it would silently
+        # drop any name added after the list was written.
+        sample = {"SOME_TOOL_ALPHA": "one", "OTHER_BETA": "two"}
+        with mock.patch.dict(os.environ, sample, clear=True):
+            env = pp.child_env()
+        for key, value in sample.items():
             self.assertEqual(env.get(key), value, key)
 
-    def test_no_layout_setting_has_a_home_in_the_plugins_config_toml(self):
-        # The ownership rule, and the reason these ten stay environment-only
-        # while the picker's own three moved into [picker]: the sibling plugin
-        # reads these same names, and a value written into ONE plugin's private
-        # file is invisible to the other. Folding them into PICKER_KEYS would
-        # hand the sibling a setting it can never see.
-        layout = {f"AGENT_LAYOUT_{name}" for name in self.DEFAULTS}
-        self.assertEqual(set(pp.PICKER_KEYS.values()) & layout, set())
 
-    def test_the_readme_documents_every_setting_at_its_default(self):
-        # Doc-drift guard, in the shape KeyBindings uses below. The defaults
-        # are the SIBLING's now, so this cannot be checked against a constant
-        # in this file any more: the README is the only copy of them here, and
-        # a wrong one is a promise this plugin cannot keep.
-        #
-        # Scoped to the line naming the setting and the comment block directly
-        # above it, never a whole-file search: "Default: lazygit" appears twice
-        # in this file for two different settings, so a file-wide `in` would be
-        # satisfied by the other one and pin nothing.
-        with open(self.README, encoding="utf-8") as f:
-            lines = [line.rstrip("\n") for line in f]
-        for name, value in self.DEFAULTS.items():
-            key = f"AGENT_LAYOUT_{name}"
-            at = [i for i, line in enumerate(lines) if line.startswith(key + "=")]
-            self.assertEqual(len(at), 1, key)
-            self.assertEqual(lines[at[0]], f"{key}={value}", key)
-            above = lines[max(0, at[0] - 3):at[0]]
-            self.assertTrue(any(line == f"# Default: {value}" for line in above), key)
+class ShippedDefaults(unittest.TestCase):
+    """defaults.toml: the one place this repo names another program.
 
-    def test_the_readme_names_the_sibling_as_the_one_that_applies_them(self):
-        # The README documents ten settings this plugin does not read. Without
-        # saying who does, that block reads as a list of things the picker
-        # applies, which is exactly what it stopped doing.
-        with open(self.README, encoding="utf-8") as f:
-            readme = f.read()
-        self.assertIn("herdr-plugin-agentic-panes-layout", readme)
+    It is read last, so every value in it is a default the user can beat, and
+    it is the same [picker] table in the same syntax they would write. The
+    default preserves what the picker did before the setting existed — an
+    unconfigured picker still lays its workspaces out the way it always has.
+    """
+
+    DEFAULTS = DEFAULTS
+
+    def text(self):
+        with open(self.DEFAULTS, encoding="utf-8") as f:
+            return f.read()
+
+    def test_it_supplies_a_layout_setting(self):
+        got = pp.read_toml(self.DEFAULTS, {"picker.layout"})
+        self.assertTrue(got.get("picker.layout"))
+
+    def test_the_default_is_what_an_unconfigured_picker_runs(self):
+        # The whole point of shipping it: with no config.toml and no .env, the
+        # setting is still set. A default that lived only in the code could not
+        # be seen here, and could not be overridden without editing the plugin.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            pp.load_picker_config(self.DEFAULTS)
+            self.assertEqual(os.environ["HERDR_PICKER_LAYOUT"],
+                             pp.read_toml(self.DEFAULTS,
+                                          {"picker.layout"})["picker.layout"])
+
+    def test_a_user_setting_beats_it(self):
+        # setdefault, and the load order at the top of the script: the shipped
+        # file is read last, so it fills in only what nothing else supplied.
+        with mock.patch.dict(os.environ, {"HERDR_PICKER_LAYOUT": "/x/mine"},
+                             clear=True):
+            pp.load_picker_config(self.DEFAULTS)
+            self.assertEqual(os.environ["HERDR_PICKER_LAYOUT"], "/x/mine")
+
+    def test_the_default_still_lays_a_workspace_out_the_way_it_used_to(self):
+        # The behaviour guard, and the reason this test names another plugin
+        # where the script may not: the default is a promise that nothing
+        # changed for a user who set nothing. Resolved through the real
+        # resolve_layout(), so a default the picker could not parse fails here.
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(pp, "plugin_root", return_value="/x/panes") as pr, \
+             mock.patch.object(pp.shutil, "which", side_effect=lambda c: c), \
+             mock.patch.object(pp, "warn") as warn:
+            pp.load_picker_config(self.DEFAULTS)
+            got = pp.resolve_layout(True)
+        warn.assert_not_called()
+        self.assertEqual(pr.call_args.args,
+                         ("mikebronner.agentic-panes-layout",))
+        self.assertEqual(got, ["/x/panes/bin/agent-layout", "--workspace",
+                               pp.WORKSPACE_TOKEN])
+
+    def test_the_default_does_not_name_this_plugin(self):
+        # A copy-paste of this plugin's own id would ask Herdr for the picker,
+        # find it, and hand every workspace to an executable this checkout does
+        # not have.
+        self.assertNotIn("project-finder", self.text())
+
+    def test_the_readme_names_the_plugin_the_default_points_at(self):
+        # A default naming a plugin the README never mentions leaves the user
+        # with a setting they cannot look up.
+        with open(os.path.join(HERE, "..", "README.md"), encoding="utf-8") as f:
+            self.assertIn("agentic-panes-layout", f.read())
+
+    def test_no_foreign_setting_is_copied_into_this_repo(self):
+        # The default names a plugin; it does not restate that plugin's own
+        # settings. A second copy of another repo's names and defaults
+        # disagrees with the original the moment one of them changes, and both
+        # copies read as authoritative while they do.
+        for path in (self.DEFAULTS, os.path.join(HERE, "..", "README.md"),
+                     pp.__file__, __file__):
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            self.assertEqual([line for line in lines
+                              if re.match(r"\s*(export )?AGENT_LAYOUT_\w+\s*=",
+                                          line)], [], path)
+
 
 class OpenProject(unittest.TestCase):
     """Which herdr command opens a row, and what happens when it will not.
@@ -786,9 +885,10 @@ class OpenProject(unittest.TestCase):
                                   "--label", "feat-x", "--no-focus")])
 
     def test_a_failed_worktree_open_falls_back_to_workspace_create(self):
-        # A Herdr too old to carry the command. min_herdr_version is 0.8.0, and
-        # the fallback opens the worktree exactly as every earlier version of
-        # this picker did, so the floor does not have to rise.
+        # A Herdr that answers nothing for the command. The fallback is kept
+        # whatever the manifest's floor says: it opens the worktree exactly as
+        # every earlier version of this picker did, so the cost of the degraded
+        # path is a nesting in the sidebar and nothing else.
         res, calls = self.open("/x/myrepo", fails={("worktree", "open")})
         self.assertEqual([c[:2] for c in calls],
                          [("worktree", "open"), ("workspace", "create")])
@@ -1119,6 +1219,44 @@ class ModuleBootstrap(unittest.TestCase):
         fresh = self.boot({})
         self.assertEqual(fresh.DEV, os.path.expanduser("~"))
         self.assertEqual(fresh.HOME_LABEL, "~")
+
+    def boot_environ(self, files):
+        """The os.environ a re-execution leaves behind, read INSIDE the patch.
+
+        boot() above answers with the module, which is enough for a setting
+        bound to a constant. The layout setting is not: it is read at call
+        time, so the only trace of it at import is the environment, and that is
+        restored the moment the patch exits.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            for name, body in files.items():
+                with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                    f.write(body)
+            env = dict(PATH=os.environ.get("PATH", ""),
+                       HERDR_PLUGIN_CONFIG_DIR=d,
+                       HERDR_CONFIG_PATH=os.path.join(d, "absent.toml"))
+            with mock.patch.dict(os.environ, env, clear=True):
+                loader.exec_module(importlib.util.module_from_spec(spec))
+                return dict(os.environ)
+
+    def test_the_shipped_defaults_are_loaded_at_import(self):
+        # Without this call at the top of the script, an unconfigured picker
+        # has no layout setting at all: every workspace opens bare, and the
+        # notice does not fire either, because an empty setting is silent.
+        # Nothing else in the suite would notice, since every other test
+        # supplies the setting itself.
+        self.assertEqual(
+            self.boot_environ({}).get("HERDR_PICKER_LAYOUT"),
+            pp.read_toml(DEFAULTS, {"picker.layout"})["picker.layout"])
+
+    def test_the_shipped_defaults_are_loaded_last(self):
+        # The other half of the same call site: read before the user's files,
+        # the shipped value would win over both of them and the setting could
+        # not be changed without editing the plugin.
+        environ = self.boot_environ({"config.toml": '[picker]\nlayout = "/x/mine"\n'})
+        self.assertEqual(environ["HERDR_PICKER_LAYOUT"], "/x/mine")
+        environ = self.boot_environ({".env": "HERDR_PICKER_LAYOUT=/x/from-env-file\n"})
+        self.assertEqual(environ["HERDR_PICKER_LAYOUT"], "/x/from-env-file")
 
     def test_a_malformed_toml_still_lets_the_module_import(self):
         # The picker is a popup: a typo in optional config must never be what
@@ -2448,6 +2586,24 @@ class ReadToml(unittest.TestCase):
     def test_an_unreadable_path_is_empty_not_an_error(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(pp.read_toml(d, self.WANTED), {})
+
+    def test_a_quoted_value_that_opens_with_a_brace_is_a_string(self):
+        # What the quotes are FOR. An inline table is skipped by how a value
+        # starts, and the layout setting's {plugin:<id>} token starts the same
+        # way — read as a table it would vanish, and the picker would fall back
+        # to laying nothing out with nothing to explain it.
+        self.assertEqual(
+            self.read('[picker]\nlayout = "{plugin:x.y}/bin/lay {workspace}"\n',
+                      {"picker.layout"}),
+            {"picker.layout": "{plugin:x.y}/bin/lay {workspace}"})
+
+    def test_a_key_with_no_value_contributes_nothing_and_does_not_raise(self):
+        # A wanted key left empty is a half-finished edit, and this file is a
+        # popup's optional config: it has to survive one. The empty string is
+        # not a value to apply either, so the setting stays unset and its
+        # default stands.
+        self.assertEqual(self.read("[theme]\nname =\n"), {})
+        self.assertEqual(self.read('[theme]\nname = ""\n'), {})
 
 
 class HerdrConfigPath(unittest.TestCase):
