@@ -93,7 +93,7 @@ asset_url() {
     _version="$(manifest_version)" || return 1
     _slug="$(repo_slug)" || return 1
     _short="$(released_commit)" || return 1
-    printf 'https://github.com/%s/releases/download/v%s/pick-project-%s-%s\n' \
+    printf 'https://github.com/%s/releases/download/%s/pick-project-%s-%s\n' \
         "$_slug" "$_version" "$_platform" "$_short"
 }
 

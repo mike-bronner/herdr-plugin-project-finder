@@ -1237,7 +1237,7 @@ fn this_platform() -> String {
 
 fn expected_url() -> String {
     format!(
-        "https://github.com/owner/repo/releases/download/v{}/pick-project-{}-{}",
+        "https://github.com/owner/repo/releases/download/{}/pick-project-{}-{}",
         manifest()["version"].as_str().unwrap(),
         this_platform(),
         &COMMIT[..12]
