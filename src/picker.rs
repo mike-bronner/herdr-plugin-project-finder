@@ -99,6 +99,82 @@ pub fn row_cells(entry: &Entry) -> Cells {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Highlights {
+    pub name: Vec<usize>,
+    pub kind: Vec<usize>,
+    pub age: Vec<usize>,
+    pub status_word: Vec<usize>,
+}
+
+fn name_column(index: usize, label: usize) -> usize {
+    if label <= LABEL_WIDTH {
+        index
+    } else {
+        index.min(LABEL_WIDTH - 1)
+    }
+}
+
+pub fn highlights_for(entry: &Entry, indices: &[u32]) -> Highlights {
+    let label = entry.label.chars().count();
+    let word = entry.kind.word().chars().count();
+    let hidden = entry
+        .kind
+        .word()
+        .strip_suffix(entry.kind.cell())
+        .map(|cut| cut.chars().count());
+    let age = entry.age.chars().count();
+    let status = entry
+        .status
+        .as_deref()
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+
+    let kind_at = label + 1;
+    let age_at = kind_at + word + 1;
+    let status_at = age_at + age + 1;
+
+    let mut found = Highlights::default();
+    for index in indices.iter().map(|i| *i as usize) {
+        if index < label {
+            found.name.push(name_column(index, label));
+        } else if index >= kind_at && index < kind_at + word {
+            if let Some(hidden) = hidden {
+                let inner = index - kind_at;
+                if inner >= hidden {
+                    found.kind.push(inner - hidden);
+                }
+            }
+        } else if index >= age_at && index < age_at + age {
+            found.age.push(index - age_at + 1);
+        } else if index >= status_at && index < status_at + status {
+            found.status_word.push(index - status_at);
+        }
+    }
+    for column in [
+        &mut found.name,
+        &mut found.kind,
+        &mut found.age,
+        &mut found.status_word,
+    ] {
+        column.sort_unstable();
+        column.dedup();
+    }
+    found
+}
+
+pub fn runs(text: &str, marked: &[usize]) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for (index, letter) in text.chars().enumerate() {
+        let hit = marked.contains(&index);
+        match out.last_mut() {
+            Some((run, same)) if *same == hit => run.push(letter),
+            _ => out.push((letter.to_string(), hit)),
+        }
+    }
+    out
+}
+
 pub fn row_prefix(entry: &Entry) -> String {
     let cells = row_cells(entry);
     format!("{}{}{}{}", cells.repo, cells.name, cells.kind, cells.age)
@@ -116,6 +192,7 @@ pub struct Picker {
     pub query: String,
     pub matches: Vec<usize>,
     pub cursor: usize,
+    highlights: Vec<Highlights>,
     matcher: Matcher,
 }
 
@@ -126,6 +203,7 @@ impl Picker {
             query: String::new(),
             matches: Vec::new(),
             cursor: 0,
+            highlights: Vec::new(),
             matcher: Matcher::new(nucleo::Config::DEFAULT),
         };
         picker.refilter();
@@ -135,24 +213,34 @@ impl Picker {
     pub fn refilter(&mut self) {
         if self.query.trim().is_empty() {
             self.matches = (0..self.entries.len()).collect();
+            self.highlights = vec![Highlights::default(); self.entries.len()];
             self.cursor = 0;
             return;
         }
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
-        let mut scored: Vec<(u32, usize)> = Vec::new();
+        let mut scored: Vec<(u32, usize, Highlights)> = Vec::new();
         let mut buffer = Vec::new();
+        let mut indices = Vec::new();
         for (at, entry) in self.entries.iter().enumerate() {
             let haystack = entry.haystack();
             buffer.clear();
-            if let Some(score) =
-                pattern.score(Utf32Str::new(&haystack, &mut buffer), &mut self.matcher)
-            {
-                scored.push((score, at));
+            indices.clear();
+            if let Some(score) = pattern.indices(
+                Utf32Str::new(&haystack, &mut buffer),
+                &mut self.matcher,
+                &mut indices,
+            ) {
+                scored.push((score, at, highlights_for(entry, &indices)));
             }
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        self.matches = scored.into_iter().map(|(_, at)| at).collect();
+        self.matches = scored.iter().map(|(_, at, _)| *at).collect();
+        self.highlights = scored.into_iter().map(|(_, _, found)| found).collect();
         self.cursor = 0;
+    }
+
+    pub fn highlights(&self, row: usize) -> Option<&Highlights> {
+        self.highlights.get(row)
     }
 
     pub fn highlighted(&self) -> Option<&Entry> {

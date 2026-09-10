@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pick_project::discover::Kind;
 use pick_project::picker::{
-    heading, row_cells, row_prefix, Action, Entry, Picker, AGE_WIDTH, GUTTER, KIND_WIDTH,
-    LABEL_WIDTH, LEGEND, MARKER, PROMPT,
+    heading, row_cells, row_prefix, runs, Action, Entry, Highlights, Picker, AGE_WIDTH, GUTTER,
+    KIND_WIDTH, LABEL_WIDTH, LEGEND, MARKER, PROMPT,
 };
 use support::TempDir;
 
@@ -952,4 +952,248 @@ fn a_directory_that_is_not_there_previews_as_its_name_alone() {
     let mut previews = pick_project::ui::Previews::new(&preview_env());
     let text = previews.of("gone", std::path::Path::new("/x/no/such/place"));
     assert_eq!(text.trim(), "gone");
+}
+
+fn found(entry: Entry, query: &str) -> Highlights {
+    let mut picker = Picker::new(vec![entry]);
+    type_in(&mut picker, query);
+    assert_eq!(picker.matches.len(), 1, "the row has to match to be marked");
+    picker.highlights(0).cloned().unwrap()
+}
+
+#[test]
+fn the_typed_characters_are_marked_where_they_sit_in_the_name_cell() {
+    let marks = found(entry("alpha", Kind::Repo, "1m ago", None, false), "lph");
+    assert_eq!(marks.name, vec![1, 2, 3]);
+}
+
+#[test]
+fn a_match_in_the_cut_part_of_an_elided_name_falls_on_the_ellipsis() {
+    let label = format!("{}z", "a".repeat(38));
+    let marks = found(entry(&label, Kind::Repo, "1m ago", None, false), "z");
+    assert_eq!(marks.name, vec![LABEL_WIDTH - 1]);
+    let drawn = row_cells(&entry(&label, Kind::Repo, "1m ago", None, false));
+    assert_eq!(drawn.name.chars().nth(LABEL_WIDTH - 1), Some('…'));
+}
+
+#[test]
+fn a_visible_match_in_an_elided_name_keeps_its_own_column() {
+    let label = format!("z{}", "a".repeat(38));
+    let marks = found(entry(&label, Kind::Repo, "1m ago", None, false), "z");
+    assert_eq!(marks.name, vec![0]);
+}
+
+#[test]
+fn a_match_on_the_half_of_worktree_the_cell_hides_marks_nothing_there() {
+    let marks = found(entry("alpha", Kind::Worktree, "1m ago", None, false), "wor");
+    assert!(marks.kind.is_empty(), "{:?}", marks);
+    assert!(marks.name.is_empty(), "{:?}", marks);
+}
+
+#[test]
+fn a_match_on_tree_marks_the_four_characters_the_kind_cell_shows() {
+    let marks = found(
+        entry("alpha", Kind::Worktree, "1m ago", None, false),
+        "tree",
+    );
+    assert_eq!(marks.kind, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn a_repo_kind_cell_is_marked_one_for_one_because_it_hides_nothing() {
+    let marks = found(entry("alpha", Kind::Repo, "1m ago", None, false), "repo");
+    assert_eq!(marks.kind, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn an_age_match_is_shifted_by_the_space_its_cell_leads_with() {
+    let marks = found(entry("beta", Kind::Repo, "1m ago", None, false), "ago");
+    assert_eq!(marks.age, vec![4, 5, 6]);
+}
+
+#[test]
+fn a_status_match_is_marked_against_the_status_word_itself() {
+    let marks = found(
+        entry("beta", Kind::Repo, "1m ago", Some("working"), false),
+        "work",
+    );
+    assert_eq!(marks.status_word, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn a_row_with_no_status_can_never_be_marked_in_a_field_it_does_not_draw() {
+    let marks = found(entry("beta", Kind::Repo, "1m ago", None, false), "beta");
+    assert!(marks.status_word.is_empty(), "{:?}", marks);
+}
+
+#[test]
+fn every_row_keeps_the_marks_of_its_own_entry_when_the_order_changes() {
+    let mut picker = Picker::new(plain(&["zzalpha", "alpha"]));
+    type_in(&mut picker, "alpha");
+    assert_eq!(shown(&picker), vec!["alpha", "zzalpha"]);
+    assert_eq!(picker.highlights(0).unwrap().name, vec![0, 1, 2, 3, 4]);
+    assert_eq!(picker.highlights(1).unwrap().name, vec![2, 3, 4, 5, 6]);
+    assert!(picker.highlights(2).is_none());
+}
+
+#[test]
+fn an_empty_query_marks_nothing_at_all() {
+    let picker = Picker::new(plain(&["alpha", "beta"]));
+    for row in 0..picker.matches.len() {
+        assert_eq!(picker.highlights(row), Some(&Highlights::default()));
+    }
+}
+
+#[test]
+fn a_dropped_query_puts_the_marks_back_to_nothing() {
+    let mut picker = Picker::new(plain(&["alpha"]));
+    type_in(&mut picker, "alp");
+    assert!(!picker.highlights(0).unwrap().name.is_empty());
+    picker.on_key(control('u'));
+    assert_eq!(picker.highlights(0), Some(&Highlights::default()));
+}
+
+#[test]
+fn a_stretch_of_text_splits_into_marked_and_unmarked_runs() {
+    assert_eq!(
+        runs("abcd", &[1, 2]),
+        vec![
+            ("a".to_string(), false),
+            ("bc".to_string(), true),
+            ("d".to_string(), false)
+        ]
+    );
+}
+
+#[test]
+fn text_with_nothing_marked_stays_one_run() {
+    assert_eq!(runs("abcd", &[]), vec![("abcd".to_string(), false)]);
+}
+
+fn marked_styles(picker: &Picker, row: u16) -> Vec<(String, ratatui::style::Style)> {
+    drawn_styles(picker, 160, row)
+}
+
+fn match_colour() -> ratatui::style::Color {
+    use pick_project::config::HerdrConfig;
+    use pick_project::theme::resolve_theme;
+    use pick_project::ui::ratatui_colour;
+
+    ratatui_colour(resolve_theme(&HerdrConfig::default(), &|_| false).matched)
+}
+
+#[test]
+fn the_matched_characters_are_drawn_in_the_themes_match_colour() {
+    use ratatui::style::Modifier;
+
+    let mut picker = Picker::new(plain(&["alpha"]));
+    type_in(&mut picker, "lph");
+    let cells = marked_styles(&picker, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let start = at(&text, "alpha").unwrap();
+    for step in 1..4 {
+        assert_eq!(cells[start + step].1.fg, Some(match_colour()), "{}", step);
+        assert!(cells[start + step]
+            .1
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+    }
+    assert_ne!(cells[start].1.fg, Some(match_colour()));
+    assert!(!cells[start].1.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn the_repository_prefix_is_never_marked_even_when_it_carries_the_typed_letters() {
+    let mut picker = Picker::new(vec![worktree_of("data", "feat-x")]);
+    type_in(&mut picker, "at");
+    let cells = marked_styles(&picker, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let prefix = at(&text, "data/").unwrap();
+    for step in 0..5 {
+        assert_ne!(
+            cells[prefix + step].1.fg,
+            Some(match_colour()),
+            "the prefix never took part in the match: {}",
+            text
+        );
+    }
+    let branch = at(&text, "feat-x").unwrap();
+    assert_eq!(cells[branch + 2].1.fg, Some(match_colour()), "{}", text);
+    assert_eq!(cells[branch + 3].1.fg, Some(match_colour()), "{}", text);
+}
+
+#[test]
+fn a_marked_status_keeps_its_own_colour_and_is_told_apart_by_the_emphasis() {
+    use pick_project::config::HerdrConfig;
+    use pick_project::theme::resolve_theme;
+    use pick_project::ui::ratatui_colour;
+    use ratatui::style::Modifier;
+
+    let theme = resolve_theme(&HerdrConfig::default(), &|_| false);
+    let blocked = ratatui_colour(theme.colour("blocked"));
+    assert_ne!(
+        blocked,
+        match_colour(),
+        "this test only discriminates while the two colours differ"
+    );
+    let mut picker = Picker::new(vec![entry(
+        "beta",
+        Kind::Repo,
+        "1m ago",
+        Some("blocked"),
+        false,
+    )]);
+    type_in(&mut picker, "bloc");
+    let cells = marked_styles(&picker, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let start = at(&text, "blocked").unwrap();
+    for step in 0..4 {
+        assert_eq!(cells[start + step].1.fg, Some(blocked), "{}", text);
+        assert!(cells[start + step]
+            .1
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+    }
+    assert_eq!(cells[start + 5].1.fg, Some(blocked), "{}", text);
+    assert!(!cells[start + 5]
+        .1
+        .add_modifier
+        .contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn a_marked_kind_cell_keeps_the_accent_it_is_drawn_in() {
+    use pick_project::config::HerdrConfig;
+    use pick_project::theme::resolve_theme;
+    use pick_project::ui::ratatui_colour;
+    use ratatui::style::Modifier;
+
+    let theme = resolve_theme(&HerdrConfig::default(), &|_| false);
+    let accent = ratatui_colour(theme.accent);
+    let mut picker = Picker::new(vec![worktree_of("data", "feat-x")]);
+    type_in(&mut picker, "tree");
+    let cells = marked_styles(&picker, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let start = at(&text, "tree").unwrap();
+    for step in 0..4 {
+        assert_eq!(cells[start + step].1.fg, Some(accent), "{}", text);
+        assert!(cells[start + step]
+            .1
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+    }
+}
+
+#[test]
+fn the_marks_survive_the_cursor_row_because_they_carry_a_modifier_too() {
+    use ratatui::style::Modifier;
+
+    let mut picker = Picker::new(plain(&["alpha"]));
+    type_in(&mut picker, "lph");
+    let cells = marked_styles(&picker, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let start = at(&text, "alpha").unwrap();
+    assert!(cells[start].1.add_modifier.contains(Modifier::REVERSED));
+    assert!(cells[start + 1].1.add_modifier.contains(Modifier::REVERSED));
+    assert!(cells[start + 1].1.add_modifier.contains(Modifier::BOLD));
 }

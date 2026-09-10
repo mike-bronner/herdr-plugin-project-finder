@@ -403,10 +403,94 @@ fn the_dark_accent_is_taken_only_when_the_theme_switches_automatically() {
 }
 
 #[test]
+fn the_match_colour_starts_as_the_mauve_of_whatever_palette_is_in_force() {
+    for (name, palette) in PALETTES {
+        let theme = theme_of(&[("theme.name", name)]);
+        assert_eq!(theme.matched, palette[5], "{}", name);
+    }
+}
+
+#[test]
+fn the_match_colour_is_never_the_accent_it_has_to_be_told_apart_from() {
+    for (name, _) in PALETTES {
+        let theme = theme_of(&[("theme.name", name)]);
+        assert_ne!(theme.matched, theme.accent, "{}", name);
+    }
+}
+
+#[test]
+fn no_status_colour_shares_the_match_colour_on_any_theme_at_all() {
+    for (name, _) in PALETTES {
+        let theme = theme_of(&[("theme.name", name)]);
+        for status in STATUSES {
+            assert_ne!(
+                theme.colour(status),
+                theme.matched,
+                "{} draws {} in the colour it marks a match with",
+                name,
+                status
+            );
+        }
+    }
+}
+
+#[test]
+fn the_terminal_theme_marks_a_match_in_bright_magenta_not_the_grey_herdr_keeps_there() {
+    let theme = theme_of(&[("theme.name", "terminal")]);
+    assert_eq!(theme.matched, Colour::Indexed(13));
+    assert_eq!(theme.colour("unknown"), Colour::Indexed(7));
+}
+
+#[test]
+fn a_custom_match_overrides_the_palette_and_is_read_as_a_colour() {
+    let theme = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.match", "lightblue"),
+    ]);
+    assert_eq!(theme.matched, Colour::Indexed(12));
+}
+
+#[test]
+fn a_custom_mauve_alone_never_moves_the_match_colour() {
+    let theme = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.mauve", "#ff0000"),
+    ]);
+    assert_eq!(theme.matched, Colour::Indexed(13));
+}
+
+#[test]
+fn a_custom_yellow_moves_the_working_status_and_leaves_the_match_colour_alone() {
+    let theme = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.yellow", "#ff0000"),
+    ]);
+    assert_eq!(theme.matched, Colour::Indexed(13));
+    assert_eq!(theme.colour("working"), Colour::Rgb(255, 0, 0));
+}
+
+#[test]
+fn the_dark_match_colour_is_taken_only_when_the_theme_switches_automatically() {
+    let off = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.dark.match", "#010203"),
+    ]);
+    assert_eq!(off.matched, Colour::Indexed(13));
+    let on = theme_of(&[
+        ("theme.dark_name", "terminal"),
+        ("theme.auto_switch", "true"),
+        ("theme.custom.dark.match", "#010203"),
+    ]);
+    assert_eq!(on.matched, Colour::Rgb(1, 2, 3));
+}
+
+#[test]
 fn the_theme_keys_cover_every_key_the_resolver_reads() {
     let keys = theme_keys();
     assert!(keys.contains(&"theme.custom.accent".to_string()));
     assert!(keys.contains(&"theme.custom.dark.accent".to_string()));
+    assert!(keys.contains(&"theme.custom.match".to_string()));
+    assert!(keys.contains(&"theme.custom.dark.match".to_string()));
     for role in STATUS_ROLE_ORDER {
         assert!(keys.contains(&format!("theme.custom.{}", role)));
         assert!(keys.contains(&format!("theme.custom.dark.{}", role)));

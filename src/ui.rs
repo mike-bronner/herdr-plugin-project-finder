@@ -11,7 +11,9 @@ use ratatui::Frame;
 use crate::config::Environment;
 use crate::discover::Kind;
 use crate::layout::which;
-use crate::picker::{heading, row_cells, Action, Entry, Picker, GUTTER, LEGEND, MARKER, PROMPT};
+use crate::picker::{
+    heading, row_cells, runs, Action, Entry, Highlights, Picker, GUTTER, LEGEND, MARKER, PROMPT,
+};
 use crate::theme::{Colour, Theme};
 
 pub fn ratatui_colour(colour: Colour) -> Color {
@@ -165,14 +167,34 @@ pub fn draw(frame: &mut Frame, picker: &Picker, theme: &Theme, preview: &str) {
     );
 }
 
+fn emphasis() -> Style {
+    Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+}
+
+fn status_columns(theme: &Theme, status: &str, found: &Highlights) -> Vec<usize> {
+    let shift = theme.icon(status).chars().count() + 1;
+    found.status_word.iter().map(|at| at + shift).collect()
+}
+
+fn marked(text: &str, at: &[usize], base: Style, mark: Style) -> Vec<Span<'static>> {
+    runs(text, at)
+        .into_iter()
+        .map(|(run, hit)| Span::styled(run, if hit { mark } else { base }))
+        .collect()
+}
+
 fn draw_list(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
     let items: Vec<ListItem> = picker
         .matches
         .iter()
-        .map(|at| {
+        .enumerate()
+        .map(|(row, at)| {
             let entry = &picker.entries[*at];
             let marker = if entry.selected { MARKER } else { GUTTER };
             let cells = row_cells(entry);
+            let found = picker.highlights(row).cloned().unwrap_or_default();
+            let plain = Style::default();
+            let hit = plain.fg(ratatui_colour(theme.matched)).patch(emphasis());
             let kind = match entry.kind {
                 Kind::Worktree => Style::default().fg(ratatui_colour(theme.accent)),
                 Kind::Repo => Style::default(),
@@ -180,14 +202,23 @@ fn draw_list(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
             let mut spans = vec![
                 Span::styled(marker, Style::default().fg(Color::Indexed(2))),
                 Span::styled(cells.repo, Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(cells.name),
-                Span::styled(cells.kind, kind),
-                Span::raw(cells.age),
             ];
+            spans.extend(marked(&cells.name, &found.name, plain, hit));
+            spans.extend(marked(
+                &cells.kind,
+                &found.kind,
+                kind,
+                kind.patch(emphasis()),
+            ));
+            spans.extend(marked(&cells.age, &found.age, plain, hit));
             if let Some(status) = &entry.status {
-                spans.push(Span::styled(
-                    theme.cell(status),
-                    Style::default().fg(ratatui_colour(theme.colour(status))),
+                let style = Style::default().fg(ratatui_colour(theme.colour(status)));
+                let at = status_columns(theme, status, &found);
+                spans.extend(marked(
+                    &theme.cell(status),
+                    &at,
+                    style,
+                    style.patch(emphasis()),
                 ));
             }
             ListItem::new(Line::from(spans))

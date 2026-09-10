@@ -19,6 +19,10 @@ pub const ACCENT_ROLE: &str = "accent";
 
 pub const ACCENT_FALLBACK_ROLE: &str = "teal";
 
+pub const MATCH_ROLE: &str = "match";
+
+pub const MATCH_FALLBACK_ROLE: &str = "mauve";
+
 pub const STATUS_ROLES: [(&str, &str); 5] = [
     ("working", "yellow"),
     ("blocked", "red"),
@@ -364,7 +368,11 @@ pub fn theme_keys() -> Vec<String> {
         "theme.auto_switch".to_string(),
         "theme.dark_name".to_string(),
     ];
-    for role in STATUS_ROLE_ORDER.iter().chain([&ACCENT_ROLE]) {
+    for role in STATUS_ROLE_ORDER
+        .iter()
+        .chain([&ACCENT_ROLE])
+        .chain([&MATCH_ROLE])
+    {
         keys.push(format!("theme.custom.{}", role));
         keys.push(format!("theme.custom.dark.{}", role));
     }
@@ -376,6 +384,7 @@ pub struct Theme {
     pub icons: Vec<(String, String)>,
     pub colours: Vec<(String, Colour)>,
     pub accent: Colour,
+    pub matched: Colour,
 }
 
 impl Theme {
@@ -473,6 +482,7 @@ pub fn resolve_theme(config: &HerdrConfig, rejects: &dyn Fn(&str) -> bool) -> Th
         icons,
         colours,
         accent: extra_role(config, &tables, base, ACCENT_ROLE, ACCENT_FALLBACK_ROLE),
+        matched: extra_role(config, &tables, base, MATCH_ROLE, MATCH_FALLBACK_ROLE),
     }
 }
 

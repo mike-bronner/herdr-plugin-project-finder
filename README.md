@@ -200,8 +200,10 @@ An `AGENT STATUS` column shows the agent state of every open project, drawn with
 the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
 `~/.config/herdr/config.toml` rather than assumed: `[ui] status_indicators`
 picks `dots` or `symbols`, and `[theme]` plus any `[theme.custom]` override of
-`green`, `yellow`, `red`, `teal`, or `overlay0` decides the colour. `accent` is
-read the same way, for the `KIND` column. All eighteen built-in themes are
+`green`, `yellow`, `red`, `teal`, or `overlay0` decides the colour. `accent`,
+for the `KIND` column, and `match`, for the characters the filter matched, are
+read the same way, and each falls back to a palette slot no status uses —
+`teal` for the accent, `mauve` for the match. All eighteen built-in themes are
 covered, and under `theme.name = "terminal"` the colours are ANSI indexes, so
 the picker follows your terminal profile exactly as Herdr does. Herdr shows the
 glyph alone; the picker keeps the status word beside it because the filter
@@ -239,6 +241,31 @@ up its own characters first, from the left, and is dropped entirely rather than
 taking a character from the name. The preview pane on the right shows the
 full name above the git log. The filter reads the **whole** name rather than
 what fits on screen, so text past the ellipsis still matches.
+
+As you type, the characters that made each row match are marked in your theme's
+**match** colour, bold and underlined. A fuzzy match does not need the letters
+to be adjacent, so the marks answer "why is this row here" without guessing,
+and they say which character to type next to narrow the list. `[theme.custom]
+match` wins when you set it, and otherwise the match colour is the `mauve` of
+the palette in force, the magenta-family slot no agent status draws in.
+
+One theme diverges from Herdr on purpose. Under `theme.name = "terminal"` Herdr
+keeps ANSI grey in its own `mauve` slot, the very colour it draws `overlay0`
+in, so copying it would mark a match in the colour of an `unknown` status. That
+theme has eight ANSI colours to spread over nineteen roles, so the duplication
+there is structural rather than a statement about magenta. The picker marks a
+match in ANSI bright magenta instead, which stays inside the theme's own ANSI
+vocabulary. Every other mauve in the table is Herdr's own value, and
+`[theme.custom] match` overrules any of them.
+
+Three rows read the marks differently, on purpose. A repository prefix is never
+marked, because it is display only and takes no part in the match. A name cut
+with a `…` marks the ellipsis when the match landed in the part that was cut,
+so a row is never left with no mark at all. The `KIND` cell searches on the
+word `worktree` but shows `tree`, so a match on the `work` half has nothing on
+screen to mark and marks nothing. A marked `KIND` or `AGENT STATUS` cell keeps
+its own colour and is told apart by the emphasis alone, so no signal is painted
+over by another.
 
 Pairs well with [herdr-plugin-recent-spaces](https://github.com/mike-bronner/herdr-plugin-recent-spaces),
 which keeps the sidebar in most-recently-used order.
