@@ -13,6 +13,8 @@ pub const STATUSES: [&str; 5] = ["working", "blocked", "done", "idle", "unknown"
 
 pub const STATUS_ROLE_ORDER: [&str; 5] = ["green", "yellow", "red", "teal", "overlay0"];
 
+pub const PALETTE_ROLE_ORDER: [&str; 6] = ["green", "yellow", "red", "teal", "overlay0", "mauve"];
+
 pub const ACCENT_ROLE: &str = "accent";
 
 pub const ACCENT_FALLBACK_ROLE: &str = "teal";
@@ -48,7 +50,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Colour {
     Colour::Rgb(r, g, b)
 }
 
-pub const PALETTES: [(&str, [Colour; 5]); 18] = [
+pub const PALETTES: [(&str, [Colour; 6]); 18] = [
     (
         "catppuccin",
         [
@@ -57,6 +59,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(243, 139, 168),
             rgb(148, 226, 213),
             rgb(108, 112, 134),
+            rgb(203, 166, 247),
         ],
     ),
     (
@@ -67,6 +70,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(210, 15, 57),
             rgb(23, 146, 153),
             rgb(156, 160, 176),
+            rgb(136, 57, 239),
         ],
     ),
     (
@@ -77,6 +81,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             Colour::Indexed(9),
             Colour::Indexed(6),
             Colour::Indexed(7),
+            Colour::Indexed(13),
         ],
     ),
     (
@@ -87,6 +92,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(247, 118, 142),
             rgb(125, 207, 255),
             rgb(86, 95, 137),
+            rgb(187, 154, 247),
         ],
     ),
     (
@@ -97,6 +103,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(245, 42, 101),
             rgb(17, 140, 116),
             rgb(137, 144, 179),
+            rgb(120, 71, 189),
         ],
     ),
     (
@@ -107,6 +114,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(255, 85, 85),
             rgb(139, 233, 253),
             rgb(98, 114, 164),
+            rgb(255, 121, 198),
         ],
     ),
     (
@@ -117,6 +125,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(191, 97, 106),
             rgb(143, 188, 187),
             rgb(76, 86, 106),
+            rgb(180, 142, 173),
         ],
     ),
     (
@@ -127,6 +136,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(251, 73, 52),
             rgb(142, 192, 124),
             rgb(146, 131, 116),
+            rgb(211, 134, 155),
         ],
     ),
     (
@@ -137,6 +147,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(157, 0, 6),
             rgb(66, 123, 88),
             rgb(146, 131, 116),
+            rgb(143, 63, 113),
         ],
     ),
     (
@@ -147,6 +158,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(224, 108, 117),
             rgb(86, 182, 194),
             rgb(92, 99, 112),
+            rgb(198, 120, 221),
         ],
     ),
     (
@@ -157,6 +169,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(228, 86, 73),
             rgb(1, 132, 188),
             rgb(160, 161, 167),
+            rgb(166, 38, 164),
         ],
     ),
     (
@@ -167,6 +180,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(220, 50, 47),
             rgb(42, 161, 152),
             rgb(88, 110, 117),
+            rgb(211, 54, 130),
         ],
     ),
     (
@@ -177,6 +191,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(220, 50, 47),
             rgb(42, 161, 152),
             rgb(147, 161, 161),
+            rgb(211, 54, 130),
         ],
     ),
     (
@@ -187,6 +202,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(195, 64, 67),
             rgb(127, 180, 202),
             rgb(114, 113, 105),
+            rgb(149, 127, 184),
         ],
     ),
     (
@@ -197,6 +213,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(200, 64, 83),
             rgb(78, 140, 162),
             rgb(160, 156, 172),
+            rgb(98, 76, 131),
         ],
     ),
     (
@@ -207,6 +224,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(235, 111, 146),
             rgb(156, 207, 216),
             rgb(110, 106, 134),
+            rgb(196, 167, 231),
         ],
     ),
     (
@@ -217,6 +235,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(180, 99, 122),
             rgb(86, 148, 159),
             rgb(152, 147, 165),
+            rgb(144, 122, 169),
         ],
     ),
     (
@@ -227,6 +246,7 @@ pub const PALETTES: [(&str, [Colour; 5]); 18] = [
             rgb(255, 128, 128),
             rgb(102, 221, 204),
             rgb(92, 92, 92),
+            rgb(255, 209, 168),
         ],
     ),
 ];
@@ -272,7 +292,7 @@ pub const NAMED_COLORS: [(&str, u8); 19] = [
 
 pub const RESET_ALIASES: [&str; 4] = ["reset", "default", "none", "transparent"];
 
-pub fn palette(name: &str) -> Option<&'static [Colour; 5]> {
+pub fn palette(name: &str) -> Option<&'static [Colour; 6]> {
     PALETTES.iter().find(|(n, _)| *n == name).map(|(_, p)| p)
 }
 
@@ -459,11 +479,11 @@ pub fn resolve_theme(config: &HerdrConfig, rejects: &dyn Fn(&str) -> bool) -> Th
 fn extra_role(
     config: &HerdrConfig,
     tables: &[&str],
-    base: &[Colour; 5],
+    base: &[Colour; 6],
     role: &str,
     fallback: &str,
 ) -> Colour {
-    let at = STATUS_ROLE_ORDER
+    let at = PALETTE_ROLE_ORDER
         .iter()
         .position(|known| *known == fallback)
         .expect("an extra role falls back to a role the palette carries");

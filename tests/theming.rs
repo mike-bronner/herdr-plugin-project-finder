@@ -3,8 +3,8 @@ mod support;
 use pick_project::config::HerdrConfig;
 use pick_project::theme::{
     canonical_theme, herdr_rejects_theme, palette, parse_colour, resolve_theme, theme_keys, Colour,
-    Theme, DOTS, NAMED_COLORS, PALETTES, STATUSES, STATUS_ROLE_ORDER, STATUS_WIDTH, SYMBOLS,
-    THEME_ALIASES,
+    Theme, DOTS, NAMED_COLORS, PALETTES, PALETTE_ROLE_ORDER, STATUSES, STATUS_ROLE_ORDER,
+    STATUS_WIDTH, SYMBOLS, THEME_ALIASES,
 };
 use pick_project::ui::ratatui_colour;
 use ratatui::style::Color;
@@ -84,10 +84,18 @@ fn no_alias_shadows_a_real_palette_name() {
 }
 
 #[test]
-fn every_palette_has_all_five_roles() {
+fn every_palette_has_all_six_roles() {
     for (name, roles) in PALETTES {
-        assert_eq!(roles.len(), STATUS_ROLE_ORDER.len(), "{}", name);
+        assert_eq!(roles.len(), PALETTE_ROLE_ORDER.len(), "{}", name);
     }
+}
+
+#[test]
+fn the_palette_order_opens_with_the_status_roles_in_their_own_order() {
+    assert_eq!(
+        PALETTE_ROLE_ORDER[..STATUS_ROLE_ORDER.len()],
+        STATUS_ROLE_ORDER
+    );
 }
 
 #[test]
