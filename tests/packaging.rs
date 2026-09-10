@@ -2,7 +2,6 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use support::*;
 
@@ -566,7 +565,7 @@ fn the_build_script_names_the_manifest_it_is_building() {
 fn run_build_on_a_terminal(
     root: &Path,
     extra: &[(&str, &str)],
-    interrupt: Option<(Duration, i32)>,
+    interrupt: Option<i32>,
 ) -> (i32, String) {
     run_build_on_a_pane(root, (40, 100), extra, interrupt)
 }
@@ -575,11 +574,11 @@ fn run_build_on_a_pane(
     root: &Path,
     size: (u16, u16),
     extra: &[(&str, &str)],
-    interrupt: Option<(Duration, i32)>,
+    interrupt: Option<i32>,
 ) -> (i32, String) {
     use std::os::unix::process::CommandExt;
 
-    let pty = Pty::new();
+    let mut pty = Pty::new();
     pty.resize(size.0, size.1);
     let mut command = Command::new("/bin/sh");
     command
@@ -596,8 +595,8 @@ fn run_build_on_a_pane(
         command.env(key, value);
     }
     let mut child = command.spawn().expect("cannot run the build script");
-    if let Some((after, number)) = interrupt {
-        std::thread::sleep(after);
+    if let Some(number) = interrupt {
+        pty.wait_for(|seen| !spinner_frames(&placements(seen)).is_empty());
         signal(child.id(), number);
     }
     let seen = pty.read_until_quiet(&mut child);
@@ -951,7 +950,7 @@ fn an_interrupted_build_takes_its_spinner_and_its_capture_file_with_it() {
     let (_, seen) = run_build_on_a_terminal(
         &root,
         &[("PATH", &with_cargo), ("TMPDIR", tmp.to_str().unwrap())],
-        Some((Duration::from_millis(600), libc::SIGTERM)),
+        Some(libc::SIGTERM),
     );
 
     assert!(

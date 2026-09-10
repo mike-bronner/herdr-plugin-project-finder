@@ -317,27 +317,32 @@ fn building_the_child_environment_leaves_the_original_alone() {
     assert_eq!(env.get("HERDR_PLUGIN_CONFIG_DIR"), Some("/x/picker/config"));
 }
 
+fn recorder(dir: &TempDir, body: &str) -> PathBuf {
+    script(
+        dir,
+        "lay",
+        &format!(
+            "#!/bin/sh\n{} > \"$LAY_LOG.part\" && mv \"$LAY_LOG.part\" \"$LAY_LOG\"\n",
+            body
+        ),
+    )
+}
+
 fn wait_for(path: &Path) -> String {
     for _ in 0..200 {
         if let Ok(text) = std::fs::read_to_string(path) {
-            if !text.is_empty() {
-                return text;
-            }
+            return text;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    panic!("the handed-over command never ran: {}", path.display());
+    panic!("the handed-over command never published {}", path.display());
 }
 
 #[test]
 fn the_command_really_runs_with_the_workspace_substituted() {
     let dir = TempDir::new();
     let log = dir.join("log");
-    let lay = script(
-        &dir,
-        "lay",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LAY_LOG\"\n",
-    );
+    let lay = recorder(&dir, "printf '%s\\n' \"$@\"");
     let env =
         Environment::from_pairs(&[("PATH", LAUNCHD_PATH), ("LAY_LOG", log.to_str().unwrap())]);
     let argv = vec![
@@ -354,10 +359,9 @@ fn the_command_really_runs_with_the_workspace_substituted() {
 fn the_command_runs_with_the_plugin_variables_stripped_and_the_rest_intact() {
     let dir = TempDir::new();
     let log = dir.join("log");
-    let lay = script(
+    let lay = recorder(
         &dir,
-        "lay",
-        "#!/bin/sh\nprintf 'root=[%s] ratio=[%s]\\n' \"${HERDR_PLUGIN_ROOT:-}\" \"${SOME_TOOL_RATIO:-}\" > \"$LAY_LOG\"\n",
+        "printf 'root=[%s] ratio=[%s]\\n' \"${HERDR_PLUGIN_ROOT:-}\" \"${SOME_TOOL_RATIO:-}\"",
     );
     let env = Environment::from_pairs(&[
         ("PATH", LAUNCHD_PATH),
@@ -374,11 +378,7 @@ fn the_command_runs_with_the_plugin_variables_stripped_and_the_rest_intact() {
 fn the_command_outlives_the_picker_and_writes_nothing_to_its_screen() {
     let dir = TempDir::new();
     let log = dir.join("log");
-    let lay = script(
-        &dir,
-        "lay",
-        "#!/bin/sh\necho noise\necho more >&2\nps -o pgid= -p $$ > \"$LAY_LOG\"\n",
-    );
+    let lay = recorder(&dir, "echo noise\necho more >&2\nps -o pgid= -p $$");
     let env =
         Environment::from_pairs(&[("PATH", LAUNCHD_PATH), ("LAY_LOG", log.to_str().unwrap())]);
     hand_over(&[lay.to_string_lossy().to_string()], "w9", &env).unwrap();

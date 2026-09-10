@@ -426,14 +426,14 @@ fn one_repositorys_open_worktree_never_holds_another_repository_open() {
     );
 }
 
-fn layout_script(world: &World, log: &Path) -> String {
+fn layout_script(world: &World, records: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
     let path = world.own.join("lay");
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
-            log.to_string_lossy()
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}'/$$.part && mv '{0}'/$$.part '{0}'/$$\n",
+            records.to_string_lossy()
         ),
     )
     .unwrap();
@@ -443,17 +443,27 @@ fn layout_script(world: &World, log: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn wait_for_lines(path: &Path, want: usize) -> Vec<String> {
+fn published(records: &Path) -> Vec<String> {
+    std::fs::read_dir(records)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().map(|e| e != "part").unwrap_or(true))
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect()
+}
+
+fn wait_for_runs(records: &Path, want: usize) -> Vec<String> {
     for _ in 0..300 {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            let lines: Vec<String> = text.lines().map(str::to_string).collect();
-            if lines.len() >= want {
-                return lines;
-            }
+        let found = published(records);
+        if found.len() >= want {
+            return found
+                .iter()
+                .flat_map(|text| text.lines().map(str::to_string))
+                .collect();
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    panic!("the layout command wrote fewer than {} lines", want);
+    panic!("fewer than {} layout commands published a record", want);
 }
 
 #[test]
@@ -461,8 +471,8 @@ fn every_workspace_the_picker_opens_is_handed_to_the_layout_command() {
     let world = World::new();
     world.repo("alpha");
     world.repo("beta");
-    let log = world.own.join("log");
-    let lay = layout_script(&world, &log);
+    let records = world.own.dir("records");
+    let lay = layout_script(&world, &records);
     world.configure(&format!(
         "[picker]\nlayout = \"{} --space {{workspace}}\"\n",
         lay
@@ -470,7 +480,7 @@ fn every_workspace_the_picker_opens_is_handed_to_the_layout_command() {
     let stub = Stub::start(Script::default());
     let run = run_choosing(&world, &stub, &["alpha", "beta"], &[]);
     assert!(run.outcome.is_ok());
-    let mut lines = wait_for_lines(&log, 4);
+    let mut lines = wait_for_runs(&records, 2);
     lines.sort();
     assert_eq!(lines, vec!["--space", "--space", "new1", "new2"]);
 }
@@ -480,8 +490,8 @@ fn the_layout_command_is_resolved_once_however_many_workspaces_open() {
     let world = World::new();
     world.repo("alpha");
     world.repo("beta");
-    let log = world.own.join("log");
-    let lay = layout_script(&world, &log);
+    let records = world.own.dir("records");
+    let lay = layout_script(&world, &records);
     world.configure("[picker]\nlayout = \"{plugin:some.plugin}/lay --space {workspace}\"\n");
     let _ = lay;
     let stub =
@@ -493,7 +503,7 @@ fn the_layout_command_is_resolved_once_however_many_workspaces_open() {
         1,
         "the checkout is asked for once per run, not once per workspace"
     );
-    wait_for_lines(&log, 4);
+    wait_for_runs(&records, 2);
 }
 
 #[test]

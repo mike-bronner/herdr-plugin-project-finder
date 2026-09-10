@@ -395,6 +395,7 @@ static PTY_OPEN: Mutex<()> = Mutex::new(());
 pub struct Pty {
     master: std::fs::File,
     slave: std::fs::File,
+    seen: Vec<u8>,
 }
 
 impl Pty {
@@ -416,7 +417,11 @@ impl Pty {
                 .write(true)
                 .open(&path)
                 .expect("cannot open the terminal side of the pair");
-            Pty { master, slave }
+            Pty {
+                master,
+                slave,
+                seen: Vec::new(),
+            }
         }
     }
 
@@ -442,21 +447,64 @@ impl Pty {
         std::process::Stdio::from(self.slave.try_clone().expect("cannot clone the terminal"))
     }
 
-    pub fn read_until_quiet(self, child: &mut std::process::Child) -> String {
-        use std::io::Read;
+    fn unblock(&self) {
         use std::os::fd::AsRawFd;
+
+        unsafe {
+            let flags = libc::fcntl(self.master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(
+                self.master.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            );
+        }
+    }
+
+    pub fn wait_for(&mut self, ready: impl Fn(&str) -> bool) {
+        use std::io::Read;
         use std::time::{Duration, Instant};
 
-        let Pty { mut master, slave } = self;
-        drop(slave);
-        unsafe {
-            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
-            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        self.unblock();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut chunk = [0u8; 4096];
+        loop {
+            match self.master.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.seen.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => break,
+            }
+            if ready(&String::from_utf8_lossy(&self.seen)) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the terminal never showed what the test waited for: {:?}",
+                String::from_utf8_lossy(&self.seen)
+            );
         }
+        panic!(
+            "the terminal closed before it showed what the test waited for: {:?}",
+            String::from_utf8_lossy(&self.seen)
+        );
+    }
+
+    pub fn read_until_quiet(self, child: &mut std::process::Child) -> String {
+        use std::io::Read;
+        use std::time::{Duration, Instant};
+
+        self.unblock();
+        let Pty {
+            mut master,
+            slave,
+            mut seen,
+        } = self;
+        drop(slave);
 
         let deadline = Instant::now() + Duration::from_secs(30);
         let quiet = Duration::from_millis(300);
-        let mut seen = Vec::new();
         let mut chunk = [0u8; 4096];
         let mut last = Instant::now();
         loop {
