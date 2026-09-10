@@ -7,8 +7,8 @@ use pick_project::config::{
     normpath, worktree_locations, Environment, HerdrConfig, FIXED_WORKTREE_DIRS,
 };
 use pick_project::discover::{
-    debug_line, duplicated_basenames, elide, human_age, label_for, labelled,
-    order_rows, parent_repo, repo_name, repos, row_kind, touched_at, Counts, Kind,
+    debug_line, duplicated_basenames, elide, human_age, label_for, labelled, order_rows,
+    parent_repo, repo_name, repos, row_kind, touched_at, Counts, Kind,
 };
 use support::*;
 
@@ -90,7 +90,10 @@ fn a_worktree_found_three_levels_down_is_tagged_worktree() {
     let tree = Tree::new();
     tree.worktree("worktrees/myrepo/feat-x");
     let found = find_default(&tree);
-    assert_eq!(found.iter().map(|p| row_kind(p)).collect::<Vec<_>>(), vec![Kind::Worktree]);
+    assert_eq!(
+        found.iter().map(|p| row_kind(p)).collect::<Vec<_>>(),
+        vec![Kind::Worktree]
+    );
 }
 
 #[test]
@@ -239,7 +242,13 @@ fn a_sibling_container_the_depth_bands_also_reach_lists_once() {
     let (dirs, roots) = locations_for("../worktrees");
     let (found, counts) = repos(tree.root(), &dirs, &roots);
     assert_eq!(found, vec![repo, wt]);
-    assert_eq!(counts, Counts { bands: 2, containers: 0 });
+    assert_eq!(
+        counts,
+        Counts {
+            bands: 2,
+            containers: 0
+        }
+    );
 }
 
 #[test]
@@ -296,7 +305,13 @@ fn each_pass_reports_what_it_contributed() {
     tree.worktree("myrepo/.worktrees/myrepo/feat-y");
     let (found, counts) = repos(tree.root(), &fixed(), &[]);
     assert_eq!(found.len(), 3);
-    assert_eq!(counts, Counts { bands: 2, containers: 1 });
+    assert_eq!(
+        counts,
+        Counts {
+            bands: 2,
+            containers: 1
+        }
+    );
 }
 
 #[test]
@@ -315,7 +330,13 @@ fn a_pass_that_found_nothing_reports_zero() {
     tree.repo("myrepo");
     let (found, counts) = repos(tree.root(), &fixed(), &[]);
     assert_eq!(found.len(), 1);
-    assert_eq!(counts, Counts { bands: 1, containers: 0 });
+    assert_eq!(
+        counts,
+        Counts {
+            bands: 1,
+            containers: 0
+        }
+    );
 }
 
 #[test]
@@ -639,7 +660,8 @@ fn whitespace_around_the_pointer_target_is_ignored() {
 
 #[test]
 fn only_the_first_line_of_the_pointer_is_read() {
-    let (_dir, _, parent) = derive("gitdir: /x/parent/.git/worktrees/wt\n/x/other/.git/worktrees/wt2\n");
+    let (_dir, _, parent) =
+        derive("gitdir: /x/parent/.git/worktrees/wt\n/x/other/.git/worktrees/wt2\n");
     assert_eq!(parent, Some(PathBuf::from("/x/parent")));
 }
 
@@ -684,7 +706,10 @@ fn a_multibyte_label_is_cut_by_character_not_by_byte() {
 #[test]
 fn a_worktree_names_the_repository_it_belongs_to() {
     let dir = TempDir::new();
-    let checkout = make_worktree(&dir.join("feat-x"), "/x/code/tru-data/.git/worktrees/feat-x");
+    let checkout = make_worktree(
+        &dir.join("feat-x"),
+        "/x/code/tru-data/.git/worktrees/feat-x",
+    );
     assert_eq!(repo_name(&checkout), Some("tru-data".to_string()));
 }
 
@@ -821,12 +846,27 @@ fn an_open_repo_is_not_walked_twice() {
 
 #[test]
 fn the_debug_line_reports_the_elapsed_time_in_milliseconds() {
-    assert!(debug_line(26.44, 3, Counts { bands: 2, containers: 1 }).contains("26.4ms"));
+    assert!(debug_line(
+        26.44,
+        3,
+        Counts {
+            bands: 2,
+            containers: 1
+        }
+    )
+    .contains("26.4ms"));
 }
 
 #[test]
 fn the_debug_line_reports_the_row_total_and_both_passes() {
-    let text = debug_line(26.4, 3, Counts { bands: 2, containers: 1 });
+    let text = debug_line(
+        26.4,
+        3,
+        Counts {
+            bands: 2,
+            containers: 1,
+        },
+    );
     assert!(text.contains("3 rows"), "{}", text);
     assert!(text.contains("2 from depth bands"), "{}", text);
     assert!(text.contains("1 from worktree containers"), "{}", text);
@@ -834,13 +874,27 @@ fn the_debug_line_reports_the_row_total_and_both_passes() {
 
 #[test]
 fn the_debug_row_total_is_the_rows_not_the_sum_of_the_passes() {
-    let text = debug_line(26.4, 3, Counts { bands: 1, containers: 1 });
+    let text = debug_line(
+        26.4,
+        3,
+        Counts {
+            bands: 1,
+            containers: 1,
+        },
+    );
     assert!(text.contains("3 rows"), "{}", text);
 }
 
 #[test]
 fn the_debug_line_is_one_line_naming_the_picker() {
-    let text = debug_line(26.4, 3, Counts { bands: 2, containers: 1 });
+    let text = debug_line(
+        26.4,
+        3,
+        Counts {
+            bands: 2,
+            containers: 1,
+        },
+    );
     assert_eq!(text.matches('\n').count(), 1);
     assert!(text.ends_with('\n'));
     assert!(text.starts_with("picker: "));

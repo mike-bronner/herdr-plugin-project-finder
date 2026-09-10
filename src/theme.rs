@@ -49,24 +49,186 @@ const fn rgb(r: u8, g: u8, b: u8) -> Colour {
 }
 
 pub const PALETTES: [(&str, [Colour; 5]); 18] = [
-    ("catppuccin", [rgb(166, 227, 161), rgb(249, 226, 175), rgb(243, 139, 168), rgb(148, 226, 213), rgb(108, 112, 134)]),
-    ("catppuccin-latte", [rgb(64, 160, 43), rgb(223, 142, 29), rgb(210, 15, 57), rgb(23, 146, 153), rgb(156, 160, 176)]),
-    ("terminal", [Colour::Indexed(2), Colour::Indexed(3), Colour::Indexed(9), Colour::Indexed(6), Colour::Indexed(7)]),
-    ("tokyo-night", [rgb(158, 206, 106), rgb(224, 175, 104), rgb(247, 118, 142), rgb(125, 207, 255), rgb(86, 95, 137)]),
-    ("tokyo-night-day", [rgb(88, 117, 57), rgb(140, 108, 62), rgb(245, 42, 101), rgb(17, 140, 116), rgb(137, 144, 179)]),
-    ("dracula", [rgb(80, 250, 123), rgb(241, 250, 140), rgb(255, 85, 85), rgb(139, 233, 253), rgb(98, 114, 164)]),
-    ("nord", [rgb(163, 190, 140), rgb(235, 203, 139), rgb(191, 97, 106), rgb(143, 188, 187), rgb(76, 86, 106)]),
-    ("gruvbox", [rgb(184, 187, 38), rgb(250, 189, 47), rgb(251, 73, 52), rgb(142, 192, 124), rgb(146, 131, 116)]),
-    ("gruvbox-light", [rgb(121, 116, 14), rgb(181, 118, 20), rgb(157, 0, 6), rgb(66, 123, 88), rgb(146, 131, 116)]),
-    ("one-dark", [rgb(152, 195, 121), rgb(229, 192, 123), rgb(224, 108, 117), rgb(86, 182, 194), rgb(92, 99, 112)]),
-    ("one-light", [rgb(80, 161, 79), rgb(193, 132, 1), rgb(228, 86, 73), rgb(1, 132, 188), rgb(160, 161, 167)]),
-    ("solarized", [rgb(133, 153, 0), rgb(181, 137, 0), rgb(220, 50, 47), rgb(42, 161, 152), rgb(88, 110, 117)]),
-    ("solarized-light", [rgb(133, 153, 0), rgb(181, 137, 0), rgb(220, 50, 47), rgb(42, 161, 152), rgb(147, 161, 161)]),
-    ("kanagawa", [rgb(118, 148, 106), rgb(192, 163, 110), rgb(195, 64, 67), rgb(127, 180, 202), rgb(114, 113, 105)]),
-    ("kanagawa-lotus", [rgb(111, 137, 78), rgb(119, 113, 63), rgb(200, 64, 83), rgb(78, 140, 162), rgb(160, 156, 172)]),
-    ("rose-pine", [rgb(49, 116, 143), rgb(246, 193, 119), rgb(235, 111, 146), rgb(156, 207, 216), rgb(110, 106, 134)]),
-    ("rose-pine-dawn", [rgb(40, 105, 131), rgb(234, 157, 52), rgb(180, 99, 122), rgb(86, 148, 159), rgb(152, 147, 165)]),
-    ("vesper", [rgb(153, 255, 228), rgb(255, 199, 153), rgb(255, 128, 128), rgb(102, 221, 204), rgb(92, 92, 92)]),
+    (
+        "catppuccin",
+        [
+            rgb(166, 227, 161),
+            rgb(249, 226, 175),
+            rgb(243, 139, 168),
+            rgb(148, 226, 213),
+            rgb(108, 112, 134),
+        ],
+    ),
+    (
+        "catppuccin-latte",
+        [
+            rgb(64, 160, 43),
+            rgb(223, 142, 29),
+            rgb(210, 15, 57),
+            rgb(23, 146, 153),
+            rgb(156, 160, 176),
+        ],
+    ),
+    (
+        "terminal",
+        [
+            Colour::Indexed(2),
+            Colour::Indexed(3),
+            Colour::Indexed(9),
+            Colour::Indexed(6),
+            Colour::Indexed(7),
+        ],
+    ),
+    (
+        "tokyo-night",
+        [
+            rgb(158, 206, 106),
+            rgb(224, 175, 104),
+            rgb(247, 118, 142),
+            rgb(125, 207, 255),
+            rgb(86, 95, 137),
+        ],
+    ),
+    (
+        "tokyo-night-day",
+        [
+            rgb(88, 117, 57),
+            rgb(140, 108, 62),
+            rgb(245, 42, 101),
+            rgb(17, 140, 116),
+            rgb(137, 144, 179),
+        ],
+    ),
+    (
+        "dracula",
+        [
+            rgb(80, 250, 123),
+            rgb(241, 250, 140),
+            rgb(255, 85, 85),
+            rgb(139, 233, 253),
+            rgb(98, 114, 164),
+        ],
+    ),
+    (
+        "nord",
+        [
+            rgb(163, 190, 140),
+            rgb(235, 203, 139),
+            rgb(191, 97, 106),
+            rgb(143, 188, 187),
+            rgb(76, 86, 106),
+        ],
+    ),
+    (
+        "gruvbox",
+        [
+            rgb(184, 187, 38),
+            rgb(250, 189, 47),
+            rgb(251, 73, 52),
+            rgb(142, 192, 124),
+            rgb(146, 131, 116),
+        ],
+    ),
+    (
+        "gruvbox-light",
+        [
+            rgb(121, 116, 14),
+            rgb(181, 118, 20),
+            rgb(157, 0, 6),
+            rgb(66, 123, 88),
+            rgb(146, 131, 116),
+        ],
+    ),
+    (
+        "one-dark",
+        [
+            rgb(152, 195, 121),
+            rgb(229, 192, 123),
+            rgb(224, 108, 117),
+            rgb(86, 182, 194),
+            rgb(92, 99, 112),
+        ],
+    ),
+    (
+        "one-light",
+        [
+            rgb(80, 161, 79),
+            rgb(193, 132, 1),
+            rgb(228, 86, 73),
+            rgb(1, 132, 188),
+            rgb(160, 161, 167),
+        ],
+    ),
+    (
+        "solarized",
+        [
+            rgb(133, 153, 0),
+            rgb(181, 137, 0),
+            rgb(220, 50, 47),
+            rgb(42, 161, 152),
+            rgb(88, 110, 117),
+        ],
+    ),
+    (
+        "solarized-light",
+        [
+            rgb(133, 153, 0),
+            rgb(181, 137, 0),
+            rgb(220, 50, 47),
+            rgb(42, 161, 152),
+            rgb(147, 161, 161),
+        ],
+    ),
+    (
+        "kanagawa",
+        [
+            rgb(118, 148, 106),
+            rgb(192, 163, 110),
+            rgb(195, 64, 67),
+            rgb(127, 180, 202),
+            rgb(114, 113, 105),
+        ],
+    ),
+    (
+        "kanagawa-lotus",
+        [
+            rgb(111, 137, 78),
+            rgb(119, 113, 63),
+            rgb(200, 64, 83),
+            rgb(78, 140, 162),
+            rgb(160, 156, 172),
+        ],
+    ),
+    (
+        "rose-pine",
+        [
+            rgb(49, 116, 143),
+            rgb(246, 193, 119),
+            rgb(235, 111, 146),
+            rgb(156, 207, 216),
+            rgb(110, 106, 134),
+        ],
+    ),
+    (
+        "rose-pine-dawn",
+        [
+            rgb(40, 105, 131),
+            rgb(234, 157, 52),
+            rgb(180, 99, 122),
+            rgb(86, 148, 159),
+            rgb(152, 147, 165),
+        ],
+    ),
+    (
+        "vesper",
+        [
+            rgb(153, 255, 228),
+            rgb(255, 199, 153),
+            rgb(255, 128, 128),
+            rgb(102, 221, 204),
+            rgb(92, 92, 92),
+        ],
+    ),
 ];
 
 pub const THEME_ALIASES: [(&str, &str); 14] = [
@@ -87,11 +249,25 @@ pub const THEME_ALIASES: [(&str, &str); 14] = [
 ];
 
 pub const NAMED_COLORS: [(&str, u8); 19] = [
-    ("black", 0), ("red", 1), ("green", 2), ("yellow", 3), ("blue", 4),
-    ("magenta", 5), ("purple", 5), ("cyan", 6), ("gray", 7), ("grey", 7),
-    ("darkgray", 8), ("darkgrey", 8), ("lightred", 9), ("lightgreen", 10),
-    ("lightyellow", 11), ("lightblue", 12), ("lightmagenta", 13),
-    ("lightcyan", 14), ("white", 15),
+    ("black", 0),
+    ("red", 1),
+    ("green", 2),
+    ("yellow", 3),
+    ("blue", 4),
+    ("magenta", 5),
+    ("purple", 5),
+    ("cyan", 6),
+    ("gray", 7),
+    ("grey", 7),
+    ("darkgray", 8),
+    ("darkgrey", 8),
+    ("lightred", 9),
+    ("lightgreen", 10),
+    ("lightyellow", 11),
+    ("lightblue", 12),
+    ("lightmagenta", 13),
+    ("lightcyan", 14),
+    ("white", 15),
 ];
 
 pub const RESET_ALIASES: [&str; 4] = ["reset", "default", "none", "transparent"];
@@ -184,7 +360,8 @@ pub struct Theme {
 
 impl Theme {
     pub fn icon(&self, status: &str) -> &str {
-        self.lookup_icon(status).unwrap_or_else(|| self.lookup_icon("unknown").unwrap_or("·"))
+        self.lookup_icon(status)
+            .unwrap_or_else(|| self.lookup_icon("unknown").unwrap_or("·"))
     }
 
     fn lookup_icon(&self, status: &str) -> Option<&str> {
@@ -228,7 +405,11 @@ pub fn resolve_theme(config: &HerdrConfig, rejects: &dyn Fn(&str) -> bool) -> Th
         .collect();
 
     let auto = config.boolean("theme.auto_switch").unwrap_or(false);
-    let field = if auto { "theme.dark_name" } else { "theme.name" };
+    let field = if auto {
+        "theme.dark_name"
+    } else {
+        "theme.name"
+    };
     let name = config.string(field).unwrap_or("");
     let key = match canonical_theme(name) {
         Some(key) => key,

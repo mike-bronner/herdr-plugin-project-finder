@@ -558,3 +558,13 @@ so what is checked is the requests it does and does not send. Nothing is mocked
 in process except the terminal itself, which `cargo test` cannot give it; the
 screen is checked instead by rendering into ratatui's test backend and reading
 the cells back.
+
+The tree is rustfmt-formatted on the tool's defaults, with no `rustfmt.toml` to
+carry: `cargo fmt --check` is expected to pass, and `cargo fmt` is expected to
+change nothing. A wider `max_width` was measured and rejected because it moved
+more lines than the default did, not fewer. `cargo clippy --all-targets` is
+expected to be silent.
+
+No Rust file carries a comment or a doc comment, tests included, and
+`no_rust_source_file_carries_a_comment` fails the suite when one appears. Names
+carry the intent instead.

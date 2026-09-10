@@ -136,8 +136,7 @@ pub fn workspaces(client: &Client) -> Vec<Workspace> {
                 workspace_id: string_at(w, "workspace_id")?,
                 label: string_at(w, "label").unwrap_or_default(),
                 focused: w.get("focused").and_then(Value::as_bool).unwrap_or(false),
-                agent_status: string_at(w, "agent_status")
-                    .unwrap_or_else(|| "unknown".to_string()),
+                agent_status: string_at(w, "agent_status").unwrap_or_else(|| "unknown".to_string()),
             })
         })
         .collect()
@@ -157,7 +156,9 @@ pub fn open_workspaces(client: &Client, home_label: &str) -> (Option<Workspace>,
 }
 
 fn opened_workspace_id(result: &Value) -> Option<String> {
-    result.get("workspace").and_then(|w| string_at(w, "workspace_id"))
+    result
+        .get("workspace")
+        .and_then(|w| string_at(w, "workspace_id"))
 }
 
 pub fn worktree_open(

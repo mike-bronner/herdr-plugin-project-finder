@@ -33,9 +33,8 @@ fn no_home_open_leaves_every_workspace_in_the_list() {
 
 #[test]
 fn a_home_label_of_your_own_is_the_one_that_is_held_back() {
-    let stub = Stub::start(
-        Script::default().open(vec![workspace("~", "w1"), workspace("base", "w2")]),
-    );
+    let stub =
+        Stub::start(Script::default().open(vec![workspace("~", "w1"), workspace("base", "w2")]));
     let (home, others) = api::open_workspaces(&stub.client(), "base");
     assert_eq!(home.unwrap().workspace_id, "w2");
     assert_eq!(labels(&others), vec!["~"]);
@@ -44,19 +43,24 @@ fn a_home_label_of_your_own_is_the_one_that_is_held_back() {
 #[test]
 fn an_unreachable_server_lists_nothing_rather_than_failing() {
     let stub = Stub::start(Script::default().failing("workspace.list", "server_not_running"));
-    assert_eq!(api::open_workspaces(&stub.client(), "~"), (None, Vec::new()));
+    assert_eq!(
+        api::open_workspaces(&stub.client(), "~"),
+        (None, Vec::new())
+    );
 }
 
 #[test]
 fn a_workspace_row_with_no_id_is_dropped_rather_than_guessed_at() {
-    let stub = Stub::start(Script::default().open(vec![json!({"label": "a"}), workspace("b", "w2")]));
+    let stub =
+        Stub::start(Script::default().open(vec![json!({"label": "a"}), workspace("b", "w2")]));
     let (_, others) = api::open_workspaces(&stub.client(), "~");
     assert_eq!(labels(&others), vec!["b"]);
 }
 
 #[test]
 fn a_workspace_with_no_agent_status_reads_as_unknown() {
-    let stub = Stub::start(Script::default().open(vec![json!({"workspace_id": "w1", "label": "a"})]));
+    let stub =
+        Stub::start(Script::default().open(vec![json!({"workspace_id": "w1", "label": "a"})]));
     let (_, others) = api::open_workspaces(&stub.client(), "~");
     assert_eq!(others[0].agent_status, "unknown");
 }
@@ -124,7 +128,10 @@ fn closing_the_focused_workspace_with_no_home_open_focuses_nothing() {
 fn an_unchanged_selection_leaves_the_focus_alone() {
     let closed = vec!["w2".to_string()];
     let surviving = vec!["w1".to_string()];
-    assert_eq!(pick_focus(&[], &closed, Some("w1"), &surviving, Some("h")), None);
+    assert_eq!(
+        pick_focus(&[], &closed, Some("w1"), &surviving, Some("h")),
+        None
+    );
 }
 
 fn worktree_checkout(dir: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -267,7 +274,12 @@ fn nothing_is_ever_focused_as_it_is_opened() {
     open_project(&stub.client(), "notes", &plain);
     for method in ["worktree.open", "workspace.create"] {
         for params in stub.params_for(method) {
-            assert_eq!(params["focus"], json!(false), "{} focused a workspace", method);
+            assert_eq!(
+                params["focus"],
+                json!(false),
+                "{} focused a workspace",
+                method
+            );
         }
     }
 }
@@ -299,9 +311,18 @@ fn no_plugin_row_yields_no_root() {
 
 #[test]
 fn a_plugin_row_with_no_root_yields_no_root() {
-    for row in [json!({"plugin_root": ""}), json!({}), json!({"plugin_root": null})] {
+    for row in [
+        json!({"plugin_root": ""}),
+        json!({}),
+        json!({"plugin_root": null}),
+    ] {
         let stub = Stub::start(Script::default().plugins(vec![row.clone()]));
-        assert_eq!(api::plugin_root(&stub.client(), "some.plugin"), None, "{}", row);
+        assert_eq!(
+            api::plugin_root(&stub.client(), "some.plugin"),
+            None,
+            "{}",
+            row
+        );
     }
 }
 
@@ -408,14 +429,19 @@ fn workspaces_keep_the_order_the_server_listed_them_in() {
         workspace("b", "w2"),
     ]));
     let listed: Vec<Workspace> = api::workspaces(&stub.client());
-    assert_eq!(ids(&listed.iter().map(|w| w.workspace_id.clone()).collect::<Vec<_>>()), vec!["w3", "w1", "w2"]);
+    assert_eq!(
+        ids(&listed
+            .iter()
+            .map(|w| w.workspace_id.clone())
+            .collect::<Vec<_>>()),
+        vec!["w3", "w1", "w2"]
+    );
 }
 
 #[test]
 fn a_focused_workspace_is_reported_as_focused() {
-    let stub = Stub::start(
-        Script::default().open(vec![workspace_with("a", "w1", true, "working")]),
-    );
+    let stub =
+        Stub::start(Script::default().open(vec![workspace_with("a", "w1", true, "working")]));
     let listed = api::workspaces(&stub.client());
     assert!(listed[0].focused);
     assert_eq!(listed[0].agent_status, "working");

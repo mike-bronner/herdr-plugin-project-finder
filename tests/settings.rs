@@ -81,7 +81,8 @@ fn an_unreadable_env_path_is_a_noop() {
 
 #[test]
 fn env_comments_and_blank_lines_are_skipped() {
-    let got = pairs("# HERDR_PICKER_ROOT=/commented\n\n   # indented comment\nHERDR_PICKER_HOME=base\n");
+    let got =
+        pairs("# HERDR_PICKER_ROOT=/commented\n\n   # indented comment\nHERDR_PICKER_HOME=base\n");
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].1, "base");
 }
@@ -170,7 +171,11 @@ fn an_unknown_key_is_reported_and_the_rest_of_the_file_still_applies() {
     );
     assert_eq!(settings.root.as_deref(), Some("/x/code"));
     assert_eq!(settings.complaints.len(), 1, "{:?}", settings.complaints);
-    assert!(settings.complaints[0].contains("nonsense"), "{:?}", settings.complaints);
+    assert!(
+        settings.complaints[0].contains("nonsense"),
+        "{:?}",
+        settings.complaints
+    );
 }
 
 #[test]
@@ -206,14 +211,26 @@ fn a_malformed_config_file_sets_nothing_and_says_so() {
     let settings = settings_from(&dir, Some("[picker\nroot /x/code\n}{\n"), None, &[]);
     assert_eq!(settings.root, None);
     assert_eq!(settings.complaints.len(), 1);
-    assert!(settings.complaints[0].contains("does not parse"), "{:?}", settings.complaints);
+    assert!(
+        settings.complaints[0].contains("does not parse"),
+        "{:?}",
+        settings.complaints
+    );
 }
 
 #[test]
 fn one_malformed_line_now_voids_the_whole_config_file() {
     let dir = TempDir::new();
-    let settings = settings_from(&dir, Some("[picker]\nroot /x/typo\nhome = \"base\"\n"), None, &[]);
-    assert_eq!(settings.home, None, "the line after a syntax error must not survive");
+    let settings = settings_from(
+        &dir,
+        Some("[picker]\nroot /x/typo\nhome = \"base\"\n"),
+        None,
+        &[],
+    );
+    assert_eq!(
+        settings.home, None,
+        "the line after a syntax error must not survive"
+    );
     assert_eq!(settings.complaints.len(), 1);
 }
 
@@ -371,10 +388,7 @@ fn the_default_is_what_an_unconfigured_picker_runs() {
     let config_dir = dir.dir("plugin-config");
     let env = Environment::from_pairs(&[
         ("HOME", "/private/tmp"),
-        (
-            "HERDR_PLUGIN_CONFIG_DIR",
-            config_dir.to_str().unwrap(),
-        ),
+        ("HERDR_PLUGIN_CONFIG_DIR", config_dir.to_str().unwrap()),
     ]);
     let sources = read_sources(&env, &manifest_dir());
     let settings = resolve_settings(&env, &sources);
@@ -385,7 +399,11 @@ fn the_default_is_what_an_unconfigured_picker_runs() {
 fn a_user_setting_beats_the_shipped_default() {
     let dir = TempDir::new();
     let config_dir = dir.dir("plugin-config");
-    std::fs::write(config_dir.join("config.toml"), "[picker]\nlayout = \"/x/mine\"\n").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[picker]\nlayout = \"/x/mine\"\n",
+    )
+    .unwrap();
     let env = Environment::from_pairs(&[
         ("HOME", "/private/tmp"),
         ("HERDR_PLUGIN_CONFIG_DIR", config_dir.to_str().unwrap()),
@@ -524,9 +542,7 @@ fn only_this_plugins_settings_have_a_home_in_its_config_toml() {
 
 #[test]
 fn the_picker_table_header_is_documented() {
-    assert!(read_repo_file("README.md")
-        .lines()
-        .any(|l| l == "[picker]"));
+    assert!(read_repo_file("README.md").lines().any(|l| l == "[picker]"));
 }
 
 #[test]
@@ -724,7 +740,8 @@ fn a_key_before_any_table_header_is_not_claimed_by_one() {
 
 #[test]
 fn comments_and_blank_lines_in_herdrs_config_are_skipped() {
-    let config = HerdrConfig::parse("# [theme]\n# name = \"commented\"\n\n[theme]\nname = \"nord\"\n");
+    let config =
+        HerdrConfig::parse("# [theme]\n# name = \"commented\"\n\n[theme]\nname = \"nord\"\n");
     assert_eq!(config.string("theme.name"), Some("nord"));
 }
 
@@ -744,7 +761,10 @@ fn single_quotes_work_too() {
 fn an_array_is_not_read_as_a_string() {
     let config = HerdrConfig::parse("[theme]\nname = [\"a\", \"b\"]\n");
     assert_eq!(config.string("theme.name"), None);
-    assert!(config.has("theme.name"), "the key is still present, just not a string");
+    assert!(
+        config.has("theme.name"),
+        "the key is still present, just not a string"
+    );
 }
 
 #[test]

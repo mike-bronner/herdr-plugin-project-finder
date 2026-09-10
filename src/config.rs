@@ -61,7 +61,9 @@ impl Environment {
     pub fn without_plugin_vars(&self) -> Vec<(String, String)> {
         self.vars
             .iter()
-            .filter(|(k, _)| k.as_str() != "HERDR_PLUGIN_ROOT" && k.as_str() != "HERDR_PLUGIN_CONFIG_DIR")
+            .filter(|(k, _)| {
+                k.as_str() != "HERDR_PLUGIN_ROOT" && k.as_str() != "HERDR_PLUGIN_CONFIG_DIR"
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -195,7 +197,10 @@ pub fn read_sources(env: &Environment, own_root: &Path) -> Sources {
 
 pub fn resolve_settings(env: &Environment, sources: &Sources) -> Settings {
     let mut complaints = Vec::new();
-    for (which, config) in [("config.toml", &sources.config), ("defaults.toml", &sources.defaults)] {
+    for (which, config) in [
+        ("config.toml", &sources.config),
+        ("defaults.toml", &sources.defaults),
+    ] {
         if let Some(error) = &config.error {
             complaints.push(format!(
                 "{} does not parse, so none of it applies: {}",
@@ -203,7 +208,10 @@ pub fn resolve_settings(env: &Environment, sources: &Sources) -> Settings {
             ));
         }
         for key in &config.unknown {
-            complaints.push(format!("{} names {}, which the picker has no setting for", which, key));
+            complaints.push(format!(
+                "{} names {}, which the picker has no setting for",
+                which, key
+            ));
         }
     }
 
@@ -214,9 +222,7 @@ pub fn resolve_settings(env: &Environment, sources: &Sources) -> Settings {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
     };
-    let string_of = |var: &str,
-                     pick: fn(&PickerTable) -> Option<String>|
-     -> Option<String> {
+    let string_of = |var: &str, pick: fn(&PickerTable) -> Option<String>| -> Option<String> {
         env.get(var)
             .map(str::to_string)
             .or_else(|| pick(&sources.config.table))

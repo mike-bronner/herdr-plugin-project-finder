@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use crate::api::{self, Client};
 use crate::config::{
-    herdr_config_path, home_label, read_sources, resolve_root, resolve_settings, worktree_locations,
-    Environment, HerdrConfig,
+    herdr_config_path, home_label, read_sources, resolve_root, resolve_settings,
+    worktree_locations, Environment, HerdrConfig,
 };
 use crate::discover::{
     debug_line, human_age, labelled, now, order_rows, repo_name, repos, row_kind, touched_at,
@@ -32,7 +32,9 @@ pub enum Fatal {
 impl Fatal {
     pub fn message(&self) -> &str {
         match self {
-            Fatal::NoRepos(m) | Fatal::NoServer(m) | Fatal::NotOpened(m) | Fatal::NoTerminal(m) => m,
+            Fatal::NoRepos(m) | Fatal::NoServer(m) | Fatal::NotOpened(m) | Fatal::NoTerminal(m) => {
+                m
+            }
         }
     }
 }
@@ -88,7 +90,12 @@ pub fn run(
     let (paths, counts) = repos(&root, &worktree_dirs, &worktree_roots);
     if settings.debug {
         let _ = out.write_all(
-            debug_line(started.elapsed().as_secs_f64() * 1000.0, paths.len(), counts).as_bytes(),
+            debug_line(
+                started.elapsed().as_secs_f64() * 1000.0,
+                paths.len(),
+                counts,
+            )
+            .as_bytes(),
         );
     }
 
@@ -110,7 +117,9 @@ pub fn run(
     });
 
     let rows = labelled(&paths);
-    let (head, rest) = order_rows(&rows, &open_ws, &mut |path| touched_at(path, &worktree_dirs));
+    let (head, rest) = order_rows(&rows, &open_ws, &mut |path| {
+        touched_at(path, &worktree_dirs)
+    });
 
     let stamp = now();
     let mut entries: Vec<Entry> = Vec::new();

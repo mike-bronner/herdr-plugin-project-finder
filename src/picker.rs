@@ -144,7 +144,9 @@ impl Picker {
         for (at, entry) in self.entries.iter().enumerate() {
             let haystack = entry.haystack();
             buffer.clear();
-            if let Some(score) = pattern.score(Utf32Str::new(&haystack, &mut buffer), &mut self.matcher) {
+            if let Some(score) =
+                pattern.score(Utf32Str::new(&haystack, &mut buffer), &mut self.matcher)
+            {
                 scored.push((score, at));
             }
         }

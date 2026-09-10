@@ -74,7 +74,11 @@ fn checkouts_at(base: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
-pub fn repos(root: &Path, worktree_dirs: &[String], worktree_roots: &[String]) -> (Vec<PathBuf>, Counts) {
+pub fn repos(
+    root: &Path,
+    worktree_dirs: &[String],
+    worktree_roots: &[String],
+) -> (Vec<PathBuf>, Counts) {
     let mut out: Vec<PathBuf> = Vec::new();
 
     for depth in DEPTH_BANDS {
@@ -128,9 +132,7 @@ pub fn parent_repo(path: &Path) -> Option<PathBuf> {
     if key.trim() != "gitdir" || target.trim().is_empty() {
         return None;
     }
-    let admin = PathBuf::from(normpath(
-        &path.join(target.trim()).to_string_lossy(),
-    ));
+    let admin = PathBuf::from(normpath(&path.join(target.trim()).to_string_lossy()));
     let container = admin.parent()?;
     let dotgit = container.parent()?;
     if container.file_name()?.to_string_lossy() != "worktrees"
@@ -184,7 +186,10 @@ pub fn touched_at(path: &Path, worktree_dirs: &[String]) -> u64 {
 
 fn mtime(path: &Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    modified.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+    modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 pub fn now() -> u64 {

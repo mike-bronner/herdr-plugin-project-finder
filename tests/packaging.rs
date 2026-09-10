@@ -34,7 +34,10 @@ fn the_manifest_parses_as_toml() {
 
 #[test]
 fn a_typo_in_the_manifest_is_really_caught() {
-    let broken = format!("{}\nname = \"unterminated\n", read_repo_file("herdr-plugin.toml"));
+    let broken = format!(
+        "{}\nname = \"unterminated\n",
+        read_repo_file("herdr-plugin.toml")
+    );
     assert!(broken.parse::<toml::Table>().is_err());
 }
 
@@ -98,7 +101,10 @@ fn the_manifest_and_the_crate_agree_on_the_version() {
 #[test]
 fn the_shipped_defaults_keep_the_comments_that_are_their_interface() {
     let text = read_repo_file("defaults.toml");
-    let comments = text.lines().filter(|l| l.trim_start().starts_with('#')).count();
+    let comments = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .count();
     assert!(
         comments >= 20,
         "defaults.toml is edited by hand, so its comments are its interface: {} left",
@@ -138,8 +144,19 @@ fn every_rust_source_file_is_covered_by_that_guard() {
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
-    for name in ["main.rs", "lib.rs", "app.rs", "picker.rs", "ui.rs", "mod.rs"] {
-        assert!(found.contains(&name.to_string()), "{} was not scanned", name);
+    for name in [
+        "main.rs",
+        "lib.rs",
+        "app.rs",
+        "picker.rs",
+        "ui.rs",
+        "mod.rs",
+    ] {
+        assert!(
+            found.contains(&name.to_string()),
+            "{} was not scanned",
+            name
+        );
     }
 }
 
@@ -204,7 +221,10 @@ fn the_shim_runs_the_binary_and_builds_nothing_when_it_is_current() {
     let dir = TempDir::new();
     let root = fake_root(&dir, false);
     executable(&root.join("bin/build"), "#!/bin/sh\necho BUILT >&2\n");
-    executable(&root.join("target/release/pick-project"), "#!/bin/sh\necho RAN\n");
+    executable(
+        &root.join("target/release/pick-project"),
+        "#!/bin/sh\necho RAN\n",
+    );
     stamp(&root.join("src/main.rs"), 1000);
     stamp(&root.join("src"), 1000);
     stamp(&root.join("Cargo.toml"), 1000);
@@ -222,7 +242,10 @@ fn the_shim_rebuilds_when_a_source_file_is_newer_than_the_binary() {
     let dir = TempDir::new();
     let root = fake_root(&dir, false);
     executable(&root.join("bin/build"), "#!/bin/sh\necho BUILT >&2\n");
-    executable(&root.join("target/release/pick-project"), "#!/bin/sh\necho RAN\n");
+    executable(
+        &root.join("target/release/pick-project"),
+        "#!/bin/sh\necho RAN\n",
+    );
     stamp(&root.join("target/release/pick-project"), 1000);
     stamp(&root.join("src/main.rs"), 2000);
 
@@ -267,7 +290,10 @@ fn a_failed_build_runs_the_binary_already_there_and_says_it_may_be_stale() {
     let dir = TempDir::new();
     let root = fake_root(&dir, false);
     executable(&root.join("bin/build"), "#!/bin/sh\nexit 1\n");
-    executable(&root.join("target/release/pick-project"), "#!/bin/sh\necho RAN\n");
+    executable(
+        &root.join("target/release/pick-project"),
+        "#!/bin/sh\necho RAN\n",
+    );
     stamp(&root.join("target/release/pick-project"), 1000);
     stamp(&root.join("src/main.rs"), 2000);
 
@@ -357,7 +383,11 @@ fn the_build_script_prepends_the_cargo_directory_to_the_path_it_builds_under() {
     let root = fake_root(&dir, true);
     let log = dir.join("cargo-log");
     let cargo = fake_cargo(&dir, "rustup/bin/cargo", &log);
-    let with_cargo = format!("{}:{}", cargo.parent().unwrap().to_string_lossy(), LAUNCHD_PATH);
+    let with_cargo = format!(
+        "{}:{}",
+        cargo.parent().unwrap().to_string_lossy(),
+        LAUNCHD_PATH
+    );
 
     let run = run_build(&root, &[("PATH", &with_cargo)]);
     assert_eq!(run.status, 0, "{}", run.stderr);
@@ -382,7 +412,11 @@ fn the_build_script_finds_cargo_off_the_path_when_the_launchd_path_hides_it() {
     let run = run_build(&root, &[("CARGO", cargo.to_str().unwrap())]);
     assert_eq!(run.status, 0, "{}", run.stderr);
     let recorded = std::fs::read_to_string(&log).unwrap();
-    assert!(recorded.starts_with(&cargo.to_string_lossy().to_string()), "{}", recorded);
+    assert!(
+        recorded.starts_with(&cargo.to_string_lossy().to_string()),
+        "{}",
+        recorded
+    );
 }
 
 #[test]
@@ -393,7 +427,11 @@ fn the_build_script_prefers_cargo_on_the_path_over_the_named_fallbacks() {
     let ignored = dir.join("ignored-log");
     let on_path = fake_cargo(&dir, "onpath/cargo", &wanted);
     let fallback = fake_cargo(&dir, "fallback/cargo", &ignored);
-    let with_cargo = format!("{}:{}", on_path.parent().unwrap().to_string_lossy(), LAUNCHD_PATH);
+    let with_cargo = format!(
+        "{}:{}",
+        on_path.parent().unwrap().to_string_lossy(),
+        LAUNCHD_PATH
+    );
 
     run_build(
         &root,
@@ -445,7 +483,11 @@ fn a_failing_cargo_is_reported_rather_than_silently_producing_nothing() {
 
     let run = run_build(&root, &[("PATH", &with_cargo)]);
     assert_eq!(run.status, 1);
-    assert!(run.stderr.contains("cargo build --release failed"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("cargo build --release failed"),
+        "{}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -484,13 +526,21 @@ fn the_build_script_names_the_manifest_it_is_building() {
 fn the_python_implementation_and_its_suite_are_gone() {
     assert!(!manifest_dir().join("tests/test_pick_project.py").exists());
     let shim = read_repo_file("bin/pick-project");
-    assert!(shim.starts_with("#!/bin/sh"), "the entry point is a shell shim");
+    assert!(
+        shim.starts_with("#!/bin/sh"),
+        "the entry point is a shell shim"
+    );
     assert!(!shim.contains("python3"));
 }
 
 #[test]
 fn nothing_in_the_repo_still_names_fzf_as_a_dependency() {
-    for name in ["herdr-plugin.toml", "Cargo.toml", "bin/pick-project", "bin/build"] {
+    for name in [
+        "herdr-plugin.toml",
+        "Cargo.toml",
+        "bin/pick-project",
+        "bin/build",
+    ] {
         assert!(
             !read_repo_file(name).contains("fzf"),
             "{} still names fzf",

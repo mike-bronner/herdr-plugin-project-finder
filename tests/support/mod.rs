@@ -23,7 +23,11 @@ static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 impl TempDir {
     pub fn new() -> TempDir {
         let n = NEXT_DIR.fetch_add(1, Ordering::SeqCst);
-        let path = PathBuf::from(format!("/private/tmp/pick-project-t{}-{}", std::process::id(), n));
+        let path = PathBuf::from(format!(
+            "/private/tmp/pick-project-t{}-{}",
+            std::process::id(),
+            n
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("cannot make the temporary directory");
         TempDir { path }
@@ -286,15 +290,8 @@ pub fn env_for(stub: &Stub, home: &Path, pairs: &[(&str, &str)]) -> Environment 
             stub.socket().to_string_lossy().to_string(),
         ),
     ];
-    all.extend(
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string())),
-    );
-    let borrowed: Vec<(&str, &str)> = all
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    all.extend(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    let borrowed: Vec<(&str, &str)> = all.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     Environment::from_pairs(&borrowed)
 }
 

@@ -58,7 +58,10 @@ pub fn split_command(line: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
-pub fn substitute_plugin(arg: &str, root_of: &dyn Fn(&str) -> Option<String>) -> (String, Vec<String>) {
+pub fn substitute_plugin(
+    arg: &str,
+    root_of: &dyn Fn(&str) -> Option<String>,
+) -> (String, Vec<String>) {
     let mut out = String::new();
     let mut missing = Vec::new();
     let mut rest = arg;

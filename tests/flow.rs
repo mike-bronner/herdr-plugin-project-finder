@@ -78,10 +78,15 @@ fn run_with(
     let env = world.env(stub, extra);
     let out = Recorder::new();
     let listed = std::cell::RefCell::new(Vec::new());
-    let outcome = app::run(&env, world.own_root(), &mut out.clone(), &mut |entries, _, _| {
-        *listed.borrow_mut() = entries.clone();
-        Ok(choose(&entries))
-    });
+    let outcome = app::run(
+        &env,
+        world.own_root(),
+        &mut out.clone(),
+        &mut |entries, _, _| {
+            *listed.borrow_mut() = entries.clone();
+            Ok(choose(&entries))
+        },
+    );
     Run {
         outcome,
         stderr: out.text(),
@@ -140,7 +145,10 @@ fn no_socket_to_reach_herdr_on_is_refused_before_anything_is_drawn() {
         Ok(None)
     });
     assert!(matches!(outcome, Err(Fatal::NoServer(_))), "{:?}", outcome);
-    assert!(!drawn, "the picker must not draw itself with nowhere to send a pick");
+    assert!(
+        !drawn,
+        "the picker must not draw itself with nowhere to send a pick"
+    );
     let _ = stub;
 }
 
@@ -161,9 +169,8 @@ fn open_workspaces_are_listed_first_and_start_checked() {
 fn an_open_workspace_carries_its_agent_status_onto_its_row() {
     let world = World::new();
     world.repo("alpha");
-    let stub = Stub::start(
-        Script::default().open(vec![workspace_with("alpha", "w1", false, "blocked")]),
-    );
+    let stub =
+        Stub::start(Script::default().open(vec![workspace_with("alpha", "w1", false, "blocked")]));
     let run = run_choosing(&world, &stub, &["alpha"], &[]);
     assert_eq!(run.listed[0].status.as_deref(), Some("blocked"));
 }
@@ -181,10 +188,9 @@ fn a_row_that_is_not_open_carries_no_status() {
 fn the_home_workspace_is_never_listed_and_never_closed() {
     let world = World::new();
     world.repo("alpha");
-    let stub = Stub::start(Script::default().open(vec![
-        workspace("~", "home1"),
-        workspace("alpha", "w1"),
-    ]));
+    let stub = Stub::start(
+        Script::default().open(vec![workspace("~", "home1"), workspace("alpha", "w1")]),
+    );
     let run = run_choosing(&world, &stub, &[], &[]);
     assert!(run.listed.iter().all(|e| e.label != "~"));
     assert_eq!(closed_ids(&stub), vec!["w1"]);
@@ -194,10 +200,9 @@ fn the_home_workspace_is_never_listed_and_never_closed() {
 fn a_home_label_of_your_own_is_the_one_held_back() {
     let world = World::new();
     world.repo("alpha");
-    let stub = Stub::start(Script::default().open(vec![
-        workspace("base", "home1"),
-        workspace("alpha", "w1"),
-    ]));
+    let stub = Stub::start(
+        Script::default().open(vec![workspace("base", "home1"), workspace("alpha", "w1")]),
+    );
     world.configure("[picker]\nhome = \"base\"\n");
     let run = run_choosing(&world, &stub, &["alpha"], &[]);
     assert!(run.outcome.is_ok());
@@ -242,10 +247,9 @@ fn the_selection_becomes_the_truth() {
     world.repo("alpha");
     world.repo("beta");
     world.repo("gamma");
-    let stub = Stub::start(Script::default().open(vec![
-        workspace("alpha", "w1"),
-        workspace("beta", "w2"),
-    ]));
+    let stub = Stub::start(
+        Script::default().open(vec![workspace("alpha", "w1"), workspace("beta", "w2")]),
+    );
     run_choosing(&world, &stub, &["beta", "gamma"], &[]);
     assert_eq!(closed_ids(&stub), vec!["w1"]);
     assert_eq!(created_labels(&stub), vec!["gamma"]);
@@ -290,9 +294,8 @@ fn closing_the_focused_workspace_moves_the_focus_home() {
 fn a_run_that_changes_nothing_focuses_nothing() {
     let world = World::new();
     world.repo("alpha");
-    let stub = Stub::start(
-        Script::default().open(vec![workspace_with("alpha", "w1", true, "idle")]),
-    );
+    let stub =
+        Stub::start(Script::default().open(vec![workspace_with("alpha", "w1", true, "idle")]));
     let run = run_choosing(&world, &stub, &["alpha"], &[]);
     assert_eq!(run.outcome.unwrap().focused, None);
     assert!(stub.params_for("workspace.focus").is_empty());
@@ -310,7 +313,11 @@ fn a_workspace_that_will_not_open_at_all_refuses_by_path() {
     let run = run_choosing(&world, &stub, &["alpha"], &[]);
     match run.outcome {
         Err(Fatal::NotOpened(message)) => {
-            assert!(message.contains(&repo.to_string_lossy().to_string()), "{}", message)
+            assert!(
+                message.contains(&repo.to_string_lossy().to_string()),
+                "{}",
+                message
+            )
         }
         other => panic!("{:?}", other),
     }
@@ -368,7 +375,10 @@ fn every_workspace_the_picker_opens_is_handed_to_the_layout_command() {
     world.repo("beta");
     let log = world.own.join("log");
     let lay = layout_script(&world, &log);
-    world.configure(&format!("[picker]\nlayout = \"{} --space {{workspace}}\"\n", lay));
+    world.configure(&format!(
+        "[picker]\nlayout = \"{} --space {{workspace}}\"\n",
+        lay
+    ));
     let stub = Stub::start(Script::default());
     let run = run_choosing(&world, &stub, &["alpha", "beta"], &[]);
     assert!(run.outcome.is_ok());
@@ -386,9 +396,8 @@ fn the_layout_command_is_resolved_once_however_many_workspaces_open() {
     let lay = layout_script(&world, &log);
     world.configure("[picker]\nlayout = \"{plugin:some.plugin}/lay --space {workspace}\"\n");
     let _ = lay;
-    let stub = Stub::start(
-        Script::default().plugins(vec![json!({"plugin_root": world.own.path()})]),
-    );
+    let stub =
+        Stub::start(Script::default().plugins(vec![json!({"plugin_root": world.own.path()})]));
     let run = run_choosing(&world, &stub, &["alpha", "beta"], &[]);
     assert!(run.outcome.is_ok());
     assert_eq!(
@@ -574,10 +583,19 @@ fn the_homebrew_directories_are_put_on_the_path_the_launchd_server_lacks() {
     let path = widened.get("PATH").unwrap();
     for dir in app::EXTRA_PATH_DIRS {
         if Path::new(dir).is_dir() {
-            assert!(path.split(':').any(|d| d == dir), "{} is missing from {}", dir, path);
+            assert!(
+                path.split(':').any(|d| d == dir),
+                "{} is missing from {}",
+                dir,
+                path
+            );
         }
     }
-    assert!(path.ends_with(LAUNCHD_PATH), "the original PATH is kept: {}", path);
+    assert!(
+        path.ends_with(LAUNCHD_PATH),
+        "the original PATH is kept: {}",
+        path
+    );
 }
 
 #[test]

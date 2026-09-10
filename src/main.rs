@@ -30,7 +30,11 @@ fn plugin_root(env: &Environment) -> PathBuf {
 
 fn die(message: &str) -> ! {
     let _ = std::io::stderr().write_all(
-        format!("\n\x1b[31merror:\x1b[0m {}\n\nPress enter to close...", message).as_bytes(),
+        format!(
+            "\n\x1b[31merror:\x1b[0m {}\n\nPress enter to close...",
+            message
+        )
+        .as_bytes(),
     );
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {

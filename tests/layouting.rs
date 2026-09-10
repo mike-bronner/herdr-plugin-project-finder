@@ -28,7 +28,12 @@ struct Resolved {
     asked: Vec<String>,
 }
 
-fn resolve(setting: Option<&str>, creating: bool, root: Option<&str>, on_path: &[&str]) -> Resolved {
+fn resolve(
+    setting: Option<&str>,
+    creating: bool,
+    root: Option<&str>,
+    on_path: &[&str],
+) -> Resolved {
     let dir = TempDir::new();
     let bin = dir.dir("bin");
     for name in on_path {
@@ -101,7 +106,11 @@ fn a_command_line_of_only_spaces_splits_to_nothing() {
 fn a_resolved_command_keeps_its_arguments_and_the_workspace_token() {
     let dir = TempDir::new();
     let lay = script(&dir, "tool/lay", "#!/bin/sh\n");
-    let setting = format!("{} --space {} --quiet", lay.to_string_lossy(), WORKSPACE_TOKEN);
+    let setting = format!(
+        "{} --space {} --quiet",
+        lay.to_string_lossy(),
+        WORKSPACE_TOKEN
+    );
     let got = resolve(Some(&setting), true, None, &[]);
     assert_eq!(
         got.argv,
@@ -146,10 +155,7 @@ fn a_plugin_token_is_substituted_wherever_it_appears_in_an_argument() {
     let root = absolute(&dir, "tool");
     let setting = "{plugin:some.plugin}/lay --config={plugin:some.plugin}/c.toml";
     let got = resolve(Some(setting), true, Some(&root), &[]);
-    assert_eq!(
-        got.argv.unwrap()[1],
-        format!("--config={}/c.toml", root)
-    );
+    assert_eq!(got.argv.unwrap()[1], format!("--config={}/c.toml", root));
 }
 
 #[test]
@@ -210,7 +216,10 @@ fn a_bare_name_is_resolved_on_the_path() {
 fn an_unparseable_command_line_yields_no_command_and_warns() {
     let got = resolve(Some("/x/tool/lay --title \"unclosed"), true, None, &[]);
     assert_eq!(got.argv, None);
-    assert!(got.warning.unwrap().contains("not a command line I can read"));
+    assert!(got
+        .warning
+        .unwrap()
+        .contains("not a command line I can read"));
 }
 
 #[test]
@@ -329,10 +338,8 @@ fn the_command_really_runs_with_the_workspace_substituted() {
         "lay",
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LAY_LOG\"\n",
     );
-    let env = Environment::from_pairs(&[
-        ("PATH", LAUNCHD_PATH),
-        ("LAY_LOG", log.to_str().unwrap()),
-    ]);
+    let env =
+        Environment::from_pairs(&[("PATH", LAUNCHD_PATH), ("LAY_LOG", log.to_str().unwrap())]);
     let argv = vec![
         lay.to_string_lossy().to_string(),
         "--space".to_string(),
@@ -372,10 +379,8 @@ fn the_command_outlives_the_picker_and_writes_nothing_to_its_screen() {
         "lay",
         "#!/bin/sh\necho noise\necho more >&2\nps -o pgid= -p $$ > \"$LAY_LOG\"\n",
     );
-    let env = Environment::from_pairs(&[
-        ("PATH", LAUNCHD_PATH),
-        ("LAY_LOG", log.to_str().unwrap()),
-    ]);
+    let env =
+        Environment::from_pairs(&[("PATH", LAUNCHD_PATH), ("LAY_LOG", log.to_str().unwrap())]);
     hand_over(&[lay.to_string_lossy().to_string()], "w9", &env).unwrap();
     let group = wait_for(&log).trim().to_string();
     assert_ne!(

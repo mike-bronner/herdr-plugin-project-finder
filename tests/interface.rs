@@ -421,7 +421,10 @@ fn the_heading_columns_line_up_with_a_row() {
     let row = row_prefix(&entry("proj", Kind::Worktree, "3m ago", None, false));
     assert_eq!(at(&heading(), "KIND"), at(&row, "tree"));
     assert_eq!(at(&heading(), "TOUCHED"), at(&row, "3m ago"));
-    assert_eq!(heading().chars().count(), row.chars().count() + "AGENT STATUS".len());
+    assert_eq!(
+        heading().chars().count(),
+        row.chars().count() + "AGENT STATUS".len()
+    );
 }
 
 #[test]
@@ -438,7 +441,10 @@ fn the_kind_column_spends_four_characters_and_no_more() {
     assert_eq!(KIND_WIDTH, 4);
     assert_eq!(Kind::Worktree.cell(), "tree");
     assert_eq!(Kind::Repo.cell(), "repo");
-    assert_eq!(at(&heading(), "TOUCHED"), Some(LABEL_WIDTH + 1 + KIND_WIDTH + 1));
+    assert_eq!(
+        at(&heading(), "TOUCHED"),
+        Some(LABEL_WIDTH + 1 + KIND_WIDTH + 1)
+    );
 }
 
 #[test]
@@ -516,7 +522,11 @@ fn a_row_carries_its_own_kind_rather_than_a_constant() {
 fn the_haystack_keeps_the_whole_word_worktree_even_though_the_column_says_tree() {
     let row = entry("w", Kind::Worktree, "1m ago", None, false);
     assert!(row.haystack().contains("worktree"), "{}", row.haystack());
-    assert!(!row_prefix(&row).contains("worktree"), "{}", row_prefix(&row));
+    assert!(
+        !row_prefix(&row).contains("worktree"),
+        "{}",
+        row_prefix(&row)
+    );
 }
 
 #[test]
@@ -552,8 +562,15 @@ fn a_prefixed_row_is_exactly_as_wide_as_an_unprefixed_one() {
 #[test]
 fn a_prefix_too_long_for_the_row_is_cut_at_its_end_and_the_branch_survives_whole() {
     let row = row_prefix(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
-    assert!(row.starts_with("laravel-model-cach…/fix-cache-gaps"), "{}", row);
-    assert_eq!(at(&row, "3m ago"), at(&row_prefix(&worktree_of("x", "y")), "3m ago"));
+    assert!(
+        row.starts_with("laravel-model-cach…/fix-cache-gaps"),
+        "{}",
+        row
+    );
+    assert_eq!(
+        at(&row, "3m ago"),
+        at(&row_prefix(&worktree_of("x", "y")), "3m ago")
+    );
 }
 
 #[test]
@@ -608,7 +625,11 @@ fn a_branch_that_fills_the_label_leaves_the_prefix_no_room_rather_than_losing_a_
 fn a_branch_longer_than_the_label_is_still_cut_from_the_right() {
     let branch = "b".repeat(LABEL_WIDTH + 10);
     let row = row_prefix(&worktree_of("tru-data", &branch));
-    assert!(row.starts_with(&format!("{}…", "b".repeat(LABEL_WIDTH - 1))), "{}", row);
+    assert!(
+        row.starts_with(&format!("{}…", "b".repeat(LABEL_WIDTH - 1))),
+        "{}",
+        row
+    );
 }
 
 #[test]
@@ -617,7 +638,11 @@ fn the_repository_prefix_is_never_matched_on_because_it_is_only_drawn() {
         worktree_of("tru-data", "feat-x"),
         entry("other", Kind::Repo, "1m ago", None, false),
     ];
-    assert!(!rows[0].haystack().contains("tru-data"), "{}", rows[0].haystack());
+    assert!(
+        !rows[0].haystack().contains("tru-data"),
+        "{}",
+        rows[0].haystack()
+    );
     let mut picker = Picker::new(rows);
     type_in(&mut picker, "tru-data");
     assert!(shown(&picker).is_empty(), "{:?}", shown(&picker));
@@ -688,7 +713,11 @@ fn a_checked_row_is_drawn_with_the_marker_and_an_unchecked_one_with_the_gutter()
     let screen = rendered(&Picker::new(entries), "", 160, 12);
     let rows: Vec<&String> = screen.iter().skip(5).take(2).collect();
     assert!(rows[0].starts_with(MARKER), "{:?}", rows);
-    assert!(rows[1].starts_with(GUTTER) && !rows[1].starts_with(MARKER), "{:?}", rows);
+    assert!(
+        rows[1].starts_with(GUTTER) && !rows[1].starts_with(MARKER),
+        "{:?}",
+        rows
+    );
 }
 
 #[test]
@@ -761,7 +790,11 @@ fn a_worktree_kind_cell_is_drawn_in_the_accent_and_a_repository_one_is_left_alon
 
     let theme = resolve_theme(&HerdrConfig::default(), &|_| false);
     let accent = ratatui_colour(theme.accent);
-    let tree = drawn_styles(&Picker::new(vec![worktree_of("tru-data", "feat-x")]), 160, 5);
+    let tree = drawn_styles(
+        &Picker::new(vec![worktree_of("tru-data", "feat-x")]),
+        160,
+        5,
+    );
     let text: String = tree.iter().map(|(s, _)| s.as_str()).collect();
     let at = text.find("tree").unwrap();
     assert_eq!(tree[at].1.fg, Some(accent));
@@ -778,7 +811,11 @@ fn the_preview_is_drawn_beside_the_list_rather_than_over_it() {
     let screen = rendered(&Picker::new(plain(&["alpha"])), "PREVIEW-TEXT", 160, 12);
     let row = screen.iter().find(|l| l.contains("PREVIEW-TEXT")).unwrap();
     let at = row.find("PREVIEW-TEXT").unwrap();
-    assert!(at > 76, "the preview must sit in the right-hand pane: {}", at);
+    assert!(
+        at > 76,
+        "the preview must sit in the right-hand pane: {}",
+        at
+    );
     assert!(screen.iter().any(|l| l.contains("alpha")), "{:?}", screen);
 }
 
@@ -813,9 +850,16 @@ fn a_narrow_screen_cuts_the_row_short_rather_than_wrapping_it() {
     let entries = vec![entry("alpha", Kind::Repo, "1m ago", Some("working"), true)];
     let screen = rendered(&Picker::new(entries), "", 100, 12);
     let row = screen.iter().find(|l| l.contains("alpha")).unwrap();
-    assert!(!row.contains("working"), "a narrow list pane cuts the row: {}", row);
     assert!(
-        !screen.iter().skip(6).any(|l| l.trim_start().starts_with("working")),
+        !row.contains("working"),
+        "a narrow list pane cuts the row: {}",
+        row
+    );
+    assert!(
+        !screen
+            .iter()
+            .skip(6)
+            .any(|l| l.trim_start().starts_with("working")),
         "a cut row must not wrap onto the next one: {:?}",
         screen
     );
@@ -825,7 +869,12 @@ fn a_narrow_screen_cuts_the_row_short_rather_than_wrapping_it() {
 fn a_narrow_screen_still_draws_without_panicking() {
     for width in [20u16, 40, 200] {
         for height in [6u16, 12, 60] {
-            rendered(&Picker::new(plain(&["alpha", "beta"])), "text", width, height);
+            rendered(
+                &Picker::new(plain(&["alpha", "beta"])),
+                "text",
+                width,
+                height,
+            );
         }
     }
 }

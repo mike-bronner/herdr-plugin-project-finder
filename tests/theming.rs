@@ -40,8 +40,18 @@ fn an_exact_theme_name_resolves_to_itself() {
 
 #[test]
 fn case_and_separators_are_folded() {
-    for spelling in ["Tokyo_Night", "TOKYO NIGHT", "tokyo-night", "  tokyo night  "] {
-        assert_eq!(canonical_theme(spelling), Some("tokyo-night"), "{}", spelling);
+    for spelling in [
+        "Tokyo_Night",
+        "TOKYO NIGHT",
+        "tokyo-night",
+        "  tokyo night  ",
+    ] {
+        assert_eq!(
+            canonical_theme(spelling),
+            Some("tokyo-night"),
+            "{}",
+            spelling
+        );
     }
 }
 
@@ -97,7 +107,10 @@ fn a_three_digit_hex_expands_by_seventeen() {
 
 #[test]
 fn an_rgb_function_is_read_as_rgb() {
-    assert_eq!(parse_colour("rgb(137, 180, 250)"), Colour::Rgb(137, 180, 250));
+    assert_eq!(
+        parse_colour("rgb(137, 180, 250)"),
+        Colour::Rgb(137, 180, 250)
+    );
 }
 
 #[test]
@@ -213,7 +226,10 @@ fn a_name_herdr_also_rejects_uses_herdrs_own_default() {
 #[test]
 fn a_name_herdr_accepts_but_this_table_lacks_uses_the_terminal_palette() {
     let newer = theme_of(&[("theme.name", "brand-new-theme")]);
-    assert_eq!(colours(&newer), colours(&theme_of(&[("theme.name", "terminal")])));
+    assert_eq!(
+        colours(&newer),
+        colours(&theme_of(&[("theme.name", "terminal")]))
+    );
     assert_ne!(colours(&newer), colours(&theme_of(&[])));
 }
 
@@ -230,20 +246,21 @@ fn an_unset_theme_name_never_asks_herdr() {
 #[test]
 fn a_known_theme_name_never_asks_herdr() {
     let asked = std::cell::RefCell::new(Vec::new());
-    resolve_theme(&HerdrConfig::from_pairs(&[("theme.name", "gruvbox")]), &|field| {
-        asked.borrow_mut().push(field.to_string());
-        false
-    });
+    resolve_theme(
+        &HerdrConfig::from_pairs(&[("theme.name", "gruvbox")]),
+        &|field| {
+            asked.borrow_mut().push(field.to_string());
+            false
+        },
+    );
     assert!(asked.into_inner().is_empty());
 }
 
 #[test]
 fn the_probe_is_told_which_field_to_look_for() {
     let asked = std::cell::RefCell::new(Vec::new());
-    let config = HerdrConfig::from_pairs(&[
-        ("theme.auto_switch", "true"),
-        ("theme.dark_name", "nope"),
-    ]);
+    let config =
+        HerdrConfig::from_pairs(&[("theme.auto_switch", "true"), ("theme.dark_name", "nope")]);
     resolve_theme(&config, &|field| {
         asked.borrow_mut().push(field.to_string());
         false
@@ -295,7 +312,10 @@ fn auto_switch_off_ignores_the_dark_name() {
 
 #[test]
 fn mode_overrides_apply_only_under_auto_switch() {
-    let off = theme_of(&[("theme.name", "terminal"), ("theme.custom.dark.yellow", "#010203")]);
+    let off = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.dark.yellow", "#010203"),
+    ]);
     let on = theme_of(&[
         ("theme.name", "terminal"),
         ("theme.custom.dark.yellow", "#010203"),
@@ -335,7 +355,10 @@ fn the_accent_starts_as_the_cool_slot_of_whatever_palette_is_in_force() {
 
 #[test]
 fn a_custom_accent_overrides_the_palette_and_is_read_as_a_colour() {
-    let theme = theme_of(&[("theme.name", "terminal"), ("theme.custom.accent", "lightblue")]);
+    let theme = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.accent", "lightblue"),
+    ]);
     assert_eq!(theme.accent, Colour::Indexed(12));
 }
 
@@ -358,7 +381,10 @@ fn a_custom_teal_alone_never_moves_the_accent() {
 
 #[test]
 fn the_dark_accent_is_taken_only_when_the_theme_switches_automatically() {
-    let off = theme_of(&[("theme.name", "terminal"), ("theme.custom.dark.accent", "#010203")]);
+    let off = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.dark.accent", "#010203"),
+    ]);
     assert_eq!(off.accent, Colour::Indexed(6));
     let on = theme_of(&[
         ("theme.dark_name", "terminal"),
@@ -419,7 +445,10 @@ fn an_unrecognised_status_takes_the_unknown_glyph_and_colour() {
 
 #[test]
 fn a_reset_colour_is_kept_distinct_from_a_missing_one() {
-    let theme = theme_of(&[("theme.name", "terminal"), ("theme.custom.overlay0", "reset")]);
+    let theme = theme_of(&[
+        ("theme.name", "terminal"),
+        ("theme.custom.overlay0", "reset"),
+    ]);
     assert_eq!(theme.colour("unknown"), Colour::Default);
     assert_eq!(theme.colour("brand-new"), Colour::Default);
 }
@@ -437,7 +466,8 @@ fn fake_herdr(dir: &TempDir, stdout: &str, stderr: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
-const DIAGNOSTIC: &str = "config: issues found\nunknown theme name theme.name = \"monokai\"; using \"catppuccin\"";
+const DIAGNOSTIC: &str =
+    "config: issues found\nunknown theme name theme.name = \"monokai\"; using \"catppuccin\"";
 
 #[test]
 fn a_diagnostic_naming_the_field_is_a_rejection() {

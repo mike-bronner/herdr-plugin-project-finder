@@ -61,7 +61,11 @@ impl Previews {
             }
         }
         if let Some(lister) = &self.lister {
-            if let Ok(out) = std::process::Command::new(lister).arg("-1").arg(path).output() {
+            if let Ok(out) = std::process::Command::new(lister)
+                .arg("-1")
+                .arg(path)
+                .output()
+            {
                 return String::from_utf8_lossy(&out.stdout).to_string();
             }
         }
@@ -69,7 +73,11 @@ impl Previews {
     }
 }
 
-pub fn run(entries: Vec<Entry>, theme: &Theme, env: &Environment) -> std::io::Result<Option<Vec<PathBuf>>> {
+pub fn run(
+    entries: Vec<Entry>,
+    theme: &Theme,
+    env: &Environment,
+) -> std::io::Result<Option<Vec<PathBuf>>> {
     let mut picker = Picker::new(entries);
     let mut previews = Previews::new(env);
     let mut terminal = ratatui::try_init()?;
