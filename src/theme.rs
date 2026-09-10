@@ -449,22 +449,31 @@ pub fn resolve_theme(config: &HerdrConfig, rejects: &dyn Fn(&str) -> bool) -> Th
         })
         .collect();
 
-    let at = STATUS_ROLE_ORDER
-        .iter()
-        .position(|role| *role == ACCENT_FALLBACK_ROLE)
-        .expect("the accent falls back to a role the palette carries");
-    let mut accent = base[at];
-    for table in &tables {
-        if let Some(value) = config.string(&format!("{}.{}", table, ACCENT_ROLE)) {
-            accent = parse_colour(value);
-        }
-    }
-
     Theme {
         icons,
         colours,
-        accent,
+        accent: extra_role(config, &tables, base, ACCENT_ROLE, ACCENT_FALLBACK_ROLE),
     }
+}
+
+fn extra_role(
+    config: &HerdrConfig,
+    tables: &[&str],
+    base: &[Colour; 5],
+    role: &str,
+    fallback: &str,
+) -> Colour {
+    let at = STATUS_ROLE_ORDER
+        .iter()
+        .position(|known| *known == fallback)
+        .expect("an extra role falls back to a role the palette carries");
+    let mut colour = base[at];
+    for table in tables {
+        if let Some(value) = config.string(&format!("{}.{}", table, role)) {
+            colour = parse_colour(value);
+        }
+    }
+    colour
 }
 
 pub fn herdr_rejects_theme(herdr: Option<&str>, field: &str) -> bool {
