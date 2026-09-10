@@ -9,7 +9,14 @@ Fuzzy-pick git repos and open them as workspaces in
 herdr plugin install mike-bronner/herdr-plugin-project-finder
 ```
 
-Pin a particular revision with `--ref`:
+Nothing else needs installing on macOS or Linux, x86-64 or arm64: for any
+revision that has one published, the install step downloads a prebuilt picker
+for the platform and verifies its SHA-256. A Rust toolchain is only the
+fallback, for a platform or a revision without one. See
+[requires](#requires).
+
+Pin a particular revision with `--ref`, which is also the surest way to land on
+one that has binaries published:
 
 ```sh
 herdr plugin install mike-bronner/herdr-plugin-project-finder --ref v0.8.0
@@ -50,8 +57,9 @@ that directory. Note that `herdr plugin list` may still report the version the
 link was registered at, so treat the version it prints for a linked plugin as
 unreliable.
 
-Either way the picker rebuilds itself on the next run. See
-[how the binary is built](#how-the-binary-is-built).
+Either way the picker refreshes itself on the next run — by download where the
+checkout matches a release, by compiling otherwise. See
+[how the binary arrives](#how-the-binary-arrives).
 
 ## What it does
 
@@ -304,20 +312,57 @@ picker says which one and why on stderr and in a notification.
 With `HERDR_SOCKET_PATH` unset the picker says so and draws nothing, because a
 selection it cannot act on is worse than no popup at all.
 
-## How the binary is built
+## How the binary arrives
 
-The plugin is a Rust binary. `bin/pick-project` is a small `sh` shim: it checks
-whether anything under `src/`, `Cargo.toml` or `Cargo.lock` is newer than the
-built binary, rebuilds if so, and then runs it. The manifest points Herdr at the
-shim and never at the build output, so nothing breaks when a profile or a path
-changes.
+The plugin is a Rust binary, and there are two ways it gets there: downloaded
+from a GitHub release, or compiled on the spot. `bin/build` decides which, and
+`bin/pick-project` is a small `sh` shim that calls it: the shim checks whether
+anything under `src/`, `Cargo.toml` or `Cargo.lock` is newer than the built
+binary, calls `bin/build` if so, and then runs the binary. The manifest points
+Herdr at the shim and never at the build output, so nothing breaks when a
+profile or a path changes.
 
 The shim exists because Herdr's `[[build]]` steps run **only** during
 `herdr plugin install owner/repo`. They do not run for `herdr plugin link`, and
 they do not run on update. A linked checkout would therefore never build itself,
 and an update would keep running the old binary. `[[build]]` is declared as well,
-so that a GitHub install shows a visible build step rather than stalling
+so that a GitHub install shows a visible install step rather than stalling
 silently on first use.
+
+### When it downloads, and when it compiles
+
+`bin/build` downloads a prebuilt binary only when the checkout it is sitting in
+is **exactly a released one**. All of this has to hold:
+
+- the plugin folder is the root of its own git checkout, not a folder inside
+  somebody else's;
+- `git status --porcelain` says nothing at all, so no tracked file is modified
+  and nothing untracked is lying around that `.gitignore` does not already
+  cover;
+- `origin` is a GitHub remote;
+- and a release asset exists whose name carries **the first 12 characters of the
+  checked-out commit**.
+
+That last point is what makes the rule safe rather than hopeful. The asset name
+is `pick-project-<platform>-<commit>`, so the download URL itself asserts that
+the binary was built from the source in this folder. A checkout one commit past
+the tag asks for a file that does not exist, gets a 404, and compiles.
+
+So a GitHub install downloads, and a checkout you are working in compiles.
+Editing a file makes the tree dirty, and a dirty tree never downloads — which
+matters, because a download would otherwise drop a released binary on top of
+the change you are testing.
+
+Downloads are verified. A `.sha256` file is published beside every binary, and a
+binary whose hash does not match it is deleted rather than run. That catches a
+truncated or corrupted transfer; it is not a signature, and the trust anchor is
+GitHub over TLS either way. If the platform is not one of the four published, or
+the network is down, or curl and wget are both missing, or there is no
+`sha256sum` and no `shasum` to check the hash with — then nothing is downloaded
+and the source build runs instead. There is no path where an unverified binary
+is executed.
+
+### The source build
 
 Finding `cargo` by absolute path is not enough. Herdr's server runs under launchd
 with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and `cargo` is a rustup shim that
@@ -331,13 +376,34 @@ When cargo is missing but a binary is already there, the shim runs that binary
 and says on stderr that it may be stale. When there is neither, it stops and
 says how to install a toolchain.
 
-What the build prints depends on where it runs. With a terminal on stderr — the
-popup — cargo's own compile and download output is captured, and a spinner and
-one line saying the picker is building take its place. With no terminal there —
-Herdr's install step, a pipe, a file, CI — nothing is captured and cargo prints
-what it always printed, because a spinner in a log is thousands of repeated
-lines. A build that fails prints everything cargo said either way, and the
-captured file is removed on success, on failure, and on an interruption.
+What it prints depends on where it runs. With a terminal on stderr — the popup —
+cargo's own compile and download output is captured, and a spinner and one line
+saying the picker is building take its place. A download draws the same spinner
+under a message of its own, because a stalled connection deserves something to
+look at. With no terminal there — Herdr's install step, a pipe, a file, CI —
+nothing is drawn at all: one plain line says whether it is downloading or
+compiling, and cargo prints what it always printed, because a spinner in a log
+is thousands of repeated lines. A build that fails prints everything cargo said
+either way, and the captured file is removed on success, on failure, and on an
+interruption.
+
+Nothing runs at all when the binary is already newer than the sources. That is
+what keeps `[[startup]]` off the network on every server start.
+
+### Where the prebuilt binaries come from
+
+`.github/workflows/release.yml` runs when a release is created, builds the four
+targets the manifest's `platforms` allow, and uploads each binary and its
+checksum to that release. Both macOS architectures build on the macOS runner,
+which needs nothing extra to target the other one. Linux cross-compiles to
+statically linked musl through `cargo-zigbuild`, because Zig bundles the
+cross-linker, and one static binary per architecture then runs on glibc
+distributions, Alpine and NixOS alike.
+
+The assets do not exist until that workflow has finished, so a release is only
+fetchable a few minutes after it is published. Before then, and for any release
+cut before this workflow existed, an install compiles — which is the old
+behaviour, not a failure.
 
 ## Open on launch
 
@@ -581,9 +647,18 @@ HERDR_PICKER_DEBUG=1 sh bin/pick-project
 
 ## Requires
 
-A Rust toolchain — `cargo` 1.75 or newer — the first time the plugin runs, and
-after every change to its source. Nothing else: the picker draws its own list
-and talks to Herdr over the socket, so there is no runtime dependency to install.
+Nothing, on macOS or Linux on x86-64 or arm64. Installing from GitHub downloads
+a prebuilt picker for the platform and checks it against a published SHA-256.
+The picker draws its own list and talks to Herdr over the socket, so there is no
+runtime dependency to install either.
+
+A Rust toolchain — `cargo` 1.75 or newer — is the fallback, and it is needed
+whenever a download cannot happen or cannot be trusted: an architecture with no
+published binary, a release whose assets have not been built yet, no network, no
+`curl` and no `wget`, no way to compute a SHA-256, or a checkout with local
+changes. Working on the plugin therefore still needs a toolchain, because an
+edited tree always compiles. See
+[when it downloads, and when it compiles](#when-it-downloads-and-when-it-compiles).
 
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
 is wanted, not required, and only because it is what the `layout` setting
@@ -591,9 +666,10 @@ defaults to. Without it every workspace opens as one bare pane; the picker still
 opens them, and says once per run why they are bare. Point `layout` at something
 else and this plugin is not wanted either.
 
-Herdr's manifest has no dependency field, so the toolchain requirement is
-declared as a `[[build]]` step that runs `sh bin/build` at install time. With no
-terminal attached it prints where it found cargo. With no toolchain at all it
+Herdr's manifest has no dependency field, so the fallback is declared as a
+`[[build]]` step that runs `sh bin/build` at install time. With no terminal
+attached it says on stderr whether it is downloading or compiling, and where it
+found cargo. When a download is impossible and there is no toolchain either, it
 stops wherever it runs and says how to install one:
 
 ```

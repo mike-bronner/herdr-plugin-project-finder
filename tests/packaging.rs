@@ -210,6 +210,11 @@ fn fake_root(dir: &TempDir, real_build: bool) -> PathBuf {
         root.join("bin/pick-project"),
     )
     .unwrap();
+    std::fs::copy(
+        manifest_dir().join("herdr-plugin.toml"),
+        root.join("herdr-plugin.toml"),
+    )
+    .unwrap();
     if real_build {
         std::fs::copy(manifest_dir().join("bin/build"), root.join("bin/build")).unwrap();
     }
@@ -1012,19 +1017,887 @@ fn a_failed_build_with_no_terminal_attached_says_everything_it_says_today() {
     assert!(!run.stderr.contains('\r'), "{:?}", run.stderr);
 }
 
+const BASE_TOOLS: &[&str] = &[
+    "uname", "mktemp", "mv", "chmod", "find", "sed", "cat", "rm", "mkdir", "cut", "dirname",
+    "sleep", "stty",
+];
+
+const COMMIT: &str = "1f2e3d4c5b6a70819273645566778899aabbccdd";
+
+fn on_launchd_path(tool: &str) -> Option<PathBuf> {
+    LAUNCHD_PATH
+        .split(':')
+        .map(|dir| Path::new(dir).join(tool))
+        .find(|path| path.exists())
+}
+
+fn link(farm: &Path, tool: &str) {
+    let real =
+        on_launchd_path(tool).unwrap_or_else(|| panic!("{} is not on the launchd PATH", tool));
+    std::os::unix::fs::symlink(real, farm.join(tool)).unwrap();
+}
+
+fn farm(dir: &TempDir, name: &str) -> PathBuf {
+    let farm = dir.dir(name);
+    for tool in BASE_TOOLS {
+        link(&farm, tool);
+    }
+    farm
+}
+
+fn hasher() -> (PathBuf, Vec<&'static str>) {
+    if let Some(path) = on_launchd_path("sha256sum") {
+        return (path, Vec::new());
+    }
+    let path = on_launchd_path("shasum").expect("no sha256 tool is on the launchd PATH");
+    (path, vec!["-a", "256"])
+}
+
+fn link_hasher(farm: &Path) {
+    let (real, _) = hasher();
+    let name = real.file_name().unwrap().to_string_lossy().to_string();
+    link(farm, &name);
+}
+
+fn sha256(path: &Path) -> String {
+    let (bin, args) = hasher();
+    let out = Command::new(bin)
+        .args(args)
+        .arg(path)
+        .output()
+        .expect("cannot run the hasher");
+    assert!(out.status.success(), "the hasher failed on {:?}", path);
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .expect("the hasher printed nothing")
+        .to_string()
+}
+
+fn fake_git(farm: &Path, toplevel: &Path, dirty: &str, commit: &str, origin: &str) {
+    let toplevel = toplevel.to_string_lossy().to_string();
+    executable(
+        &farm.join("git"),
+        &format!(
+            r#"#!/bin/sh
+case "$*" in
+    *"rev-parse --show-toplevel") printf '%s\n' '{toplevel}' ;;
+    *"status --porcelain") printf '%s' '{dirty}' ;;
+    *"rev-parse HEAD") printf '%s\n' '{commit}' ;;
+    *"remote get-url origin") printf '%s\n' '{origin}' ;;
+    *) exit 1 ;;
+esac
+"#
+        ),
+    );
+}
+
+fn pristine_git(farm: &Path, root: &Path) {
+    fake_git(farm, root, "", COMMIT, "git@github.com:owner/repo.git");
+}
+
+fn fake_server(farm: &Path, name: &str, log: &Path, serves: &str) {
+    let log = log.to_string_lossy().to_string();
+    executable(
+        &farm.join(name),
+        &format!(
+            r#"#!/bin/sh
+out=''
+url=''
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o|-O) out="$2"; shift 2 ;;
+        --connect-timeout|--max-time) shift 2 ;;
+        -*) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s\n' "$url" >> '{log}'
+{serves}
+"#
+        ),
+    );
+}
+
+fn serving(binary: &Path, sum: &str) -> String {
+    let binary = binary.to_string_lossy().to_string();
+    format!(
+        r#"case "$url" in
+    *.sha256) printf '%s  pick-project\n' '{sum}' > "$out" ;;
+    *) cat '{binary}' > "$out" ;;
+esac"#
+    )
+}
+
+fn fake_cargo_that_writes_a_binary(farm: &Path, log: &Path) {
+    let log = log.to_string_lossy().to_string();
+    executable(
+        &farm.join("cargo"),
+        &format!(
+            r#"#!/bin/sh
+printf 'ran\n' >> '{log}'
+mkdir -p "$HERDR_PLUGIN_ROOT/target/release"
+printf '%s\n' '#!/bin/sh' 'echo COMPILED' > "$HERDR_PLUGIN_ROOT/target/release/pick-project"
+chmod 755 "$HERDR_PLUGIN_ROOT/target/release/pick-project"
+"#
+        ),
+    );
+}
+
+struct Fetch {
+    root: PathBuf,
+    farm: PathBuf,
+    payload: PathBuf,
+    sum: String,
+    urls: PathBuf,
+    compiles: PathBuf,
+}
+
+fn fetch_case(dir: &TempDir) -> Fetch {
+    let root = fake_root(dir, true);
+    for name in ["src/main.rs", "src", "Cargo.toml", "Cargo.lock"] {
+        stamp(&root.join(name), 1000);
+    }
+    let farm = farm(dir, "tools");
+    link_hasher(&farm);
+    let payload = dir.write("payload", "#!/bin/sh\necho PICKED\n");
+    let sum = sha256(&payload);
+    let urls = dir.join("urls");
+    let compiles = dir.join("compiles");
+    fake_cargo_that_writes_a_binary(&farm, &compiles);
+    Fetch {
+        root,
+        farm,
+        payload,
+        sum,
+        urls,
+        compiles,
+    }
+}
+
+impl Fetch {
+    fn run(&self) -> Shim {
+        run_build(&self.root, &[("PATH", &self.farm.to_string_lossy())])
+    }
+
+    fn picker_says(&self) -> String {
+        let out = Command::new(self.root.join("target/release/pick-project"))
+            .output()
+            .expect("the picker that was installed will not run");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn asked_for(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.urls)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn compiled(&self) -> bool {
+        self.compiles.exists()
+    }
+}
+
+fn this_platform() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        "linux" => "linux",
+        other => panic!("the suite does not run on {}", other),
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => panic!("the suite does not run on {}", other),
+    };
+    format!("{}-{}", os, arch)
+}
+
+fn expected_url() -> String {
+    format!(
+        "https://github.com/owner/repo/releases/download/v{}/pick-project-{}-{}",
+        manifest()["version"].as_str().unwrap(),
+        this_platform(),
+        &COMMIT[..12]
+    )
+}
+
+#[test]
+fn a_pristine_checkout_of_a_released_commit_runs_the_prebuilt_picker() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.picker_says(), "PICKED");
+    assert!(!case.compiled(), "it compiled anyway: {}", run.stderr);
+}
+
+#[test]
+fn the_url_it_asks_for_names_the_release_the_platform_and_the_commit() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    case.run();
+
+    assert_eq!(
+        case.asked_for(),
+        vec![expected_url(), format!("{}.sha256", expected_url())]
+    );
+}
+
+#[test]
+fn every_shape_of_github_remote_names_the_same_release() {
+    for origin in [
+        "git@github.com:owner/repo.git",
+        "https://github.com/owner/repo.git",
+        "https://github.com/owner/repo",
+        "ssh://git@github.com/owner/repo.git",
+    ] {
+        let dir = TempDir::new();
+        let case = fetch_case(&dir);
+        fake_git(&case.farm, &case.root, "", COMMIT, origin);
+        fake_server(
+            &case.farm,
+            "curl",
+            &case.urls,
+            &serving(&case.payload, &case.sum),
+        );
+
+        case.run();
+
+        assert_eq!(
+            case.asked_for(),
+            vec![expected_url(), format!("{}.sha256", expected_url())],
+            "{} was read as a different repository",
+            origin
+        );
+        assert_eq!(case.picker_says(), "PICKED", "{}", origin);
+    }
+}
+
+#[test]
+fn a_working_tree_with_local_changes_compiles_and_downloads_nothing() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    fake_git(
+        &case.farm,
+        &case.root,
+        " M src/picker.rs\n",
+        COMMIT,
+        "git@github.com:owner/repo.git",
+    );
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        case.asked_for().is_empty(),
+        "it downloaded over somebody's uncommitted work: {:?}",
+        case.asked_for()
+    );
+    assert!(case.compiled());
+    assert_eq!(case.picker_says(), "COMPILED");
+}
+
+#[test]
+fn an_untracked_file_counts_as_a_local_change_too() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    fake_git(
+        &case.farm,
+        &case.root,
+        "?? src/scratch.rs\n",
+        COMMIT,
+        "git@github.com:owner/repo.git",
+    );
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    case.run();
+
+    assert!(case.asked_for().is_empty(), "{:?}", case.asked_for());
+    assert!(case.compiled());
+}
+
+#[test]
+fn a_plugin_root_inside_somebody_elses_repository_compiles() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    fake_git(
+        &case.farm,
+        Path::new("/somewhere/else"),
+        "",
+        COMMIT,
+        "git@github.com:owner/repo.git",
+    );
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    case.run();
+
+    assert!(
+        case.asked_for().is_empty(),
+        "a parent repository's state decided it: {:?}",
+        case.asked_for()
+    );
+    assert!(case.compiled());
+}
+
+#[test]
+fn a_checkout_that_is_not_a_git_tree_at_all_compiles() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(case.asked_for().is_empty(), "{:?}", case.asked_for());
+    assert!(case.compiled());
+}
+
+#[test]
+fn a_remote_that_is_not_github_compiles() {
+    for origin in [
+        "git@git.example.com:owner/repo.git",
+        "https://gitlab.com/owner/repo.git",
+        "mirror/repo",
+    ] {
+        let dir = TempDir::new();
+        let case = fetch_case(&dir);
+        fake_git(&case.farm, &case.root, "", COMMIT, origin);
+        fake_server(
+            &case.farm,
+            "curl",
+            &case.urls,
+            &serving(&case.payload, &case.sum),
+        );
+
+        case.run();
+
+        assert!(
+            case.asked_for().is_empty(),
+            "{} was treated as a GitHub repository: {:?}",
+            origin,
+            case.asked_for()
+        );
+        assert!(case.compiled(), "{}", origin);
+    }
+}
+
+#[test]
+fn a_release_with_no_asset_for_this_platform_compiles() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(&case.farm, "curl", &case.urls, "exit 22");
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.asked_for().len(), 1, "it kept going after the 404");
+    assert!(case.compiled());
+    assert_eq!(case.picker_says(), "COMPILED");
+}
+
+#[test]
+fn a_machine_with_no_network_compiles() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(&case.farm, "curl", &case.urls, "exit 6");
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(case.compiled());
+    assert_eq!(case.picker_says(), "COMPILED");
+}
+
+#[test]
+fn a_truncated_download_is_never_installed() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    let truncated = dir.write("truncated", "#!/bin/sh\n");
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&truncated, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        case.picker_says(),
+        "COMPILED",
+        "a binary that failed its checksum was installed"
+    );
+    assert!(case.compiled());
+}
+
+#[test]
+fn a_checksum_that_is_not_a_checksum_is_refused() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, "not-a-checksum"),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.picker_says(), "COMPILED");
+}
+
+#[test]
+fn an_empty_checksum_file_is_refused() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &format!(
+            r#"case "$url" in
+    *.sha256) : > "$out" ;;
+    *) cat '{}' > "$out" ;;
+esac"#,
+            case.payload.to_string_lossy()
+        ),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.picker_says(), "COMPILED");
+}
+
+#[test]
+fn a_hasher_that_answers_with_nothing_is_not_a_verification() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &format!(
+            r#"case "$url" in
+    *.sha256) : > "$out" ;;
+    *) cat '{}' > "$out" ;;
+esac"#,
+            case.payload.to_string_lossy()
+        ),
+    );
+    let (real, _) = hasher();
+    let silent = case.farm.join(real.file_name().unwrap());
+    std::fs::remove_file(&silent).unwrap();
+    executable(&silent, "#!/bin/sh\n");
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        case.picker_says(),
+        "COMPILED",
+        "an empty checksum matched an empty answer and the binary was installed"
+    );
+}
+
+#[test]
+fn a_machine_that_cannot_check_a_checksum_compiles_instead_of_trusting_one() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let bare = farm(&dir, "tools");
+    let compiles = dir.join("compiles");
+    let urls = dir.join("urls");
+    let payload = dir.write("payload", "#!/bin/sh\necho PICKED\n");
+    fake_cargo_that_writes_a_binary(&bare, &compiles);
+    pristine_git(&bare, &root);
+    fake_server(&bare, "curl", &urls, &serving(&payload, &sha256(&payload)));
+
+    let run = run_build(&root, &[("PATH", &bare.to_string_lossy())]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        !urls.exists(),
+        "it downloaded a binary it had no way to verify"
+    );
+    assert!(compiles.exists());
+}
+
+#[test]
+fn wget_carries_the_download_when_there_is_no_curl() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "wget",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.picker_says(), "PICKED");
+    assert_eq!(
+        case.asked_for(),
+        vec![expected_url(), format!("{}.sha256", expected_url())]
+    );
+}
+
+#[test]
+fn a_machine_with_neither_curl_nor_wget_compiles() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(case.compiled());
+    assert_eq!(case.picker_says(), "COMPILED");
+}
+
+#[test]
+fn a_toolchain_that_cannot_build_anything_is_never_reached_once_a_fetch_succeeds() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+    executable(&case.farm.join("cargo"), "#!/bin/sh\nexit 3\n");
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.picker_says(), "PICKED");
+}
+
+#[test]
+fn a_second_run_touches_neither_the_network_nor_cargo() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    case.run();
+    let first = case.asked_for();
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        case.asked_for(),
+        first,
+        "every server start would download the picker again"
+    );
+    assert!(!case.compiled());
+    assert_eq!(case.picker_says(), "PICKED");
+}
+
+#[test]
+fn a_binary_already_current_is_left_exactly_where_it_is() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+    executable(
+        &case.root.join("target/release/pick-project"),
+        "#!/bin/sh\necho MINE\n",
+    );
+    stamp(&case.root.join("target/release/pick-project"), 2000);
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(case.picker_says(), "MINE");
+    assert!(case.asked_for().is_empty(), "{:?}", case.asked_for());
+    assert!(!case.compiled());
+}
+
+#[test]
+fn a_download_leaves_nothing_of_its_own_behind() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    case.run();
+
+    let left: Vec<String> = std::fs::read_dir(case.root.join("target"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(left, vec!["release".to_string()], "{:?}", left);
+}
+
+#[test]
+fn the_download_says_what_it_is_doing_where_there_is_no_terminal_to_draw_on() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert!(
+        run.stderr.contains("downloading the picker"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains('\u{1b}'),
+        "the download painted escape sequences into the log: {:?}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_download_that_falls_through_says_it_is_compiling_instead() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(&case.farm, "curl", &case.urls, "exit 22");
+
+    let run = case.run();
+
+    assert!(run.stderr.contains("compiling instead"), "{:?}", run.stderr);
+    assert!(!run.stderr.contains('\u{1b}'), "{:?}", run.stderr);
+}
+
+#[test]
+fn a_download_on_a_terminal_draws_its_own_message_and_never_cargo_s() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    pristine_git(&case.farm, &case.root);
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &format!("sleep 1\n{}", serving(&case.payload, &case.sum)),
+    );
+
+    let (status, seen) =
+        run_build_on_a_terminal(&case.root, &[("PATH", &case.farm.to_string_lossy())], None);
+
+    assert_eq!(status, 0, "{}", seen);
+    assert!(!spinner_frames(&placements(&seen)).is_empty(), "{:?}", seen);
+    let drawn: String = message_rows(&placements(&seen))
+        .iter()
+        .map(|p| p.text.clone())
+        .collect::<Vec<String>>()
+        .join(" ");
+    assert!(drawn.contains("downloading"), "{:?}", drawn);
+    assert!(!drawn.contains("compiling"), "{:?}", drawn);
+    assert_eq!(case.picker_says(), "PICKED");
+}
+
+fn shell_scripts() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for dir in ["bin", "scripts"] {
+        let Ok(entries) = std::fs::read_dir(manifest_dir().join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
 #[test]
 fn no_shell_script_carries_a_comment() {
-    for name in ["bin/build", "bin/pick-project"] {
-        for (n, line) in read_repo_file(name).lines().enumerate().skip(1) {
+    for path in shell_scripts() {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in text.lines().enumerate().skip(1) {
             assert!(
                 !line.trim_start().starts_with('#'),
                 "{}:{} carries a comment: {}",
-                name,
+                path.display(),
                 n + 1,
                 line
             );
         }
     }
+}
+
+#[test]
+fn every_shell_script_is_covered_by_that_guard() {
+    let found: Vec<String> = shell_scripts()
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    for name in ["build", "pick-project"] {
+        assert!(
+            found.contains(&name.to_string()),
+            "{} was not scanned",
+            name
+        );
+    }
+}
+
+fn workflow() -> String {
+    read_repo_file(".github/workflows/release.yml")
+}
+
+fn workflow_line(prefix: &str) -> String {
+    workflow()
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("the workflow has no line starting with {}", prefix))
+        .to_string()
+}
+
+#[test]
+fn the_release_workflow_builds_one_binary_for_every_platform_the_manifest_declares() {
+    let parsed = manifest();
+    let declared: Vec<&str> = parsed["platforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(declared, vec!["macos", "linux"]);
+    let text = workflow();
+    for (platform, target) in [
+        ("macos-arm64", "aarch64-apple-darwin"),
+        ("macos-x64", "x86_64-apple-darwin"),
+        ("linux-arm64", "aarch64-unknown-linux-musl"),
+        ("linux-x64", "x86_64-unknown-linux-musl"),
+    ] {
+        assert!(
+            text.contains(&format!("platform: {}", platform)),
+            "the workflow builds nothing for {}",
+            platform
+        );
+        assert!(
+            text.contains(&format!("target: {}", target)),
+            "the workflow names no target for {}",
+            platform
+        );
+    }
+}
+
+#[test]
+fn the_release_workflow_names_its_assets_the_way_the_build_script_asks_for_them() {
+    assert_eq!(
+        workflow_line("ASSET="),
+        r#"ASSET="pick-project-$PLATFORM-$(git rev-parse HEAD | cut -c1-12)""#
+    );
+    let script = read_repo_file("bin/build");
+    assert!(
+        script.contains("pick-project-%s-%s"),
+        "the script asks for a differently shaped name"
+    );
+    assert!(
+        script.contains("cut -c1-12"),
+        "both sides must shorten the commit to the same length"
+    );
+}
+
+#[test]
+fn the_release_workflow_publishes_a_checksum_beside_every_binary() {
+    let text = workflow();
+    assert!(
+        text.contains(r#"sha256sum "$ASSET" > "$ASSET.sha256""#),
+        "{}",
+        text
+    );
+    assert!(
+        text.contains(r#"shasum -a 256 "$ASSET" > "$ASSET.sha256""#),
+        "{}",
+        text
+    );
+    assert!(text.contains("${{ env.ASSET }}.sha256"), "{}", text);
+    assert!(
+        read_repo_file("bin/build").contains("$1.sha256"),
+        "the script looks for the checksum somewhere else"
+    );
+}
+
+#[test]
+fn the_release_workflow_builds_the_commit_the_tag_names() {
+    let text = workflow();
+    assert!(
+        text.contains("ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}"),
+        "the workflow would build the default branch and name it for the tag: {}",
+        text
+    );
 }
 
 #[test]
