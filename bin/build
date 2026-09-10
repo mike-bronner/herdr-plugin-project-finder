@@ -59,7 +59,8 @@ released_commit() {
     _top="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel 2>/dev/null)" || return 1
     _here="$(CDPATH='' cd -P -- "$PLUGIN_ROOT" 2>/dev/null && pwd)" || return 1
     [ "$_top" = "$_here" ] || return 1
-    _dirty="$(git -C "$PLUGIN_ROOT" status --porcelain 2>/dev/null)" || return 1
+    _dirty="$(git -C "$PLUGIN_ROOT" status --porcelain -- src Cargo.toml Cargo.lock \
+            build.rs .cargo rust-toolchain rust-toolchain.toml 2>/dev/null)" || return 1
     [ -z "$_dirty" ] || return 1
     _commit="$(git -C "$PLUGIN_ROOT" rev-parse HEAD 2>/dev/null)" || return 1
     case "$_commit" in

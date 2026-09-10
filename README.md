@@ -336,9 +336,9 @@ is **exactly a released one**. All of this has to hold:
 
 - the plugin folder is the root of its own git checkout, not a folder inside
   somebody else's;
-- `git status --porcelain` says nothing at all, so no tracked file is modified
-  and nothing untracked is lying around that `.gitignore` does not already
-  cover;
+- `git status --porcelain` says nothing about the files the binary is built
+  from, so none of them is modified and nothing untracked is lying around
+  inside them that `.gitignore` does not already cover;
 - `origin` is a GitHub remote;
 - and a release asset exists whose name carries **the first 12 characters of the
   checked-out commit**.
@@ -348,10 +348,26 @@ is `pick-project-<platform>-<commit>`, so the download URL itself asserts that
 the binary was built from the source in this folder. A checkout one commit past
 the tag asks for a file that does not exist, gets a 404, and compiles.
 
-So a GitHub install downloads, and a checkout you are working in compiles.
-Editing a file makes the tree dirty, and a dirty tree never downloads — which
-matters, because a download would otherwise drop a released binary on top of
-the change you are testing.
+"The files the binary is built from" is `src/`, `Cargo.toml` and `Cargo.lock`,
+which is exactly what `bin/pick-project` compares timestamps against, so the
+two staleness checks agree on what counts as code. The download check also
+names `build.rs`, `.cargo/` and a `rust-toolchain` file in either of its
+spellings. None of those exists in this repository, and each would decide the
+binary if one ever did: a build script runs at compile time, `.cargo/config.toml`
+changes how cargo invokes the compiler, and a toolchain file pins which compiler
+that is. Naming them now costs a needless compile in a case that cannot arise
+yet. Leaving them out would cost a wrong binary on the day one appears.
+
+Everything else is outside the set. A test, the shipped `defaults.toml`, the
+release workflow, and this README are read by somebody or something other than
+the compiler, so editing one leaves the released asset an exact copy of what
+this source still compiles to.
+
+So a GitHub install downloads, and a checkout you are working in compiles as
+soon as you touch its code. Editing a file the compiler reads never downloads —
+which matters, because a download would otherwise drop a released binary on top
+of the change you are testing. Editing a file it never reads still downloads,
+because there is no change to drop anything on top of.
 
 Downloads are verified. A `.sha256` file is published beside every binary, and a
 binary whose hash does not match it is deleted rather than run. That catches a
@@ -656,8 +672,8 @@ A Rust toolchain — `cargo` 1.75 or newer — is the fallback, and it is needed
 whenever a download cannot happen or cannot be trusted: an architecture with no
 published binary, a release whose assets have not been built yet, no network, no
 `curl` and no `wget`, no way to compute a SHA-256, or a checkout with local
-changes. Working on the plugin therefore still needs a toolchain, because an
-edited tree always compiles. See
+changes to the code the binary is built from. Working on the plugin therefore
+still needs a toolchain, because an edited source tree always compiles. See
 [when it downloads, and when it compiles](#when-it-downloads-and-when-it-compiles).
 
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)

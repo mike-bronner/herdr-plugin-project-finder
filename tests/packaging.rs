@@ -1082,9 +1082,30 @@ fn fake_git(farm: &Path, toplevel: &Path, dirty: &str, commit: &str, origin: &st
             r#"#!/bin/sh
 case "$*" in
     *"rev-parse --show-toplevel") printf '%s\n' '{toplevel}' ;;
-    *"status --porcelain") printf '%s' '{dirty}' ;;
     *"rev-parse HEAD") printf '%s\n' '{commit}' ;;
     *"remote get-url origin") printf '%s\n' '{origin}' ;;
+    *"status --porcelain"*)
+        specs=''
+        listed=''
+        for arg in "$@"; do
+            if [ -n "$listed" ]; then
+                specs="$specs $arg"
+            elif [ "$arg" = '--' ]; then
+                listed=1
+            fi
+        done
+        if [ -z "$listed" ]; then
+            printf '%s' '{dirty}'
+            exit 0
+        fi
+        printf '%s' '{dirty}' | while IFS= read -r entry || [ -n "$entry" ]; do
+            for spec in $specs; do
+                case "${{entry#???}}" in
+                    "$spec"|"$spec"/*) printf '%s\n' "$entry"; break ;;
+                esac
+            done
+        done
+        ;;
     *) exit 1 ;;
 esac
 "#
@@ -1344,6 +1365,122 @@ fn an_untracked_file_counts_as_a_local_change_too() {
 
     assert!(case.asked_for().is_empty(), "{:?}", case.asked_for());
     assert!(case.compiled());
+}
+
+#[test]
+fn an_edited_readme_is_not_a_reason_to_compile() {
+    let dir = TempDir::new();
+    let case = fetch_case(&dir);
+    fake_git(
+        &case.farm,
+        &case.root,
+        " M README.md\n",
+        COMMIT,
+        "git@github.com:owner/repo.git",
+    );
+    fake_server(
+        &case.farm,
+        "curl",
+        &case.urls,
+        &serving(&case.payload, &case.sum),
+    );
+
+    let run = case.run();
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        case.asked_for(),
+        vec![expected_url(), format!("{}.sha256", expected_url())]
+    );
+    assert_eq!(case.picker_says(), "PICKED");
+    assert!(!case.compiled(), "it compiled anyway: {}", run.stderr);
+}
+
+#[test]
+fn nothing_the_compiler_never_reads_stands_between_a_release_and_its_binary() {
+    for changed in [
+        " M defaults.toml\n",
+        " M herdr-plugin.toml\n",
+        " M bin/build\n",
+        " M bin/pick-project\n",
+        " M tests/packaging.rs\n",
+        " M .github/workflows/release.yml\n",
+        "?? notes.md\n",
+        "?? tests/scratch.rs\n",
+    ] {
+        let dir = TempDir::new();
+        let case = fetch_case(&dir);
+        fake_git(
+            &case.farm,
+            &case.root,
+            changed,
+            COMMIT,
+            "git@github.com:owner/repo.git",
+        );
+        fake_server(
+            &case.farm,
+            "curl",
+            &case.urls,
+            &serving(&case.payload, &case.sum),
+        );
+
+        let run = case.run();
+
+        assert_eq!(run.status, 0, "{}", run.stderr);
+        assert_eq!(
+            case.picker_says(),
+            "PICKED",
+            "{} was treated as code",
+            changed.trim()
+        );
+        assert!(!case.compiled(), "{} was treated as code", changed.trim());
+    }
+}
+
+#[test]
+fn every_file_the_binary_is_built_from_still_forces_a_build() {
+    for changed in [
+        " M Cargo.toml\n",
+        " M Cargo.lock\n",
+        " M build.rs\n",
+        " M .cargo/config.toml\n",
+        " M rust-toolchain\n",
+        " M rust-toolchain.toml\n",
+        "?? build.rs\n",
+        "?? .cargo/config.toml\n",
+    ] {
+        let dir = TempDir::new();
+        let case = fetch_case(&dir);
+        fake_git(
+            &case.farm,
+            &case.root,
+            changed,
+            COMMIT,
+            "git@github.com:owner/repo.git",
+        );
+        fake_server(
+            &case.farm,
+            "curl",
+            &case.urls,
+            &serving(&case.payload, &case.sum),
+        );
+
+        let run = case.run();
+
+        assert_eq!(run.status, 0, "{}", run.stderr);
+        assert!(
+            case.asked_for().is_empty(),
+            "{} was downloaded over: {:?}",
+            changed.trim(),
+            case.asked_for()
+        );
+        assert_eq!(
+            case.picker_says(),
+            "COMPILED",
+            "{} did not force a build",
+            changed.trim()
+        );
+    }
 }
 
 #[test]
