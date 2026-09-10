@@ -1,0 +1,320 @@
+#!/bin/sh
+set -eu
+
+PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}"
+BIN="$PLUGIN_ROOT/target/release/pick-project"
+
+note() { printf 'project-finder: %s\n' "$*" >&2; }
+die() { note "$*"; exit 1; }
+
+find_cargo() {
+    if command -v cargo >/dev/null 2>&1; then
+        command -v cargo
+        return 0
+    fi
+    for candidate in \
+        "${CARGO:-}" \
+        "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" \
+        "$HOME/.cargo/bin/cargo" \
+        /opt/homebrew/opt/rustup/bin/cargo \
+        /opt/homebrew/bin/cargo \
+        /usr/local/opt/rustup/bin/cargo \
+        /usr/local/bin/cargo
+    do
+        [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
+
+needs_build() {
+    [ -x "$BIN" ] || return 0
+    [ -n "$(find "$PLUGIN_ROOT/src" "$PLUGIN_ROOT/Cargo.toml" "$PLUGIN_ROOT/Cargo.lock" \
+            -newer "$BIN" -print -quit 2>/dev/null)" ]
+}
+
+platform() {
+    case "$(uname -s 2>/dev/null || true)" in
+        Darwin) _os='macos' ;;
+        Linux) _os='linux' ;;
+        *) return 1 ;;
+    esac
+    case "$(uname -m 2>/dev/null || true)" in
+        arm64|aarch64) _arch='arm64' ;;
+        x86_64|amd64) _arch='x64' ;;
+        *) return 1 ;;
+    esac
+    printf '%s-%s\n' "$_os" "$_arch"
+}
+
+manifest_version() {
+    _version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' \
+        "$PLUGIN_ROOT/herdr-plugin.toml" 2>/dev/null)" || return 1
+    case "$_version" in
+        ''|*[!0-9A-Za-z.-]*) return 1 ;;
+    esac
+    printf '%s\n' "$_version"
+}
+
+released_commit() {
+    _top="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    _here="$(CDPATH='' cd -P -- "$PLUGIN_ROOT" 2>/dev/null && pwd)" || return 1
+    [ "$_top" = "$_here" ] || return 1
+    _dirty="$(git -C "$PLUGIN_ROOT" status --porcelain -- src Cargo.toml Cargo.lock \
+            build.rs .cargo rust-toolchain rust-toolchain.toml 2>/dev/null)" || return 1
+    [ -z "$_dirty" ] || return 1
+    _commit="$(git -C "$PLUGIN_ROOT" rev-parse HEAD 2>/dev/null)" || return 1
+    case "$_commit" in
+        *[!0-9a-f]*) return 1 ;;
+        ????????????*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$_commit" | cut -c1-12
+}
+
+repo_slug() {
+    _url="$(git -C "$PLUGIN_ROOT" remote get-url origin 2>/dev/null)" || return 1
+    case "$_url" in
+        *github.com/*|*github.com:*) ;;
+        *) return 1 ;;
+    esac
+    _slug="${_url##*github.com}"
+    _slug="${_slug#:}"
+    _slug="${_slug#/}"
+    _slug="${_slug%.git}"
+    case "$_slug" in
+        */*/*|*/|*[!0-9A-Za-z._/-]*) return 1 ;;
+        */*) printf '%s\n' "$_slug" ;;
+        *) return 1 ;;
+    esac
+}
+
+asset_url() {
+    _platform="$(platform)" || return 1
+    _version="$(manifest_version)" || return 1
+    _slug="$(repo_slug)" || return 1
+    _short="$(released_commit)" || return 1
+    printf 'https://github.com/%s/releases/download/%s/pick-project-%s-%s\n' \
+        "$_slug" "$_version" "$_platform" "$_short"
+}
+
+download() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 10 --max-time 120 -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=10 --tries=2 -O "$2" "$1"
+    else
+        return 1
+    fi
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        _sum="$(sha256sum "$1")" || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        _sum="$(shasum -a 256 "$1")" || return 1
+    else
+        return 1
+    fi
+    printf '%s\n' "${_sum%% *}"
+}
+
+fetch() {
+    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 1
+    mkdir -p "$PLUGIN_ROOT/target/release" || return 1
+    FETCH_DIR="$(mktemp -d "$PLUGIN_ROOT/target/fetch.XXXXXX")" || return 1
+    download "$1" "$FETCH_DIR/pick-project" || return 1
+    download "$1.sha256" "$FETCH_DIR/sha256" || return 1
+    _want="$(cat "$FETCH_DIR/sha256")" || return 1
+    _want="${_want%% *}"
+    [ "${#_want}" -eq 64 ] || return 1
+    _got="$(sha256_of "$FETCH_DIR/pick-project")" || return 1
+    [ "$_want" = "$_got" ] || return 1
+    chmod 755 "$FETCH_DIR/pick-project" || return 1
+    mv -f "$FETCH_DIR/pick-project" "$BIN"
+}
+
+MAIN_PID=$$
+SPINNER_PID=''
+BUILD_LOG=''
+FETCH_DIR=''
+BUILD_MESSAGE='Project Finder is compiling. This happens only during the first install or the first time it is opened after an update.'
+FETCH_MESSAGE='Project Finder is downloading the picker built for this platform.'
+MESSAGE="$BUILD_MESSAGE"
+
+PANE_SIZE=''
+SPIN_ROW=1
+SPIN_COL=1
+TEXT_TOP=1
+TEXT=''
+
+pane_size() {
+    _size="$(stty size <&2 2>/dev/null || true)"
+    case "$_size" in
+        [1-9]*' '[1-9]*) printf '%s\n' "$_size"; return 0 ;;
+    esac
+    printf '24 80\n'
+}
+
+wrap() {
+    _text="$1"
+    _width="$2"
+    _line=''
+    for _word in $_text; do
+        while [ "${#_word}" -gt "$_width" ]; do
+            [ -z "$_line" ] || { printf '%s\n' "$_line"; _line=''; }
+            _head="$(printf "%.${_width}s" "$_word")"
+            printf '%s\n' "$_head"
+            _word="${_word#"$_head"}"
+        done
+        if [ -z "$_line" ]; then
+            _line="$_word"
+        elif [ "$(( ${#_line} + 1 + ${#_word} ))" -le "$_width" ]; then
+            _line="$_line $_word"
+        else
+            printf '%s\n' "$_line"
+            _line="$_word"
+        fi
+    done
+    [ -z "$_line" ] || printf '%s\n' "$_line"
+}
+
+layout() {
+    _rows="${1%% *}"
+    _cols="${1##* }"
+    _width="$(( _cols - 4 ))"
+    [ "$_width" -ge 1 ] || _width="$(( _cols - 1 ))"
+    [ "$_width" -ge 1 ] || _width=1
+    _wrapped="$(wrap "$MESSAGE" "$_width")"
+
+    _saved="$IFS"
+    IFS='
+'
+    _count=0
+    for _line in $_wrapped; do
+        _count="$(( _count + 1 ))"
+    done
+
+    _gap=1
+    [ "$(( _count + 2 ))" -le "$_rows" ] || _gap=0
+    _shown="$_count"
+    [ "$(( _shown + _gap + 1 ))" -le "$_rows" ] || _shown="$(( _rows - _gap - 1 ))"
+    [ "$_shown" -ge 1 ] || { _shown=0; _gap=0; }
+
+    TEXT=''
+    _taken=0
+    for _line in $_wrapped; do
+        [ "$_taken" -lt "$_shown" ] || break
+        TEXT="$TEXT$_line
+"
+        _taken="$(( _taken + 1 ))"
+    done
+    IFS="$_saved"
+
+    _total="$(( 1 + _gap + _shown ))"
+    SPIN_ROW="$(( (_rows - _total) / 2 + 1 ))"
+    [ "$SPIN_ROW" -ge 1 ] || SPIN_ROW=1
+    SPIN_COL="$(( (_cols - 1) / 2 + 1 ))"
+    [ "$SPIN_COL" -ge 1 ] || SPIN_COL=1
+    TEXT_TOP="$(( SPIN_ROW + 1 + _gap ))"
+}
+
+paint() {
+    _size="$(pane_size)"
+    if [ "$_size" != "$PANE_SIZE" ]; then
+        PANE_SIZE="$_size"
+        layout "$_size"
+        printf '\033[2J' >&2
+    fi
+    printf '\033[%s;%sH%s' "$SPIN_ROW" "$SPIN_COL" "$1" >&2
+    [ -n "$TEXT" ] || return 0
+    _cols="${PANE_SIZE##* }"
+    _row="$TEXT_TOP"
+    _saved="$IFS"
+    IFS='
+'
+    for _line in $TEXT; do
+        _col="$(( (_cols - ${#_line}) / 2 + 1 ))"
+        [ "$_col" -ge 1 ] || _col=1
+        printf '\033[%s;%sH%s' "$_row" "$_col" "$_line" >&2
+        _row="$(( _row + 1 ))"
+    done
+    IFS="$_saved"
+}
+
+spin() {
+    printf '\033[?25l' >&2
+    while kill -0 "$MAIN_PID" 2>/dev/null; do
+        for frame in '|' '/' '-' '\'; do
+            paint "$frame"
+            sleep 0.1
+        done
+    done
+}
+
+start_spinner() {
+    [ -t 2 ] || return 0
+    MESSAGE="$1"
+    PANE_SIZE=''
+    spin &
+    SPINNER_PID=$!
+}
+
+stop_spinner() {
+    [ -n "$SPINNER_PID" ] || return 0
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
+    SPINNER_PID=''
+    printf '\033[2J\033[H\033[?25h' >&2
+}
+
+cleanup() {
+    stop_spinner
+    [ -z "$BUILD_LOG" ] || rm -f "$BUILD_LOG"
+    [ -z "$FETCH_DIR" ] || rm -rf "$FETCH_DIR"
+    return 0
+}
+
+run_cargo() {
+    PATH="$CARGO_DIR:$PATH" "$CARGO_BIN" \
+        build --release --manifest-path "$PLUGIN_ROOT/Cargo.toml"
+}
+
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+
+needs_build || exit 0
+
+URL="$(asset_url 2>/dev/null || true)"
+if [ -n "$URL" ]; then
+    [ -t 2 ] || note "downloading the picker built for this platform"
+    start_spinner "$FETCH_MESSAGE"
+    if fetch "$URL"; then
+        stop_spinner
+        exit 0
+    fi
+    stop_spinner
+    [ -t 2 ] || note "no prebuilt picker for this release and platform; compiling instead"
+fi
+
+CARGO_BIN="$(find_cargo || true)"
+[ -n "$CARGO_BIN" ] || die "cargo not found; install a Rust toolchain (1.75 or newer), then run \`cargo build --release\` in $PLUGIN_ROOT"
+
+CARGO_DIR="$(dirname -- "$CARGO_BIN")"
+
+if [ -t 2 ]; then
+    BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/project-finder-build.XXXXXX")" \
+        || die "cannot make a temporary file to hold the build output"
+    start_spinner "$BUILD_MESSAGE"
+    if run_cargo >"$BUILD_LOG" 2>&1; then
+        stop_spinner
+    else
+        stop_spinner
+        cat "$BUILD_LOG" >&2
+        die "cargo build --release failed in $PLUGIN_ROOT"
+    fi
+else
+    note "building the picker with $CARGO_BIN"
+    run_cargo >&2 || die "cargo build --release failed in $PLUGIN_ROOT"
+fi

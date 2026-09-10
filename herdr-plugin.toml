@@ -1,23 +1,20 @@
 id = "mikebronner.project-finder"
 name = "Project Finder"
-version = "0.7.0"
+version = "0.8.0"
 min_herdr_version = "0.9.0"
 description = "Fuzzy-pick git repos and open them as workspaces"
 platforms = ["macos", "linux"]
 
-# Preflight. Herdr has no dependency field, so the requirement on fzf is
-# declared as a build step that checks for it and fails with install
-# instructions. Non-interactive by design: a build step has no terminal to
-# prompt at. The picker itself offers to install fzf on first run.
 [[build]]
-command = ["python3", "bin/pick-project", "--check-deps"]
+command = ["sh", "bin/build"]
 
-# Fuzzy-pick a git repo under the configured root and open it as a workspace.
-# A popup pane, not an action: actions run headless with no TTY, and fzf needs one.
+[[startup]]
+command = ["sh", "bin/build"]
+
 [[panes]]
 id = "picker"
 title = "Find projects to work on"
 placement = "popup"
 width = "85%"
 height = "85%"
-command = ["python3", "bin/pick-project"]
+command = ["sh", "bin/pick-project"]
