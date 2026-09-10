@@ -286,6 +286,14 @@ When cargo is missing but a binary is already there, the shim runs that binary
 and says on stderr that it may be stale. When there is neither, it stops and
 says how to install a toolchain.
 
+What the build prints depends on where it runs. With a terminal on stderr — the
+popup — cargo's own compile and download output is captured, and a spinner and
+one line saying the picker is building take its place. With no terminal there —
+Herdr's install step, a pipe, a file, CI — nothing is captured and cargo prints
+what it always printed, because a spinner in a log is thousands of repeated
+lines. A build that fails prints everything cargo said either way, and the
+captured file is removed on success, on failure, and on an interruption.
+
 ## Open on launch
 
 Attaching blocks the shell, so the picker cannot usefully run before it: at a
@@ -539,8 +547,9 @@ opens them, and says once per run why they are bare. Point `layout` at something
 else and this plugin is not wanted either.
 
 Herdr's manifest has no dependency field, so the toolchain requirement is
-declared as a `[[build]]` step that runs `sh bin/build` at install time. It
-prints where it found cargo, or says how to install one:
+declared as a `[[build]]` step that runs `sh bin/build` at install time. With no
+terminal attached it prints where it found cargo. With no toolchain at all it
+stops wherever it runs and says how to install one:
 
 ```
 project-finder: cargo not found; install a Rust toolchain (1.75 or newer), then

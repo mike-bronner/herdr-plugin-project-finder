@@ -934,6 +934,7 @@ name = "pick-project"
 version = "0.8.0"
 dependencies = [
  "crossterm",
+ "libc",
  "nucleo",
  "ratatui",
  "serde",

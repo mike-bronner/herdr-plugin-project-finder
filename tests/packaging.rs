@@ -2,6 +2,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use support::*;
 
@@ -520,6 +521,216 @@ fn the_build_script_names_the_manifest_it_is_building() {
             root.join("Cargo.toml").to_string_lossy().to_string()
         ]
     );
+}
+
+fn run_build_on_a_terminal(
+    root: &Path,
+    extra: &[(&str, &str)],
+    interrupt: Option<(Duration, i32)>,
+) -> (i32, String) {
+    use std::os::unix::process::CommandExt;
+
+    let pty = Pty::new();
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg(root.join("bin/build"))
+        .env_clear()
+        .env("PATH", LAUNCHD_PATH)
+        .env("HOME", "/private/tmp")
+        .env("HERDR_PLUGIN_ROOT", root)
+        .stdin(pty.attach())
+        .stdout(pty.attach())
+        .stderr(pty.attach())
+        .process_group(0);
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("cannot run the build script");
+    if let Some((after, number)) = interrupt {
+        std::thread::sleep(after);
+        signal(child.id(), number);
+    }
+    let seen = pty.read_until_quiet(&mut child);
+    let status = child.wait().expect("the build script never ended");
+    (status.code().unwrap_or(-1), seen)
+}
+
+fn noisy_cargo(dir: &TempDir, body: &str) -> String {
+    let cargo_dir = dir.dir("cargo-bin");
+    executable(&cargo_dir.join("cargo"), body);
+    format!("{}:{}", cargo_dir.to_string_lossy(), LAUNCHD_PATH)
+}
+
+fn is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).unwrap().next().is_none()
+}
+
+const CHATTY: &str =
+    "#!/bin/sh\nsleep 0.4\necho 'Compiling nucleo v0.5.0'\necho 'Downloading ratatui' >&2\n";
+
+#[test]
+fn a_build_on_a_terminal_shows_a_spinner_instead_of_what_cargo_says() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let tmp = dir.dir("tmp");
+    let with_cargo = noisy_cargo(&dir, CHATTY);
+
+    let (status, seen) = run_build_on_a_terminal(
+        &root,
+        &[("PATH", &with_cargo), ("TMPDIR", tmp.to_str().unwrap())],
+        None,
+    );
+
+    assert_eq!(status, 0, "{}", seen);
+    assert!(
+        !seen.contains("Compiling"),
+        "cargo's stdout reached the popup: {:?}",
+        seen
+    );
+    assert!(
+        !seen.contains("Downloading"),
+        "cargo's stderr reached the popup: {:?}",
+        seen
+    );
+    assert!(
+        seen.contains("| project-finder: building the picker"),
+        "no spinner frame was drawn: {:?}",
+        seen
+    );
+    assert!(
+        seen.ends_with("\r\u{1b}[K"),
+        "the spinner line is left on screen: {:?}",
+        seen
+    );
+    assert!(is_empty(&tmp), "the captured build output is left behind");
+}
+
+#[test]
+fn a_failed_build_on_a_terminal_prints_everything_cargo_said() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let tmp = dir.dir("tmp");
+    let with_cargo = noisy_cargo(
+        &dir,
+        "#!/bin/sh\nsleep 0.4\necho 'error[E0425]: cannot find value'\necho 'Compiling nucleo v0.5.0' >&2\nexit 3\n",
+    );
+
+    let (status, seen) = run_build_on_a_terminal(
+        &root,
+        &[("PATH", &with_cargo), ("TMPDIR", tmp.to_str().unwrap())],
+        None,
+    );
+
+    assert_eq!(status, 1, "{}", seen);
+    assert!(
+        seen.contains("| project-finder: building the picker"),
+        "the spinner never ran, so the capture path is untested: {:?}",
+        seen
+    );
+    assert!(seen.contains("error[E0425]"), "{:?}", seen);
+    assert!(seen.contains("Compiling nucleo"), "{:?}", seen);
+    assert!(seen.contains("cargo build --release failed"), "{:?}", seen);
+    assert!(is_empty(&tmp), "the captured build output is left behind");
+}
+
+#[test]
+fn an_interrupted_build_takes_its_spinner_and_its_capture_file_with_it() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let tmp = dir.dir("tmp");
+    let with_cargo = noisy_cargo(&dir, "#!/bin/sh\nsleep 30\n");
+
+    let (_, seen) = run_build_on_a_terminal(
+        &root,
+        &[("PATH", &with_cargo), ("TMPDIR", tmp.to_str().unwrap())],
+        Some((Duration::from_millis(600), libc::SIGTERM)),
+    );
+
+    assert!(
+        seen.contains("| project-finder: building the picker"),
+        "the spinner never ran, so the test proves nothing: {:?}",
+        seen
+    );
+    assert!(
+        is_empty(&tmp),
+        "the captured build output survived the interruption"
+    );
+}
+
+#[test]
+fn a_build_with_no_terminal_attached_still_prints_what_cargo_says() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let with_cargo = noisy_cargo(&dir, CHATTY);
+
+    let run = run_build(&root, &[("PATH", &with_cargo)]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("building the picker with"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("Compiling nucleo"), "{:?}", run.stderr);
+    assert!(
+        run.stderr.contains("Downloading ratatui"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains('\r') && !run.stderr.contains('\u{1b}'),
+        "a spinner was drawn into a pipe: {:?}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_failed_build_with_no_terminal_attached_says_everything_it_says_today() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let with_cargo = noisy_cargo(
+        &dir,
+        "#!/bin/sh\necho 'error[E0425]: cannot find value'\nexit 3\n",
+    );
+
+    let run = run_build(&root, &[("PATH", &with_cargo)]);
+
+    assert_eq!(run.status, 1);
+    assert!(run.stderr.contains("error[E0425]"), "{:?}", run.stderr);
+    assert!(
+        run.stderr.contains("cargo build --release failed"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains('\r'), "{:?}", run.stderr);
+}
+
+#[test]
+fn the_spinner_message_never_promises_that_the_build_happens_only_once() {
+    let line = read_repo_file("bin/build")
+        .lines()
+        .find(|l| l.starts_with("BUILD_MESSAGE="))
+        .expect("bin/build carries no spinner message")
+        .to_lowercase();
+    assert!(line.contains("update"), "{}", line);
+    for wrong in ["first time", "first launch", "first run", "once", "only"] {
+        assert!(!line.contains(wrong), "{} claims {}", line, wrong);
+    }
+}
+
+#[test]
+fn no_shell_script_carries_a_comment() {
+    for name in ["bin/build", "bin/pick-project"] {
+        for (n, line) in read_repo_file(name).lines().enumerate().skip(1) {
+            assert!(
+                !line.trim_start().starts_with('#'),
+                "{}:{} carries a comment: {}",
+                name,
+                n + 1,
+                line
+            );
+        }
+    }
 }
 
 #[test]

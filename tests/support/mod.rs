@@ -323,6 +323,94 @@ pub fn repo_source() -> String {
     text
 }
 
+static PTY_OPEN: Mutex<()> = Mutex::new(());
+
+pub struct Pty {
+    master: std::fs::File,
+    slave: std::fs::File,
+}
+
+impl Pty {
+    pub fn new() -> Pty {
+        use std::os::fd::FromRawFd;
+
+        let _held = PTY_OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(fd >= 0, "cannot open a pseudo terminal");
+            assert_eq!(libc::grantpt(fd), 0, "cannot grant the pseudo terminal");
+            assert_eq!(libc::unlockpt(fd), 0, "cannot unlock the pseudo terminal");
+            let name = libc::ptsname(fd);
+            assert!(!name.is_null(), "the pseudo terminal has no name");
+            let path = std::ffi::CStr::from_ptr(name).to_string_lossy().to_string();
+            let master = std::fs::File::from_raw_fd(fd);
+            let slave = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("cannot open the terminal side of the pair");
+            Pty { master, slave }
+        }
+    }
+
+    pub fn attach(&self) -> std::process::Stdio {
+        std::process::Stdio::from(self.slave.try_clone().expect("cannot clone the terminal"))
+    }
+
+    pub fn read_until_quiet(self, child: &mut std::process::Child) -> String {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::time::{Duration, Instant};
+
+        let Pty { mut master, slave } = self;
+        drop(slave);
+        unsafe {
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let quiet = Duration::from_millis(300);
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut last = Instant::now();
+        loop {
+            match master.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    seen.extend_from_slice(&chunk[..n]);
+                    last = Instant::now();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let ended = child.try_wait().expect("cannot check the child").is_some();
+                    if ended && last.elapsed() >= quiet {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "something is still writing to the terminal: {:?}",
+                        String::from_utf8_lossy(&seen)
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&seen).to_string()
+    }
+}
+
+pub fn signal(pid: u32, number: i32) {
+    unsafe {
+        assert_eq!(
+            libc::kill(-(pid as i32), number),
+            0,
+            "cannot signal {}",
+            pid
+        );
+    }
+}
+
 pub fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
