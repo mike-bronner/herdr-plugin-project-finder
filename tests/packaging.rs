@@ -82,6 +82,46 @@ fn the_manifest_declares_a_build_step_so_a_github_install_shows_one() {
 }
 
 #[test]
+fn the_manifest_rebuilds_at_server_start_so_a_linked_plugin_is_covered_too() {
+    let parsed = manifest();
+    let startup = parsed["startup"]
+        .as_array()
+        .expect("herdr-plugin.toml declares no startup command");
+    let command: Vec<&str> = startup[0]["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(command, vec!["sh", "bin/build"]);
+    assert!(
+        !command.iter().any(|a| a.contains("target/")),
+        "a build-artifact path breaks the moment the profile changes"
+    );
+}
+
+#[test]
+fn the_startup_rebuild_never_paints_a_spinner_into_the_server_log() {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let with_cargo = noisy_cargo(&dir, CHATTY);
+
+    let run = run_build(&root, &[("PATH", &with_cargo)]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        !run.stderr.contains('\u{1b}'),
+        "the startup path paints escape sequences into the log: {:?}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains(SPINNER_MESSAGE),
+        "the startup path draws the popup's message: {:?}",
+        run.stderr
+    );
+}
+
+#[test]
 fn no_file_in_the_repo_names_a_release_artifact_path() {
     for name in ["herdr-plugin.toml", "README.md", "defaults.toml"] {
         assert!(
@@ -528,9 +568,19 @@ fn run_build_on_a_terminal(
     extra: &[(&str, &str)],
     interrupt: Option<(Duration, i32)>,
 ) -> (i32, String) {
+    run_build_on_a_pane(root, (40, 100), extra, interrupt)
+}
+
+fn run_build_on_a_pane(
+    root: &Path,
+    size: (u16, u16),
+    extra: &[(&str, &str)],
+    interrupt: Option<(Duration, i32)>,
+) -> (i32, String) {
     use std::os::unix::process::CommandExt;
 
     let pty = Pty::new();
+    pty.resize(size.0, size.1);
     let mut command = Command::new("/bin/sh");
     command
         .arg(root.join("bin/build"))
@@ -565,6 +615,264 @@ fn is_empty(dir: &Path) -> bool {
     std::fs::read_dir(dir).unwrap().next().is_none()
 }
 
+const SPINNER_MESSAGE: &str = "Project Finder is compiling. This happens only during the first install or the first time it is opened after an update.";
+
+#[derive(Clone, Debug)]
+struct Placement {
+    row: usize,
+    col: usize,
+    text: String,
+}
+
+fn placements(seen: &str) -> Vec<Placement> {
+    let mut found = Vec::new();
+    for part in seen.split('\u{1b}').skip(1) {
+        let Some(rest) = part.strip_prefix('[') else {
+            continue;
+        };
+        let Some(end) = rest.find(|c: char| c.is_ascii_alphabetic()) else {
+            continue;
+        };
+        if rest.as_bytes()[end] != b'H' {
+            continue;
+        }
+        let mut args = rest[..end].split(';');
+        let (Some(row), Some(col)) = (args.next(), args.next()) else {
+            continue;
+        };
+        let (Ok(row), Ok(col)) = (row.parse::<usize>(), col.parse::<usize>()) else {
+            continue;
+        };
+        let text = &rest[end + 1..];
+        if text.is_empty() {
+            continue;
+        }
+        found.push(Placement {
+            row,
+            col,
+            text: text.to_string(),
+        });
+    }
+    found
+}
+
+fn spinner_frames(drawn: &[Placement]) -> Vec<Placement> {
+    drawn
+        .iter()
+        .filter(|p| ["|", "/", "-", "\\"].contains(&p.text.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn message_rows(drawn: &[Placement]) -> Vec<Placement> {
+    let mut rows: Vec<Placement> = Vec::new();
+    for p in drawn.iter().filter(|p| p.text.len() > 1) {
+        if !rows.iter().any(|seen| seen.row == p.row) {
+            rows.push(p.clone());
+        }
+    }
+    rows.sort_by_key(|p| p.row);
+    rows
+}
+
+fn run_a_slow_build_on_a_pane(rows: u16, cols: u16) -> String {
+    let dir = TempDir::new();
+    let root = fake_root(&dir, true);
+    let tmp = dir.dir("tmp");
+    let with_cargo = noisy_cargo(&dir, "#!/bin/sh\nsleep 0.6\n");
+
+    let (status, seen) = run_build_on_a_pane(
+        &root,
+        (rows, cols),
+        &[("PATH", &with_cargo), ("TMPDIR", tmp.to_str().unwrap())],
+        None,
+    );
+
+    assert_eq!(status, 0, "{:?}", seen);
+    assert!(is_empty(&tmp), "the captured build output is left behind");
+    seen
+}
+
+#[test]
+fn the_spinner_message_is_the_wording_that_was_asked_for() {
+    let line = read_repo_file("bin/build")
+        .lines()
+        .find(|l| l.starts_with("BUILD_MESSAGE="))
+        .expect("bin/build carries no spinner message")
+        .to_string();
+    assert_eq!(line, format!("BUILD_MESSAGE='{}'", SPINNER_MESSAGE));
+}
+
+#[test]
+fn the_spinner_message_wraps_and_centres_itself_in_a_roomy_pane() {
+    let seen = run_a_slow_build_on_a_pane(40, 100);
+    let drawn = placements(&seen);
+    let frames = spinner_frames(&drawn);
+    let rows = message_rows(&drawn);
+
+    assert!(!frames.is_empty(), "no spinner frame was drawn: {:?}", seen);
+    assert!(rows.len() > 1, "the message never wrapped: {:?}", rows);
+
+    let joined: String = rows
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(joined, SPINNER_MESSAGE);
+
+    for p in &rows {
+        assert!(p.text.len() <= 96, "{:?} is wider than the margin", p);
+        assert_eq!(
+            p.col,
+            (100 - p.text.len()) / 2 + 1,
+            "{:?} is not centred across the pane",
+            p
+        );
+    }
+
+    let top = frames.iter().map(|p| p.row).min().unwrap();
+    assert!(
+        frames.iter().all(|p| p.row == top),
+        "the spinner moved between frames: {:?}",
+        frames
+    );
+    assert_eq!(
+        frames[0].col, 50,
+        "the spinner is not centred across the pane"
+    );
+    assert_eq!(rows.first().unwrap().row, top + 2);
+
+    let bottom = rows.last().unwrap().row;
+    let above = top - 1;
+    let below = 40 - bottom;
+    assert!(
+        below >= above && below - above <= 1,
+        "the block is not centred down the pane: {} above, {} below",
+        above,
+        below
+    );
+}
+
+#[test]
+fn a_narrow_pane_wraps_the_message_instead_of_running_off_the_edge() {
+    let seen = run_a_slow_build_on_a_pane(40, 24);
+    let drawn = placements(&seen);
+    let rows = message_rows(&drawn);
+
+    assert!(rows.len() > 5, "the message never wrapped: {:?}", rows);
+    let joined: String = rows
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(joined, SPINNER_MESSAGE);
+    for p in &rows {
+        assert!(p.col >= 1, "{:?} starts off the pane", p);
+        assert!(
+            p.col + p.text.len() - 1 <= 24,
+            "{:?} runs past the edge of the pane",
+            p
+        );
+        assert_eq!(p.col, (24 - p.text.len()) / 2 + 1, "{:?} is not centred", p);
+    }
+}
+
+#[test]
+fn a_pane_narrower_than_a_single_word_breaks_the_word_rather_than_overflowing() {
+    let seen = run_a_slow_build_on_a_pane(40, 12);
+    let drawn = placements(&seen);
+    let rows = message_rows(&drawn);
+
+    assert!(!rows.is_empty(), "nothing was drawn: {:?}", seen);
+    for p in &rows {
+        assert!(
+            p.text.len() <= 8,
+            "{:?} is wider than the pane allows for text",
+            p
+        );
+        assert!(
+            p.col + p.text.len() - 1 <= 12,
+            "{:?} runs past the edge of the pane",
+            p
+        );
+    }
+    let letters: String = rows.iter().map(|p| p.text.as_str()).collect();
+    assert_eq!(letters.replace(' ', ""), SPINNER_MESSAGE.replace(' ', ""));
+    assert!(
+        rows.iter().any(|p| p.text.ends_with("compilin")),
+        "a word longer than the pane was never broken: {:?}",
+        rows
+    );
+}
+
+#[test]
+fn a_pane_too_short_for_the_block_clamps_to_what_fits() {
+    let seen = run_a_slow_build_on_a_pane(3, 100);
+    let drawn = placements(&seen);
+    let frames = spinner_frames(&drawn);
+
+    assert!(!frames.is_empty(), "no spinner frame was drawn: {:?}", seen);
+    for p in &drawn {
+        assert!(p.row >= 1 && p.row <= 3, "{:?} is off the short pane", p);
+    }
+    assert_eq!(message_rows(&drawn).len(), 2);
+    assert!(
+        seen.ends_with("\u{1b}[2J\u{1b}[H\u{1b}[?25h"),
+        "the short pane is left dirty: {:?}",
+        seen
+    );
+}
+
+#[test]
+fn a_pane_of_one_row_still_shows_the_spinner_and_still_cleans_up() {
+    let seen = run_a_slow_build_on_a_pane(1, 100);
+    let drawn = placements(&seen);
+
+    assert!(
+        !spinner_frames(&drawn).is_empty(),
+        "no spinner frame was drawn: {:?}",
+        seen
+    );
+    for p in &drawn {
+        assert_eq!(p.row, 1, "{:?} is off the single-row pane", p);
+    }
+    assert!(message_rows(&drawn).is_empty());
+    assert!(
+        seen.ends_with("\u{1b}[2J\u{1b}[H\u{1b}[?25h"),
+        "the single-row pane is left dirty: {:?}",
+        seen
+    );
+}
+
+#[test]
+fn a_pane_that_reports_no_size_at_all_is_drawn_as_twenty_four_by_eighty() {
+    let seen = run_a_slow_build_on_a_pane(0, 0);
+    let drawn = placements(&seen);
+    let frames = spinner_frames(&drawn);
+    let rows = message_rows(&drawn);
+
+    assert!(!frames.is_empty(), "no spinner frame was drawn: {:?}", seen);
+    assert_eq!(
+        frames[0].col, 40,
+        "the spinner is not centred across a default pane: {:?}",
+        frames
+    );
+    for p in &drawn {
+        assert!(p.row >= 1 && p.row <= 24, "{:?} is off a default pane", p);
+        assert!(
+            p.col + p.text.len() - 1 <= 80,
+            "{:?} runs past the edge of a default pane",
+            p
+        );
+    }
+    let joined: String = rows
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(joined, SPINNER_MESSAGE);
+}
+
 const CHATTY: &str =
     "#!/bin/sh\nsleep 0.4\necho 'Compiling nucleo v0.5.0'\necho 'Downloading ratatui' >&2\n";
 
@@ -593,13 +901,13 @@ fn a_build_on_a_terminal_shows_a_spinner_instead_of_what_cargo_says() {
         seen
     );
     assert!(
-        seen.contains("| project-finder: building the picker"),
+        !spinner_frames(&placements(&seen)).is_empty(),
         "no spinner frame was drawn: {:?}",
         seen
     );
     assert!(
-        seen.ends_with("\r\u{1b}[K"),
-        "the spinner line is left on screen: {:?}",
+        seen.ends_with("\u{1b}[2J\u{1b}[H\u{1b}[?25h"),
+        "the spinner screen is left behind: {:?}",
         seen
     );
     assert!(is_empty(&tmp), "the captured build output is left behind");
@@ -623,7 +931,7 @@ fn a_failed_build_on_a_terminal_prints_everything_cargo_said() {
 
     assert_eq!(status, 1, "{}", seen);
     assert!(
-        seen.contains("| project-finder: building the picker"),
+        !spinner_frames(&placements(&seen)).is_empty(),
         "the spinner never ran, so the capture path is untested: {:?}",
         seen
     );
@@ -647,7 +955,7 @@ fn an_interrupted_build_takes_its_spinner_and_its_capture_file_with_it() {
     );
 
     assert!(
-        seen.contains("| project-finder: building the picker"),
+        !spinner_frames(&placements(&seen)).is_empty(),
         "the spinner never ran, so the test proves nothing: {:?}",
         seen
     );
@@ -703,19 +1011,6 @@ fn a_failed_build_with_no_terminal_attached_says_everything_it_says_today() {
         run.stderr
     );
     assert!(!run.stderr.contains('\r'), "{:?}", run.stderr);
-}
-
-#[test]
-fn the_spinner_message_never_promises_that_the_build_happens_only_once() {
-    let line = read_repo_file("bin/build")
-        .lines()
-        .find(|l| l.starts_with("BUILD_MESSAGE="))
-        .expect("bin/build carries no spinner message")
-        .to_lowercase();
-    assert!(line.contains("update"), "{}", line);
-    for wrong in ["first time", "first launch", "first run", "once", "only"] {
-        assert!(!line.contains(wrong), "{} claims {}", line, wrong);
-    }
 }
 
 #[test]

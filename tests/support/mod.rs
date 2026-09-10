@@ -353,6 +353,24 @@ impl Pty {
         }
     }
 
+    pub fn resize(&self, rows: u16, cols: u16) {
+        use std::os::fd::AsRawFd;
+
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            assert_eq!(
+                libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &size),
+                0,
+                "cannot size the pseudo terminal"
+            );
+        }
+    }
+
     pub fn attach(&self) -> std::process::Stdio {
         std::process::Stdio::from(self.slave.try_clone().expect("cannot clone the terminal"))
     }

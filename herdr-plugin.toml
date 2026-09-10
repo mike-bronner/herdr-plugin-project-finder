@@ -8,6 +8,9 @@ platforms = ["macos", "linux"]
 [[build]]
 command = ["sh", "bin/build"]
 
+[[startup]]
+command = ["sh", "bin/build"]
+
 [[panes]]
 id = "picker"
 title = "Find projects to work on"

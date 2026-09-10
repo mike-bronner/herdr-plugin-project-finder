@@ -28,12 +28,113 @@ find_cargo() {
 MAIN_PID=$$
 SPINNER_PID=''
 BUILD_LOG=''
-BUILD_MESSAGE='building the picker, which happens after an install and after any update to its source'
+BUILD_MESSAGE='Project Finder is compiling. This happens only during the first install or the first time it is opened after an update.'
+
+PANE_SIZE=''
+SPIN_ROW=1
+SPIN_COL=1
+TEXT_TOP=1
+TEXT=''
+
+pane_size() {
+    _size="$(stty size <&2 2>/dev/null || true)"
+    case "$_size" in
+        [1-9]*' '[1-9]*) printf '%s\n' "$_size"; return 0 ;;
+    esac
+    printf '24 80\n'
+}
+
+wrap() {
+    _text="$1"
+    _width="$2"
+    _line=''
+    for _word in $_text; do
+        while [ "${#_word}" -gt "$_width" ]; do
+            [ -z "$_line" ] || { printf '%s\n' "$_line"; _line=''; }
+            _head="$(printf "%.${_width}s" "$_word")"
+            printf '%s\n' "$_head"
+            _word="${_word#"$_head"}"
+        done
+        if [ -z "$_line" ]; then
+            _line="$_word"
+        elif [ "$(( ${#_line} + 1 + ${#_word} ))" -le "$_width" ]; then
+            _line="$_line $_word"
+        else
+            printf '%s\n' "$_line"
+            _line="$_word"
+        fi
+    done
+    [ -z "$_line" ] || printf '%s\n' "$_line"
+}
+
+layout() {
+    _rows="${1%% *}"
+    _cols="${1##* }"
+    _width="$(( _cols - 4 ))"
+    [ "$_width" -ge 1 ] || _width="$(( _cols - 1 ))"
+    [ "$_width" -ge 1 ] || _width=1
+    _wrapped="$(wrap "$BUILD_MESSAGE" "$_width")"
+
+    _saved="$IFS"
+    IFS='
+'
+    _count=0
+    for _line in $_wrapped; do
+        _count="$(( _count + 1 ))"
+    done
+
+    _gap=1
+    [ "$(( _count + 2 ))" -le "$_rows" ] || _gap=0
+    _shown="$_count"
+    [ "$(( _shown + _gap + 1 ))" -le "$_rows" ] || _shown="$(( _rows - _gap - 1 ))"
+    [ "$_shown" -ge 1 ] || { _shown=0; _gap=0; }
+
+    TEXT=''
+    _taken=0
+    for _line in $_wrapped; do
+        [ "$_taken" -lt "$_shown" ] || break
+        TEXT="$TEXT$_line
+"
+        _taken="$(( _taken + 1 ))"
+    done
+    IFS="$_saved"
+
+    _total="$(( 1 + _gap + _shown ))"
+    SPIN_ROW="$(( (_rows - _total) / 2 + 1 ))"
+    [ "$SPIN_ROW" -ge 1 ] || SPIN_ROW=1
+    SPIN_COL="$(( (_cols - 1) / 2 + 1 ))"
+    [ "$SPIN_COL" -ge 1 ] || SPIN_COL=1
+    TEXT_TOP="$(( SPIN_ROW + 1 + _gap ))"
+}
+
+paint() {
+    _size="$(pane_size)"
+    if [ "$_size" != "$PANE_SIZE" ]; then
+        PANE_SIZE="$_size"
+        layout "$_size"
+        printf '\033[2J' >&2
+    fi
+    printf '\033[%s;%sH%s' "$SPIN_ROW" "$SPIN_COL" "$1" >&2
+    [ -n "$TEXT" ] || return 0
+    _cols="${PANE_SIZE##* }"
+    _row="$TEXT_TOP"
+    _saved="$IFS"
+    IFS='
+'
+    for _line in $TEXT; do
+        _col="$(( (_cols - ${#_line}) / 2 + 1 ))"
+        [ "$_col" -ge 1 ] || _col=1
+        printf '\033[%s;%sH%s' "$_row" "$_col" "$_line" >&2
+        _row="$(( _row + 1 ))"
+    done
+    IFS="$_saved"
+}
 
 spin() {
+    printf '\033[?25l' >&2
     while kill -0 "$MAIN_PID" 2>/dev/null; do
         for frame in '|' '/' '-' '\'; do
-            printf '\r%s project-finder: %s' "$frame" "$BUILD_MESSAGE" >&2
+            paint "$frame"
             sleep 0.1
         done
     done
@@ -44,7 +145,7 @@ stop_spinner() {
     kill "$SPINNER_PID" 2>/dev/null || true
     wait "$SPINNER_PID" 2>/dev/null || true
     SPINNER_PID=''
-    printf '\r\033[K' >&2
+    printf '\033[2J\033[H\033[?25h' >&2
 }
 
 cleanup() {
