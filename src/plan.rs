@@ -7,11 +7,12 @@ pub struct Plan {
 }
 
 pub fn plan(selected: &[String], open_ws: &[Workspace]) -> Plan {
-    let to_close = open_ws
+    let (worktrees, repos): (Vec<Workspace>, Vec<Workspace>) = open_ws
         .iter()
         .filter(|w| !selected.contains(&w.label))
         .cloned()
-        .collect();
+        .partition(|w| w.linked_worktree);
+    let to_close = [worktrees, repos].concat();
     let to_create = selected
         .iter()
         .filter(|label| !open_ws.iter().any(|w| w.label == **label))

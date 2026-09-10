@@ -63,6 +63,10 @@ On Enter the selection becomes the truth: unchecked open projects are closed,
 newly checked ones are opened, and an empty selection closes everything except
 the home workspace. Esc changes nothing.
 
+Unchecked worktrees close before the repositories they belong to. A repository
+and its worktrees therefore all close in one pass, rather than a level at a
+time. A close Herdr refuses is reported rather than dropped.
+
 The list is drawn by the plugin itself, with
 [ratatui](https://ratatui.rs) and [nucleo](https://github.com/helix-editor/nucleo)
 for the fuzzy matching. Type to filter, `Tab` to check a row, `Enter` to apply.
@@ -282,6 +286,20 @@ An error comes back with a code, so a refusal can be told apart from a crash
 without reading stderr for a phrase. That is the whole reason for the choice: a
 `worktree.open` the server refuses falls back to `workspace.create`, and it has
 to be sure which of the two it is looking at.
+
+One more refusal shapes the order the picker closes in. Herdr will not close a
+repository while a linked worktree of its own is still open. It answers
+`workspace_group_close_required` and closes nothing. So `workspace.list` is
+read for each workspace's `worktree.is_linked_worktree`, and every unchecked
+worktree is closed before any repository. A workspace the server reports no
+`worktree` block for counts as a repository and closes last.
+
+`workspace.close` also takes `close_group`, which closes a repository together
+with every worktree of its own. The picker never sends it. It would close
+worktrees you left checked, and the selection is the contract. Ordering needs
+no such exception: each workspace is closed on its own merits. Leave one
+worktree checked and it stays open, its repository cannot close, and the
+picker says which one and why on stderr and in a notification.
 
 With `HERDR_SOCKET_PATH` unset the picker says so and draws nothing, because a
 selection it cannot act on is worse than no popup at all.

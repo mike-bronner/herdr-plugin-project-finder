@@ -118,6 +118,7 @@ pub struct Workspace {
     pub label: String,
     pub focused: bool,
     pub agent_status: String,
+    pub linked_worktree: bool,
 }
 
 pub fn workspaces(client: &Client) -> Vec<Workspace> {
@@ -137,6 +138,11 @@ pub fn workspaces(client: &Client) -> Vec<Workspace> {
                 label: string_at(w, "label").unwrap_or_default(),
                 focused: w.get("focused").and_then(Value::as_bool).unwrap_or(false),
                 agent_status: string_at(w, "agent_status").unwrap_or_else(|| "unknown".to_string()),
+                linked_worktree: w
+                    .get("worktree")
+                    .and_then(|t| t.get("is_linked_worktree"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()

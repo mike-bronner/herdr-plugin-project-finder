@@ -338,6 +338,94 @@ fn a_close_the_server_refuses_is_not_counted_as_closed() {
     assert_eq!(outcome.focused, None, "a focus that survived must not move");
 }
 
+fn repo_with_worktrees(world: &World, repo: &str, branches: &[&str]) -> String {
+    let root = world.repo(repo);
+    let container = world.tree.join(&format!("{}/.worktrees/{}", repo, repo));
+    for branch in branches {
+        make_worktree(
+            &container.join(branch),
+            &format!("{}/.git/worktrees/{}", root.to_string_lossy(), branch),
+        );
+    }
+    root.to_string_lossy().to_string()
+}
+
+#[test]
+fn a_repository_and_its_worktrees_all_close_in_one_pass() {
+    let world = World::new();
+    let root = repo_with_worktrees(&world, "alpha", &["feat-x", "feat-y"]);
+    let stub = Stub::start(Script::default().open(vec![
+        workspace_in_repo("alpha", "w1", &root, false),
+        workspace_in_repo("feat-x", "w2", &root, true),
+        workspace_in_repo("feat-y", "w3", &root, true),
+    ]));
+    let run = run_choosing(&world, &stub, &[], &[]);
+    assert_eq!(closed_ids(&stub), vec!["w2", "w3", "w1"]);
+    assert_eq!(run.outcome.unwrap().closed, vec!["w2", "w3", "w1"]);
+    assert_eq!(
+        run.stderr, "",
+        "nothing was refused, so nothing is reported"
+    );
+}
+
+#[test]
+fn a_repository_whose_worktree_stays_checked_closes_what_was_unchecked_and_reports_the_rest() {
+    let world = World::new();
+    let root = repo_with_worktrees(&world, "alpha", &["feat-x", "feat-y"]);
+    let stub = Stub::start(Script::default().open(vec![
+        workspace_in_repo("alpha", "w1", &root, false),
+        workspace_in_repo("feat-x", "w2", &root, true),
+        workspace_in_repo("feat-y", "w3", &root, true),
+    ]));
+    let run = run_choosing(&world, &stub, &["feat-y"], &[]);
+    assert_eq!(run.outcome.unwrap().closed, vec!["w2"]);
+    assert!(
+        !closed_ids(&stub).contains(&"w3".to_string()),
+        "a checked worktree is never asked to close"
+    );
+    assert!(run.stderr.contains("alpha did not close"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("workspace_group_close_required"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(stub.params_for("notification.show").len(), 1);
+}
+
+#[test]
+fn a_worktree_closes_while_the_repository_it_belongs_to_stays_open() {
+    let world = World::new();
+    let root = repo_with_worktrees(&world, "alpha", &["feat-x"]);
+    let stub = Stub::start(Script::default().open(vec![
+        workspace_in_repo("alpha", "w1", &root, false),
+        workspace_in_repo("feat-x", "w2", &root, true),
+    ]));
+    let run = run_choosing(&world, &stub, &["alpha"], &[]);
+    assert_eq!(closed_ids(&stub), vec!["w2"]);
+    assert_eq!(run.stderr, "");
+}
+
+#[test]
+fn one_repositorys_open_worktree_never_holds_another_repository_open() {
+    let world = World::new();
+    let alpha = repo_with_worktrees(&world, "alpha", &["feat-x"]);
+    let beta = repo_with_worktrees(&world, "beta", &["feat-y"]);
+    let stub = Stub::start(Script::default().open(vec![
+        workspace_in_repo("alpha", "w1", &alpha, false),
+        workspace_in_repo("feat-x", "w2", &alpha, true),
+        workspace_in_repo("beta", "w3", &beta, false),
+        workspace_in_repo("feat-y", "w4", &beta, true),
+    ]));
+    let run = run_choosing(&world, &stub, &["feat-y"], &[]);
+    assert_eq!(run.outcome.unwrap().closed, vec!["w2", "w1"]);
+    assert!(run.stderr.contains("beta did not close"), "{}", run.stderr);
+    assert!(
+        !run.stderr.contains("alpha did not close"),
+        "{}",
+        run.stderr
+    );
+}
+
 fn layout_script(world: &World, log: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
     let path = world.own.join("lay");

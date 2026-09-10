@@ -89,6 +89,73 @@ fn an_unchanged_selection_is_a_noop() {
 }
 
 #[test]
+fn a_repository_closes_after_the_worktrees_that_belong_to_it() {
+    let open = vec![open("alpha", "w1"), open_worktree("feat-x", "w2")];
+    let steps = plan(&[], &open);
+    assert_eq!(labels(&steps.to_close), vec!["feat-x", "alpha"]);
+}
+
+#[test]
+fn repositories_and_worktrees_each_keep_the_order_the_server_listed_them_in() {
+    let open = vec![
+        open("alpha", "w1"),
+        open_worktree("feat-x", "w2"),
+        open("beta", "w3"),
+        open_worktree("feat-y", "w4"),
+    ];
+    let steps = plan(&[], &open);
+    assert_eq!(
+        labels(&steps.to_close),
+        vec!["feat-x", "feat-y", "alpha", "beta"]
+    );
+}
+
+#[test]
+fn a_worktree_closes_on_its_own_when_its_repository_stays_checked() {
+    let open = vec![open("alpha", "w1"), open_worktree("feat-x", "w2")];
+    let steps = plan(&["alpha".to_string()], &open);
+    assert_eq!(labels(&steps.to_close), vec!["feat-x"]);
+}
+
+#[test]
+fn a_repository_stays_in_the_close_set_when_a_worktree_of_its_stays_checked() {
+    let open = vec![open("alpha", "w1"), open_worktree("feat-x", "w2")];
+    let steps = plan(&["feat-x".to_string()], &open);
+    assert_eq!(labels(&steps.to_close), vec!["alpha"]);
+}
+
+#[test]
+fn a_linked_worktree_workspace_is_marked_as_one() {
+    let stub = Stub::start(
+        Script::default().open(vec![workspace_in_repo("feat-x", "w1", "/x/alpha", true)]),
+    );
+    let (_, others) = api::open_workspaces(&stub.client(), "~");
+    assert!(others[0].linked_worktree);
+}
+
+#[test]
+fn a_repository_opened_as_a_worktree_is_not_a_linked_worktree() {
+    let stub = Stub::start(
+        Script::default().open(vec![workspace_in_repo("alpha", "w1", "/x/alpha", false)]),
+    );
+    let (_, others) = api::open_workspaces(&stub.client(), "~");
+    assert!(!others[0].linked_worktree);
+}
+
+#[test]
+fn a_workspace_the_server_reports_no_worktree_for_is_not_a_linked_worktree() {
+    for row in [
+        workspace("alpha", "w1"),
+        json!({"workspace_id": "w1", "label": "alpha", "worktree": null}),
+        json!({"workspace_id": "w1", "label": "alpha", "worktree": "nonsense"}),
+    ] {
+        let stub = Stub::start(Script::default().open(vec![row.clone()]));
+        let (_, others) = api::open_workspaces(&stub.client(), "~");
+        assert!(!others[0].linked_worktree, "{}", row);
+    }
+}
+
+#[test]
 fn a_created_workspace_takes_the_focus() {
     let created = vec!["n1".to_string(), "n2".to_string()];
     let closed = vec!["w1".to_string()];

@@ -102,12 +102,34 @@ pub fn workspace_with(label: &str, id: &str, focused: bool, status: &str) -> Val
            "tab_count": 1, "active_tab_id": "t1"})
 }
 
+pub fn workspace_in_repo(label: &str, id: &str, repo_root: &str, linked: bool) -> Value {
+    let mut row = workspace(label, id);
+    row["worktree"] = json!({"repo_key": format!("{}/.git", repo_root),
+                             "repo_name": basename(repo_root),
+                             "repo_root": repo_root,
+                             "checkout_path": repo_root,
+                             "is_linked_worktree": linked});
+    row
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
 pub fn open(label: &str, id: &str) -> Workspace {
     Workspace {
         workspace_id: id.to_string(),
         label: label.to_string(),
         focused: false,
         agent_status: "idle".to_string(),
+        linked_worktree: false,
+    }
+}
+
+pub fn open_worktree(label: &str, id: &str) -> Workspace {
+    Workspace {
+        linked_worktree: true,
+        ..open(label, id)
     }
 }
 
@@ -154,12 +176,13 @@ impl Stub {
         let thread_stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             let opened = AtomicU32::new(0);
+            let shut = Mutex::new(HashSet::new());
             for stream in listener.incoming() {
                 if thread_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(stream) = stream else { break };
-                serve(&stream, &script, &thread_log, &opened);
+                serve(&stream, &script, &thread_log, &opened, &shut);
             }
         });
 
@@ -218,7 +241,13 @@ impl Drop for Stub {
     }
 }
 
-fn serve(stream: &UnixStream, script: &Script, log: &Arc<Mutex<Vec<Value>>>, opened: &AtomicU32) {
+fn serve(
+    stream: &UnixStream,
+    script: &Script,
+    log: &Arc<Mutex<Vec<Value>>>,
+    opened: &AtomicU32,
+    shut: &Mutex<HashSet<String>>,
+) {
     let mut line = String::new();
     if BufReader::new(stream).read_line(&mut line).is_err() || line.trim().is_empty() {
         return;
@@ -238,10 +267,32 @@ fn serve(stream: &UnixStream, script: &Script, log: &Arc<Mutex<Vec<Value>>>, ope
         .push(json!({"method": method, "params": params}));
 
     let id = request.get("id").cloned().unwrap_or(json!("stub"));
-    let answer = answer_for(&method, &params, script, opened, &id);
+    let answer = answer_for(&method, &params, script, opened, shut, &id);
     let mut out = stream;
     let _ = out.write_all(format!("{}\n", answer).as_bytes());
     let _ = out.flush();
+}
+
+fn linked_worktrees_still_open(script: &Script, target: &str, shut: &HashSet<String>) -> bool {
+    let Some(row) = script
+        .workspaces
+        .iter()
+        .find(|w| w["workspace_id"] == json!(target))
+    else {
+        return false;
+    };
+    if row["worktree"]["is_linked_worktree"] == json!(true) {
+        return false;
+    }
+    let root = row["worktree"]["repo_root"].clone();
+    if root.is_null() {
+        return false;
+    }
+    script.workspaces.iter().any(|w| {
+        w["worktree"]["is_linked_worktree"] == json!(true)
+            && w["worktree"]["repo_root"] == root
+            && !shut.contains(w["workspace_id"].as_str().unwrap_or(""))
+    })
 }
 
 fn answer_for(
@@ -249,6 +300,7 @@ fn answer_for(
     params: &Value,
     script: &Script,
     opened: &AtomicU32,
+    shut: &Mutex<HashSet<String>>,
     id: &Value,
 ) -> Value {
     let fail = |code: &str| {
@@ -271,8 +323,23 @@ fn answer_for(
                       "workspace": {"workspace_id": format!("new{}", n),
                                     "label": label}}))
         }
-        "workspace.close" => ok(json!({"type": "workspace_closed",
-                                       "workspace_id": params.get("workspace_id")})),
+        "workspace.close" => {
+            let target = params
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut shut = shut.lock().unwrap();
+            if linked_worktrees_still_open(script, &target, &shut) {
+                return json!({"id": id,
+                    "error": {"code": "workspace_group_close_required",
+                              "message": "workspace has linked worktree workspaces; \
+                                          use --group (close_group=true in the API) \
+                                          to close the group"}});
+            }
+            shut.insert(target.clone());
+            ok(json!({"type": "workspace_closed", "workspace_id": target}))
+        }
         "workspace.focus" => ok(json!({"type": "workspace_focused",
                                        "workspace_id": params.get("workspace_id")})),
         "plugin.list" => ok(json!({"type": "plugin_list", "plugins": script.plugins})),

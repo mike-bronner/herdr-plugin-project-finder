@@ -176,8 +176,13 @@ pub fn run(
 
     let mut closed: Vec<String> = Vec::new();
     for workspace in &steps.to_close {
-        if api::workspace_close(&client, &workspace.workspace_id).is_ok() {
-            closed.push(workspace.workspace_id.clone());
+        match api::workspace_close(&client, &workspace.workspace_id) {
+            Ok(()) => closed.push(workspace.workspace_id.clone()),
+            Err(refusal) => {
+                let refused = format!("{} did not close: {}", workspace.label, refusal);
+                let _ = writeln!(out, "picker: {}", refused);
+                api::notify(&client, &refused);
+            }
         }
     }
 
