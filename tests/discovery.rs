@@ -8,7 +8,7 @@ use pick_project::config::{
 };
 use pick_project::discover::{
     debug_line, duplicated_basenames, elide, human_age, label_for, labelled, order_rows,
-    parent_repo, repo_name, repos, row_kind, touched_at, Counts, Kind,
+    parent_repo, repos, row_kind, touched_at, Counts, Kind,
 };
 use support::*;
 
@@ -701,30 +701,6 @@ fn eliding_keeps_the_front_not_the_tail() {
 #[test]
 fn a_multibyte_label_is_cut_by_character_not_by_byte() {
     assert_eq!(elide("ααααα", 3), "αα…");
-}
-
-#[test]
-fn a_worktree_names_the_repository_it_belongs_to() {
-    let dir = TempDir::new();
-    let checkout = make_worktree(
-        &dir.join("feat-x"),
-        "/x/code/tru-data/.git/worktrees/feat-x",
-    );
-    assert_eq!(repo_name(&checkout), Some("tru-data".to_string()));
-}
-
-#[test]
-fn a_plain_repository_names_no_parent_repository() {
-    let dir = TempDir::new();
-    let repo = make_repo(&dir.join("tru-data"));
-    assert_eq!(repo_name(&repo), None);
-}
-
-#[test]
-fn a_worktree_whose_pointer_makes_no_sense_names_no_repository() {
-    let dir = TempDir::new();
-    let checkout = make_worktree(&dir.join("feat-x"), "/x/super/.git/modules/sub");
-    assert_eq!(repo_name(&checkout), None);
 }
 
 #[test]

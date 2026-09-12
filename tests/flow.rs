@@ -639,8 +639,8 @@ fn a_listed_worktree_carries_the_repository_it_belongs_to_and_a_repository_carri
     );
     let stub = Stub::start(Script::default());
     let run = run_choosing(&world, &stub, &[], &[]);
-    let repos: Vec<Option<String>> = run.listed.iter().map(|e| e.repo.clone()).collect();
-    assert!(repos.contains(&Some("alpha".to_string())), "{:?}", repos);
+    let repos: Vec<Option<PathBuf>> = run.listed.iter().map(|e| e.repo.clone()).collect();
+    assert!(repos.contains(&Some(repo.clone())), "{:?}", repos);
     assert!(repos.contains(&None), "{:?}", repos);
 }
 

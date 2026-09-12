@@ -9,7 +9,7 @@ use crate::config::{
     worktree_locations, Environment, HerdrConfig,
 };
 use crate::discover::{
-    debug_line, human_age, labelled, now, order_rows, repo_name, repos, row_kind, touched_at,
+    debug_line, human_age, labelled, now, order_rows, parent_repo, repos, row_kind, touched_at,
 };
 use crate::layout::{hand_over, resolve_layout};
 use crate::picker::Entry;
@@ -131,7 +131,7 @@ pub fn run(
         entries.push(Entry {
             label: row.label.clone(),
             path: row.path.clone(),
-            repo: repo_name(&row.path),
+            repo: parent_repo(&row.path),
             kind: row_kind(&row.path),
             age: human_age(row.touched, stamp),
             status: open_ws
@@ -243,8 +243,7 @@ pub fn run(
 }
 
 pub fn open_project(client: &Client, label: &str, path: &Path) -> Option<String> {
-    let repo = crate::discover::parent_repo(path)
-        .or_else(|| path.join(".git").is_dir().then(|| path.to_path_buf()));
+    let repo = parent_repo(path).or_else(|| path.join(".git").is_dir().then(|| path.to_path_buf()));
     if let Some(repo) = repo {
         if let Ok(id) = api::worktree_open(
             client,

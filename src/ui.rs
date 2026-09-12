@@ -12,7 +12,8 @@ use crate::config::Environment;
 use crate::discover::Kind;
 use crate::layout::which;
 use crate::picker::{
-    heading, row_cells, runs, Action, Entry, Highlights, Picker, GUTTER, LEGEND, MARKER, PROMPT,
+    heading, row_cells, runs, Action, Entry, Highlights, Picker, GUTTER, HELD_NOTE, LEGEND, MARKER,
+    PROMPT,
 };
 use crate::theme::{Colour, Theme};
 
@@ -143,10 +144,11 @@ pub fn draw(frame: &mut Frame, picker: &Picker, theme: &Theme, preview: &str) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(
-                "  {}/{} · {} checked",
+                "  {}/{} · {} checked{}",
                 picker.matches.len(),
                 picker.entries.len(),
-                picker.selected_count()
+                picker.selected_count(),
+                held_clause(picker),
             ),
             Style::default().fg(Color::Indexed(8)),
         ))),
@@ -165,6 +167,13 @@ pub fn draw(frame: &mut Frame, picker: &Picker, theme: &Theme, preview: &str) {
             .block(Block::default().borders(Borders::LEFT)),
         body[1],
     );
+}
+
+fn held_clause(picker: &Picker) -> String {
+    match picker.held_count() {
+        0 => String::new(),
+        held => format!(" · {} {}", held, HELD_NOTE),
+    }
 }
 
 fn emphasis() -> Style {
@@ -220,6 +229,10 @@ fn draw_list(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
                     style,
                     style.patch(emphasis()),
                 ));
+            }
+            if picker.held(*at) {
+                let dim = Style::default().add_modifier(Modifier::DIM);
+                return ListItem::new(Line::from(spans).style(dim));
             }
             ListItem::new(Line::from(spans))
         })

@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pick_project::discover::Kind;
 use pick_project::picker::{
     heading, row_cells, row_prefix, runs, Action, Entry, Highlights, Picker, AGE_WIDTH, GUTTER,
-    KIND_WIDTH, LABEL_WIDTH, LEGEND, MARKER, PROMPT,
+    HELD_NOTE, KIND_WIDTH, LABEL_WIDTH, LEGEND, MARKER, PROMPT,
 };
 use support::TempDir;
 
@@ -24,8 +24,19 @@ fn entry(label: &str, kind: Kind, age: &str, status: Option<&str>, selected: boo
 
 fn worktree_of(repo: &str, label: &str) -> Entry {
     Entry {
-        repo: Some(repo.to_string()),
+        repo: Some(PathBuf::from(repo)),
         ..entry(label, Kind::Worktree, "3m ago", None, false)
+    }
+}
+
+fn open_repo(label: &str) -> Entry {
+    entry(label, Kind::Repo, "1m ago", Some("idle"), true)
+}
+
+fn open_worktree_of(repo: &str, label: &str) -> Entry {
+    Entry {
+        repo: Some(PathBuf::from(format!("/x/{}", repo))),
+        ..entry(label, Kind::Worktree, "3m ago", Some("idle"), true)
     }
 }
 
@@ -217,6 +228,212 @@ fn control_d_leaves_a_checked_row_the_filter_hides() {
     type_in(&mut picker, "alpha");
     picker.on_key(control('d'));
     assert_eq!(checked(&picker), vec!["beta"]);
+}
+
+#[test]
+fn an_open_repository_will_not_uncheck_while_a_worktree_of_its_own_is_checked() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+    ]);
+    assert!(picker.held(0), "the repository is held");
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["alpha", "feat-x"]);
+}
+
+#[test]
+fn unchecking_the_last_worktree_frees_the_repository_in_the_same_run_of_keys() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+    ]);
+    picker.on_key(key(KeyCode::Down));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["alpha"]);
+    assert!(!picker.held(0), "the last worktree let go of it");
+    picker.on_key(key(KeyCode::Home));
+    picker.on_key(key(KeyCode::Tab));
+    assert!(checked(&picker).is_empty());
+}
+
+#[test]
+fn one_of_two_worktrees_left_checked_still_holds_the_repository() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+        open_worktree_of("alpha", "feat-y"),
+    ]);
+    picker.on_key(key(KeyCode::Down));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["alpha", "feat-y"]);
+    assert!(picker.held(0), "feat-y still holds it");
+}
+
+#[test]
+fn an_unchecked_worktree_holds_nothing_so_its_repository_unchecks() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        Entry {
+            selected: false,
+            ..open_worktree_of("alpha", "feat-x")
+        },
+    ]);
+    assert!(!picker.held(0));
+    picker.on_key(key(KeyCode::Tab));
+    assert!(checked(&picker).is_empty());
+}
+
+#[test]
+fn a_worktree_of_another_repository_never_holds_this_one() {
+    let mut picker = Picker::new(vec![open_repo("alpha"), open_worktree_of("beta", "feat-y")]);
+    assert!(!picker.held(0));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["feat-y"]);
+}
+
+#[test]
+fn a_repository_that_is_not_open_is_never_held_because_nothing_would_be_closed() {
+    let entries = vec![
+        entry("alpha", Kind::Repo, "1m ago", None, true),
+        open_worktree_of("alpha", "feat-x"),
+    ];
+    let mut picker = Picker::new(entries);
+    assert!(!picker.held(0));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["feat-x"]);
+}
+
+#[test]
+fn checking_a_worktree_checks_the_open_repository_it_belongs_to() {
+    let entries = vec![
+        Entry {
+            selected: false,
+            ..open_repo("alpha")
+        },
+        Entry {
+            selected: false,
+            ..open_worktree_of("alpha", "feat-x")
+        },
+    ];
+    let mut picker = Picker::new(entries);
+    picker.on_key(key(KeyCode::Down));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["alpha", "feat-x"]);
+    assert!(picker.held(0));
+}
+
+#[test]
+fn checking_a_worktree_never_checks_a_repository_that_is_not_open() {
+    let entries = vec![
+        entry("alpha", Kind::Repo, "1m ago", None, false),
+        Entry {
+            selected: false,
+            ..open_worktree_of("alpha", "feat-x")
+        },
+    ];
+    let mut picker = Picker::new(entries);
+    picker.on_key(key(KeyCode::Down));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(
+        checked(&picker),
+        vec!["feat-x"],
+        "a closed repository must not be opened by a worktree"
+    );
+}
+
+#[test]
+fn checking_a_worktree_checks_only_the_repository_it_belongs_to() {
+    let entries = vec![
+        Entry {
+            selected: false,
+            ..open_repo("alpha")
+        },
+        Entry {
+            selected: false,
+            ..open_repo("beta")
+        },
+        Entry {
+            selected: false,
+            ..open_worktree_of("beta", "feat-y")
+        },
+    ];
+    let mut picker = Picker::new(entries);
+    picker.on_key(key(KeyCode::End));
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["beta", "feat-y"]);
+}
+
+#[test]
+fn rechecking_a_worktree_brings_back_the_repository_that_was_unchecked_meanwhile() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+    ]);
+    picker.on_key(key(KeyCode::Down));
+    picker.on_key(key(KeyCode::Tab));
+    picker.on_key(key(KeyCode::Home));
+    picker.on_key(key(KeyCode::Tab));
+    assert!(checked(&picker).is_empty());
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(
+        checked(&picker),
+        vec!["alpha", "feat-x"],
+        "Herdr would refuse to close alpha while feat-x stays open"
+    );
+}
+
+#[test]
+fn control_a_checks_the_open_repository_of_a_worktree_the_filter_hides() {
+    let entries = vec![
+        Entry {
+            selected: false,
+            ..open_repo("alpha")
+        },
+        Entry {
+            selected: false,
+            ..open_worktree_of("alpha", "feat-x")
+        },
+    ];
+    let mut picker = Picker::new(entries);
+    type_in(&mut picker, "feat-x");
+    assert_eq!(shown(&picker), vec!["feat-x"]);
+    picker.on_key(control('a'));
+    assert_eq!(checked(&picker), vec!["alpha", "feat-x"]);
+}
+
+#[test]
+fn a_held_repository_can_still_be_checked_again_after_it_is_let_go_of() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+    ]);
+    picker.on_key(control('d'));
+    assert!(checked(&picker).is_empty());
+    picker.on_key(key(KeyCode::Tab));
+    assert_eq!(checked(&picker), vec!["alpha"]);
+}
+
+#[test]
+fn control_d_clears_a_repository_and_its_worktrees_together() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+        open_worktree_of("alpha", "feat-y"),
+    ]);
+    picker.on_key(control('d'));
+    assert!(checked(&picker).is_empty());
+}
+
+#[test]
+fn control_d_leaves_a_repository_checked_when_the_filter_hides_its_worktrees() {
+    let mut picker = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+    ]);
+    type_in(&mut picker, "alpha");
+    assert_eq!(shown(&picker), vec!["alpha"]);
+    picker.on_key(control('d'));
+    assert_eq!(checked(&picker), vec!["alpha", "feat-x"]);
 }
 
 #[test]
@@ -736,6 +953,64 @@ fn a_row_that_is_not_open_is_drawn_with_no_status_at_all() {
     let row = screen.iter().find(|l| l.contains("beta")).unwrap();
     assert!(!row.contains('●'), "{:?}", row);
     assert!(!row.contains("idle"), "{:?}", row);
+}
+
+#[test]
+fn the_count_line_says_how_many_rows_are_held_and_by_what() {
+    let entries = vec![open_repo("alpha"), open_worktree_of("alpha", "feat-x")];
+    let screen = rendered(&Picker::new(entries), "", 160, 12);
+    assert!(
+        screen[4].contains(&format!("1 {}", HELD_NOTE)),
+        "{:?}",
+        screen[4]
+    );
+}
+
+#[test]
+fn the_count_line_says_nothing_about_holding_when_nothing_is_held() {
+    let screen = rendered(&Picker::new(vec![open_repo("alpha")]), "", 160, 12);
+    assert!(!screen[4].contains(HELD_NOTE), "{:?}", screen[4]);
+    assert!(screen[4].contains("1 checked"), "{:?}", screen[4]);
+}
+
+#[test]
+fn every_held_row_is_counted_on_the_count_line() {
+    let entries = vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+        open_repo("beta"),
+        open_worktree_of("beta", "feat-y"),
+    ];
+    let screen = rendered(&Picker::new(entries), "", 160, 12);
+    assert!(
+        screen[4].contains(&format!("2 {}", HELD_NOTE)),
+        "{:?}",
+        screen[4]
+    );
+}
+
+#[test]
+fn a_held_row_is_drawn_dim_and_a_free_one_is_not() {
+    use ratatui::style::Modifier;
+
+    let held = Picker::new(vec![
+        open_repo("alpha"),
+        open_worktree_of("alpha", "feat-x"),
+    ]);
+    let cells = drawn_styles(&held, 160, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let at = text.find("alpha").unwrap();
+    assert!(cells[at].1.add_modifier.contains(Modifier::DIM), "{}", text);
+
+    let free = Picker::new(vec![open_repo("alpha")]);
+    let cells = drawn_styles(&free, 160, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    let at = text.find("alpha").unwrap();
+    assert!(
+        !cells[at].1.add_modifier.contains(Modifier::DIM),
+        "{}",
+        text
+    );
 }
 
 fn drawn_styles(picker: &Picker, width: u16, row: u16) -> Vec<(String, ratatui::style::Style)> {

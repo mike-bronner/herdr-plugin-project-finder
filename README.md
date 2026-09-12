@@ -75,6 +75,18 @@ Unchecked worktrees close before the repositories they belong to. A repository
 and its worktrees therefore all close in one pass, rather than a level at a
 time. A close Herdr refuses is reported rather than dropped.
 
+An open repository is **held** while any worktree row of its own stays checked,
+because Herdr refuses to close a repository that still has an open worktree. A
+held row will not uncheck, and checking a worktree checks the open repository it
+belongs to. Uncheck every worktree of a repository and the repository itself is
+free again on the same keystroke, so unchecking a project along with its
+worktrees still works exactly as it did. A repository that is **not** open holds
+nothing, because there is no close for Herdr to refuse, and checking a worktree
+of one never opens it.
+
+A held row is drawn dim, and the line under the heading counts them and says
+what holds them.
+
 The list is drawn by the plugin itself, with
 [ratatui](https://ratatui.rs) and [nucleo](https://github.com/helix-editor/nucleo)
 for the fuzzy matching. Type to filter, `Tab` to check a row, `Enter` to apply.
@@ -94,7 +106,9 @@ for the fuzzy matching. Type to filter, `Tab` to check a row, `Enter` to apply.
 
 `space` types rather than toggling, so a two-word filter works. `Ctrl-A` and
 `Ctrl-D` reach only the rows the filter left on screen, so a row you checked
-before narrowing the list stays checked.
+before narrowing the list stays checked. `Ctrl-A` reaches one row further when
+it has to: the open repository of a worktree it checks. `Ctrl-D` leaves a
+repository checked when the filter hides a worktree of its own.
 
 **Every workspace the picker opens is handed to one command of your choosing.**
 That is the `layout` setting, and it is where the panes come from: the picker
@@ -295,19 +309,25 @@ without reading stderr for a phrase. That is the whole reason for the choice: a
 `worktree.open` the server refuses falls back to `workspace.create`, and it has
 to be sure which of the two it is looking at.
 
-One more refusal shapes the order the picker closes in. Herdr will not close a
-repository while a linked worktree of its own is still open. It answers
-`workspace_group_close_required` and closes nothing. So `workspace.list` is
-read for each workspace's `worktree.is_linked_worktree`, and every unchecked
-worktree is closed before any repository. A workspace the server reports no
-`worktree` block for counts as a repository and closes last.
+One more refusal shapes both the order the picker closes in and what the list
+lets you ask for. Herdr will not close a repository while a linked worktree of
+its own is still open. It answers `workspace_group_close_required` and closes
+nothing. So `workspace.list` is read for each workspace's
+`worktree.is_linked_worktree`, and every unchecked worktree is closed before any
+repository. A workspace the server reports no `worktree` block for counts as a
+repository and closes last.
+
+Ordering alone only covers the case where the whole group goes. Leave one
+worktree checked and no order helps: that repository can never close. So the
+picker holds the repository row instead, and the refused selection cannot be
+expressed. The rows are matched to each other by path, read from the worktree's
+own `gitdir:` pointer, so nothing extra is asked of Herdr to work it out.
 
 `workspace.close` also takes `close_group`, which closes a repository together
-with every worktree of its own. The picker never sends it. It would close
-worktrees you left checked, and the selection is the contract. Ordering needs
-no such exception: each workspace is closed on its own merits. Leave one
-worktree checked and it stays open, its repository cannot close, and the
-picker says which one and why on stderr and in a notification.
+with every worktree of its own. The picker never sends it, and never retries a
+refusal with it. It would close worktrees you left checked, and the selection is
+the contract. Holding the row keeps that contract from the other end: nothing is
+closed that you did not uncheck.
 
 With `HERDR_SOCKET_PATH` unset the picker says so and draws nothing, because a
 selection it cannot act on is worse than no popup at all.

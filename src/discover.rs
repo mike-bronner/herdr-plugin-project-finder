@@ -222,10 +222,6 @@ pub fn elide(text: &str, width: usize) -> String {
     cut
 }
 
-pub fn repo_name(path: &Path) -> Option<String> {
-    parent_repo(path).as_deref().map(basename)
-}
-
 pub fn label_for(path: &Path, duplicated: &HashSet<String>) -> String {
     let base = basename(path);
     if duplicated.contains(&base) {
@@ -236,7 +232,7 @@ pub fn label_for(path: &Path, duplicated: &HashSet<String>) -> String {
     }
 }
 
-fn basename(path: &Path) -> String {
+pub fn basename(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()

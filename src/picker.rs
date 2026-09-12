@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 
-use crate::discover::{elide, Kind};
+use crate::discover::{basename, elide, Kind};
 
 pub const LABEL_WIDTH: usize = 34;
 pub const KIND_WIDTH: usize = 4;
@@ -20,11 +20,13 @@ pub const LEGEND: [&str; 2] = [
 pub const MARKER: &str = "✓ ";
 pub const GUTTER: &str = "  ";
 
+pub const HELD_NOTE: &str = "held by checked worktrees";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub label: String,
     pub path: PathBuf,
-    pub repo: Option<String>,
+    pub repo: Option<PathBuf>,
     pub kind: Kind,
     pub age: String,
     pub status: Option<String>,
@@ -63,9 +65,10 @@ pub fn heading() -> String {
 }
 
 fn repo_prefix(entry: &Entry, taken: usize) -> String {
-    let Some(name) = &entry.repo else {
+    let Some(repo) = &entry.repo else {
         return String::new();
     };
+    let name = basename(repo);
     let room = LABEL_WIDTH.saturating_sub(taken);
     let whole = format!("{}/", name);
     if whole.chars().count() <= room {
@@ -74,7 +77,7 @@ fn repo_prefix(entry: &Entry, taken: usize) -> String {
     match room {
         0 => String::new(),
         1 => "…".to_string(),
-        _ => format!("{}/", elide(name, room - 1)),
+        _ => format!("{}/", elide(&name, room - 1)),
     }
 }
 
@@ -269,16 +272,65 @@ impl Picker {
         self.cursor = next.clamp(0, last as isize) as usize;
     }
 
+    pub fn held(&self, at: usize) -> bool {
+        let Some(row) = self.entries.get(at) else {
+            return false;
+        };
+        row.status.is_some()
+            && self
+                .entries
+                .iter()
+                .any(|e| e.selected && e.repo.as_deref() == Some(row.path.as_path()))
+    }
+
+    pub fn held_count(&self) -> usize {
+        (0..self.entries.len()).filter(|at| self.held(*at)).count()
+    }
+
+    fn open_repo_row(&self, at: usize) -> Option<usize> {
+        let repo = self.entries[at].repo.as_deref()?;
+        self.entries
+            .iter()
+            .position(|e| e.status.is_some() && e.path == repo)
+    }
+
+    fn check(&mut self, at: usize) {
+        self.entries[at].selected = true;
+        if let Some(owner) = self.open_repo_row(at) {
+            self.entries[owner].selected = true;
+        }
+    }
+
+    fn uncheck(&mut self, at: usize) {
+        if !self.held(at) {
+            self.entries[at].selected = false;
+        }
+    }
+
     fn toggle(&mut self) {
-        if let Some(at) = self.matches.get(self.cursor) {
-            let at = *at;
-            self.entries[at].selected = !self.entries[at].selected;
+        let Some(at) = self.matches.get(self.cursor).copied() else {
+            return;
+        };
+        if self.entries[at].selected {
+            self.uncheck(at);
+        } else {
+            self.check(at);
         }
     }
 
     fn set_all(&mut self, selected: bool) {
-        for at in self.matches.clone() {
-            self.entries[at].selected = selected;
+        if selected {
+            for at in self.matches.clone() {
+                self.check(at);
+            }
+            return;
+        }
+        for kind in [Kind::Worktree, Kind::Repo] {
+            for at in self.matches.clone() {
+                if self.entries[at].kind == kind {
+                    self.uncheck(at);
+                }
+            }
         }
     }
 
