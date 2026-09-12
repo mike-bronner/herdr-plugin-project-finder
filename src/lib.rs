@@ -7,3 +7,4 @@ pub mod picker;
 pub mod plan;
 pub mod theme;
 pub mod ui;
+pub mod version;

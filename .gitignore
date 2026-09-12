@@ -1,2 +1,5 @@
 /target
 .DS_Store
+
+# The kit's developer override: its presence forces a source build.
+/BUILD_FROM_SOURCE

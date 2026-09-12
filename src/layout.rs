@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::{Environment, LAYOUT_VAR};
+use crate::config::{Environment, EnvironmentExt, LAYOUT_VAR};
 
 pub const WORKSPACE_TOKEN: &str = "{workspace}";
 
@@ -94,15 +94,15 @@ pub fn substitute_plugin(
 }
 
 pub fn which(env: &Environment, command: &str) -> Option<PathBuf> {
-    if command.contains('/') {
+    if names_a_directory(command) {
         let path = PathBuf::from(command);
         return is_executable(&path).then_some(path);
     }
-    for dir in env.get("PATH").unwrap_or("").split(':') {
-        if dir.is_empty() {
+    for dir in std::env::split_paths(env.get("PATH").unwrap_or("")) {
+        if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = Path::new(dir).join(command);
+        let candidate = dir.join(command);
         if is_executable(&candidate) {
             return Some(candidate);
         }
@@ -110,10 +110,24 @@ pub fn which(env: &Environment, command: &str) -> Option<PathBuf> {
     None
 }
 
+fn names_a_directory(command: &str) -> bool {
+    Path::new(command)
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+}
+
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
         .unwrap_or(false)
 }
 
@@ -196,7 +210,6 @@ pub fn for_workspace(argv: &[String], workspace_id: &str) -> Vec<String> {
 }
 
 pub fn hand_over(argv: &[String], workspace_id: &str, env: &Environment) -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
     let argv = for_workspace(argv, workspace_id);
     let mut command = std::process::Command::new(&argv[0]);
     command
@@ -206,15 +219,22 @@ pub fn hand_over(argv: &[String], workspace_id: &str, env: &Environment) -> std:
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    detach(&mut command);
+    command.spawn().map(|_| ())
+}
+
+#[cfg(unix)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
     unsafe {
         command.pre_exec(|| {
             libc_setsid();
             Ok(())
         });
     }
-    command.spawn().map(|_| ())
 }
 
+#[cfg(unix)]
 fn libc_setsid() {
     extern "C" {
         fn setsid() -> i32;
@@ -222,4 +242,16 @@ fn libc_setsid() {
     unsafe {
         setsid();
     }
+}
+
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+#[cfg(windows)]
+fn detach(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }

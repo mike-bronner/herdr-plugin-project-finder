@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use herdr_plugin_kit::env::{CONFIG_PATH_VAR, PER_PLUGIN_VARS, PLUGIN_CONFIG_DIR_VAR};
 use serde::Deserialize;
+
+pub use herdr_plugin_kit::env::{parse_env_file, read_env_file, Environment};
 
 pub const ROOT_VAR: &str = "HERDR_PICKER_ROOT";
 pub const HOME_VAR: &str = "HERDR_PICKER_HOME";
@@ -19,98 +22,33 @@ pub const FIXED_WORKTREE_DIRS: [&str; 3] = [".worktrees", ".claude/worktrees", "
 
 pub const DEFAULT_HOME_LABEL: &str = "~";
 
-#[derive(Debug, Clone, Default)]
-pub struct Environment {
-    vars: BTreeMap<String, String>,
+pub trait EnvironmentExt {
+    fn without_plugin_vars(&self) -> Vec<(String, String)>;
+    fn overridden(&self, key: &str, value: &str) -> Environment;
+    fn overlaid(&self, pairs: &[(String, String)]) -> Environment;
 }
 
-impl Environment {
-    pub fn from_process() -> Environment {
-        Environment {
-            vars: std::env::vars().collect(),
-        }
-    }
-
-    pub fn from_pairs(pairs: &[(&str, &str)]) -> Environment {
-        Environment {
-            vars: pairs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        }
-    }
-
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.vars.get(key).map(String::as_str)
-    }
-
-    pub fn home(&self) -> PathBuf {
-        PathBuf::from(self.get("HOME").unwrap_or("/"))
-    }
-
-    pub fn expanduser(&self, value: &str) -> String {
-        if value == "~" {
-            return self.home().to_string_lossy().to_string();
-        }
-        match value.strip_prefix("~/") {
-            Some(rest) => self.home().join(rest).to_string_lossy().to_string(),
-            None => value.to_string(),
-        }
-    }
-
-    pub fn without_plugin_vars(&self) -> Vec<(String, String)> {
-        self.vars
-            .iter()
-            .filter(|(k, _)| {
-                k.as_str() != "HERDR_PLUGIN_ROOT" && k.as_str() != "HERDR_PLUGIN_CONFIG_DIR"
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
+impl EnvironmentExt for Environment {
+    fn without_plugin_vars(&self) -> Vec<(String, String)> {
+        self.vars()
+            .filter(|(key, _)| !PER_PLUGIN_VARS.contains(key))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect()
     }
 
-    pub fn overridden(&self, key: &str, value: &str) -> Environment {
-        let mut vars = self.vars.clone();
-        vars.insert(key.to_string(), value.to_string());
-        Environment { vars }
+    fn overridden(&self, key: &str, value: &str) -> Environment {
+        let mut pairs: Vec<(&str, &str)> = self.vars().collect();
+        pairs.push((key, value));
+        Environment::from_pairs(&pairs)
     }
 
-    pub fn overlaid(&self, pairs: &[(String, String)]) -> Environment {
-        let mut vars = self.vars.clone();
-        for (key, value) in pairs {
-            vars.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-        Environment { vars }
-    }
-}
-
-pub fn parse_env_file(text: &str) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let (key, value) = line.split_once('=').unwrap();
-        let key = key.trim();
-        let mut value = value.trim().to_string();
-        let bytes: Vec<char> = value.chars().collect();
-        if bytes.len() >= 2
-            && bytes[0] == bytes[bytes.len() - 1]
-            && (bytes[0] == '"' || bytes[0] == '\'')
-        {
-            value = bytes[1..bytes.len() - 1].iter().collect();
-        }
-        if !key.is_empty() {
-            pairs.push((key.to_string(), value));
-        }
-    }
-    pairs
-}
-
-pub fn read_env_file(path: &Path) -> Vec<(String, String)> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => parse_env_file(&text),
-        Err(_) => Vec::new(),
+    fn overlaid(&self, pairs: &[(String, String)]) -> Environment {
+        let mut all: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        all.extend(self.vars());
+        Environment::from_pairs(&all)
     }
 }
 
@@ -181,7 +119,7 @@ pub struct Sources {
 }
 
 pub fn read_sources(env: &Environment, own_root: &Path) -> Sources {
-    let dir = env.get("HERDR_PLUGIN_CONFIG_DIR").map(PathBuf::from);
+    let dir = env.get(PLUGIN_CONFIG_DIR_VAR).map(PathBuf::from);
     Sources {
         config: dir
             .as_ref()
@@ -264,7 +202,7 @@ pub fn resolve_root(env: &Environment, settings: &Settings) -> PathBuf {
     if named.is_empty() {
         return home;
     }
-    let expanded = PathBuf::from(env.expanduser(named));
+    let expanded = env.expanduser(named);
     if expanded.is_dir() {
         expanded
     } else {
@@ -273,10 +211,10 @@ pub fn resolve_root(env: &Environment, settings: &Settings) -> PathBuf {
 }
 
 pub fn herdr_config_path(env: &Environment) -> PathBuf {
-    if let Some(override_path) = env.get("HERDR_CONFIG_PATH").filter(|v| !v.is_empty()) {
-        return PathBuf::from(env.expanduser(override_path));
+    if let Some(override_path) = env.get(CONFIG_PATH_VAR).filter(|v| !v.is_empty()) {
+        return env.expanduser(override_path);
     }
-    if let Some(dir) = env.get("HERDR_PLUGIN_CONFIG_DIR").filter(|v| !v.is_empty()) {
+    if let Some(dir) = env.get(PLUGIN_CONFIG_DIR_VAR).filter(|v| !v.is_empty()) {
         let trimmed = dir.trim_end_matches('/');
         let root = Path::new(trimmed).ancestors().nth(3);
         if let Some(root) = root {
@@ -389,7 +327,7 @@ pub fn worktree_locations(config: &HerdrConfig, env: &Environment) -> (Vec<Strin
     let mut roots: Vec<String> = Vec::new();
 
     let raw = config.string("worktrees.directory").unwrap_or("");
-    let setting = env.expanduser(raw.trim());
+    let setting = env.expanduser(raw.trim()).to_string_lossy().to_string();
     if setting.starts_with('/') {
         roots.push(normpath(&setting));
     } else if !setting.is_empty() {

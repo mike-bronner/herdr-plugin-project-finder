@@ -3,7 +3,8 @@ mod support;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use pick_project::config::Environment;
+use herdr_plugin_kit::env::PER_PLUGIN_VARS;
+use pick_project::config::{Environment, EnvironmentExt};
 use pick_project::layout::{
     for_workspace, hand_over, resolve_layout, split_command, which, WORKSPACE_TOKEN,
 };
@@ -307,6 +308,41 @@ fn everything_else_passes_through_to_the_child() {
 }
 
 #[test]
+fn every_variable_that_names_this_plugins_own_launch_is_dropped() {
+    for var in PER_PLUGIN_VARS {
+        let env = Environment::from_pairs(&[(var, "/x/picker"), ("PATH", "/usr/bin")]);
+        let child = env.without_plugin_vars();
+        assert!(
+            !child.iter().any(|(k, _)| k == var),
+            "{} reaches another plugin's binary, which then reads this checkout as its own",
+            var
+        );
+        assert!(
+            child.contains(&("PATH".to_string(), "/usr/bin".to_string())),
+            "{} took an unrelated variable with it",
+            var
+        );
+    }
+}
+
+#[test]
+fn the_strip_list_is_the_kits_and_is_never_narrowed_here() {
+    assert_eq!(
+        PER_PLUGIN_VARS,
+        [
+            "HERDR_PLUGIN_ROOT",
+            "HERDR_PLUGIN_CONFIG_DIR",
+            "HERDR_PLUGIN_STATE_DIR",
+            "HERDR_PLUGIN_EVENT",
+            "HERDR_PLUGIN_EVENT_JSON",
+        ],
+        "which launch variables belong to one plugin is a fact about Herdr's contract that \
+         Herdr writes down nowhere; a plugin quietly disagreeing with the list is how the list \
+         stops meaning anything"
+    );
+}
+
+#[test]
 fn building_the_child_environment_leaves_the_original_alone() {
     let env = Environment::from_pairs(&[
         ("HERDR_PLUGIN_CONFIG_DIR", "/x/picker/config"),
@@ -399,6 +435,16 @@ fn a_command_on_the_path_is_found_and_one_that_is_not_is_refused() {
     let env = Environment::from_pairs(&[("PATH", &path)]);
     assert_eq!(which(&env, "lay"), Some(bin.join("lay")));
     assert_eq!(which(&env, "nothing-here-at-all"), None);
+}
+
+#[test]
+fn an_empty_path_entry_is_passed_over_rather_than_searched() {
+    let dir = TempDir::new();
+    let bin = dir.dir("bin");
+    script(&dir, "bin/lay", "#!/bin/sh\n");
+    let path = format!("::{}", bin.to_string_lossy());
+    let env = Environment::from_pairs(&[("PATH", &path)]);
+    assert_eq!(which(&env, "lay"), Some(bin.join("lay")));
 }
 
 #[test]

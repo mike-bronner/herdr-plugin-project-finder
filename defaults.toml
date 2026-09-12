@@ -5,10 +5,10 @@
 # [picker] table in the same syntax you write, which is the point: a default is
 # a value to replace rather than a fallback buried in the code.
 #
-# It is also the only file in this repo that names another program. bin/pick-project
-# carries no plugin id, no executable path and no flag belonging to anything in
-# particular, so the coupling below is data you can change rather than code you
-# would have to edit.
+# It is also the only file in this repo that names another program. The picker's
+# own source carries no plugin id but its own, no executable path and no flag
+# belonging to anything in particular, so the coupling below is data you can
+# change rather than code you would have to edit.
 
 [picker]
 # What each newly opened workspace is handed to, as one command line. It is

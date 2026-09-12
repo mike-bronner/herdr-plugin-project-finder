@@ -144,12 +144,57 @@ fn no_socket_to_reach_herdr_on_is_refused_before_anything_is_drawn() {
         drawn = true;
         Ok(None)
     });
-    assert!(matches!(outcome, Err(Fatal::NoServer(_))), "{:?}", outcome);
+    match &outcome {
+        Err(Fatal::NoServer(message)) => {
+            assert!(
+                message.contains(".config/herdr/herdr.sock"),
+                "an unset variable falls back to the documented default, and the message has \
+                 to name the path it really tried: {}",
+                message
+            );
+            assert!(
+                message.contains("HERDR_SOCKET_PATH"),
+                "cannot reach this path and cannot reach this path, and nothing named it, are \
+                 different problems: {}",
+                message
+            );
+        }
+        other => panic!("{:?}", other),
+    }
     assert!(
         !drawn,
         "the picker must not draw itself with nowhere to send a pick"
     );
     let _ = stub;
+}
+
+#[test]
+fn a_socket_the_variable_names_is_used_instead_of_the_default() {
+    let world = World::new();
+    world.repo("myrepo");
+    let env = Environment::from_pairs(&[
+        ("PATH", LAUNCHD_PATH),
+        ("HOME", &world.tree.path().to_string_lossy()),
+        ("HERDR_PICKER_ROOT", &world.tree.path().to_string_lossy()),
+        ("HERDR_SOCKET_PATH", "/private/tmp/pick-project-absent.sock"),
+    ]);
+    let mut out: Vec<u8> = Vec::new();
+    let outcome = app::run(&env, world.own_root(), &mut out, &mut |_, _, _| Ok(None));
+    match &outcome {
+        Err(Fatal::NoServer(message)) => {
+            assert!(
+                message.contains("/private/tmp/pick-project-absent.sock"),
+                "{}",
+                message
+            );
+            assert!(
+                !message.contains("the default"),
+                "the variable named this path, so nothing fell back: {}",
+                message
+            );
+        }
+        other => panic!("{:?}", other),
+    }
 }
 
 #[test]
@@ -538,8 +583,9 @@ fn the_layout_command_is_resolved_once_however_many_workspaces_open() {
     let lay = layout_script(&world, &records);
     world.configure("[picker]\nlayout = \"{plugin:some.plugin}/lay --space {workspace}\"\n");
     let _ = lay;
-    let stub =
-        Stub::start(Script::default().plugins(vec![json!({"plugin_root": world.own.path()})]));
+    let stub = Stub::start(
+        Script::default().plugins(vec![plugin_row(&world.own.path().to_string_lossy())]),
+    );
     let run = run_choosing(&world, &stub, &["alpha", "beta"], &[]);
     assert!(run.outcome.is_ok());
     assert_eq!(

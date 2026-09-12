@@ -1,89 +1,38 @@
 name: Release
 
+# Builds the six targets on native runners and publishes a raw binary plus a
+# checksum for each, named exactly as the synced bin/build asks for them:
+#
+#     releases/download/<version>/pick-project-<platform>-<first 12 of the commit>
+#
+# 🔑 Nothing about the build lives here. The whole job is herdr-plugin-kit's
+# reusable plugin-release.yml, pinned to the tag Cargo.toml pins. A copy of it
+# in this file would be a second opinion about a convention that is already
+# written down, and the consuming half — asset_url in bin/common — has no way
+# to disagree out loud: a producer and a consumer that name an asset
+# differently is a 404, a silent fall back to compiling, and nobody finding out.
+#
+# 🚨 The `@` ref and Cargo.toml's two `tag =` pins have to name the same kit.
+# Nothing in the kit's own gates compares them, so tests/packaging.rs does.
+#
+# ⚠️ The tag carries no `v`. The kit's version gate refuses the other form by
+# name, which is what stops the two conventions crossing at the one place that
+# publishes. Tags up to v0.7.0 keep their prefix and are not rewritten.
+
 on:
   release:
     types: [created]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag to build binaries for'
-        required: true
+
+# Read by default. The one grant below is the one the called workflow needs,
+# and it is here rather than at the top of the file so that a job added later
+# does not inherit the ability to publish.
+permissions:
+  contents: read
 
 jobs:
-  binaries:
-    name: ${{ matrix.platform }}
-    runs-on: ${{ matrix.os }}
+  release:
+    uses: mike-bronner/herdr-plugin-kit/.github/workflows/plugin-release.yml@0.4.1
+    # 🚨 Required. A called workflow runs on the caller's permissions and
+    # cannot raise its own, so without this the run fails before it starts.
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: macos-arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            platform: macos-x64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            platform: linux-arm64
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            platform: linux-x64
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.tag }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Set up Zig
-        if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.14.1
-
-      - name: Install cargo-zigbuild
-        if: runner.os == 'Linux'
-        uses: taiki-e/install-action@v2.87.6
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build the picker
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            cargo zigbuild --release --target "$TARGET"
-          else
-            cargo build --release --target "$TARGET"
-          fi
-
-      - name: Name it for the commit it was built from
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          PLATFORM: ${{ matrix.platform }}
-        run: |
-          ASSET="pick-project-$PLATFORM-$(git rev-parse HEAD | cut -c1-12)"
-          cp "target/$TARGET/release/pick-project" "$ASSET"
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$ASSET" > "$ASSET.sha256"
-          else
-            shasum -a 256 "$ASSET" > "$ASSET.sha256"
-          fi
-          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
-
-      - name: Publish both to the release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.event.release.tag_name || github.event.inputs.tag }}
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256

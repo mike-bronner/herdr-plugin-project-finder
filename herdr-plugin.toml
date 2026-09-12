@@ -1,15 +1,84 @@
 id = "mikebronner.project-finder"
 name = "Project Finder"
-version = "0.8.1"
+version = "0.9.0"
 min_herdr_version = "0.9.0"
 description = "Fuzzy-pick git repos and open them as workspaces"
+
+# Windows is declared, and it is untested.
+#
+# ⚠️ It was absent for a measured reason, and it is back for a decided one, so
+# both are worth a reader's time. The measurement: on 2026-09-12 this crate
+# would not compile for either Windows target, because src/layout.rs reached
+# for `std::os::unix::fs::PermissionsExt` and
+# `std::os::unix::process::CommandExt`. The decision, Mike's: port those two
+# rather than narrow the release matrix or ship untagged, so that all six
+# targets compile and a release can actually publish. `cargo clippy` is clean
+# for all six as of that port.
+#
+# 🚨 Compiling is the whole of the guarantee. No Windows machine has ever run
+# this plugin, no .ps1 file here has been run or even parsed, and the layout
+# hand-off detaches by a different mechanism there (see the README's Windows
+# section for what that does and does not promise). Treat a bug on Windows as
+# new information rather than as a regression.
+platforms = ["macos", "linux", "windows"]
+
+# Every entry below is declared twice, because `["sh", ...]` cannot run on
+# Windows and `["powershell", ...]` cannot run anywhere else. Herdr supports
+# per-item `platforms` that override the top-level list, which is what makes one
+# manifest serve both.
+#
+# 🔑 The `sh` entry comes first in every pair, deliberately. Whether Herdr
+# filters by platform before resolving is not something anyone here has
+# verified; if it ever took the first entry regardless, the platforms that are
+# actually tested are the ones that would win.
+
+# Getting the binary: fetch the one published for this platform, and compile
+# only when no verified binary can be had. Installing therefore needs no Rust
+# toolchain.
+#
+# 🔑 `--install` names the calling *context*, not the action. [[build]] fires
+# only during `herdr plugin install owner/repo` — measured as not running on
+# plugin link, on enable, or on a server restart — so the install is `github`
+# by construction here, and the shim asks Herdr what kind of install it is only
+# on the startup path.
+[[build]]
+command = ["sh", "bin/build", "--install"]
 platforms = ["macos", "linux"]
 
 [[build]]
-command = ["sh", "bin/build"]
+command = ["powershell", "-File", "bin/build.ps1", "--install"]
+platforms = ["windows"]
 
+# The same shim with no flag, so a linked checkout that has been pulled is
+# rebuilt when the server starts. Without the flag it asks Herdr what kind of
+# install this is, and a local working tree compiles rather than fetching a
+# binary built from somebody else's commit.
 [[startup]]
 command = ["sh", "bin/build"]
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["powershell", "-File", "bin/build.ps1"]
+platforms = ["windows"]
+
+# The pane runs the shim, never the build artifact. bin/launcher rebuilds when
+# the source is newer than the binary and then execs it, so a `git pull` cannot
+# leave the old picker running, and a path under target/ would break the moment
+# the profile changed.
+#
+# ⚠️ Both entries carry the id `picker`, so the keybinding stays one line on
+# every platform. Herdr's schema puts `platforms` on a pane exactly as it does
+# on a build step, so filtering first and resolving the id second is the
+# reading that field implies — but nobody here has confirmed it, and a duplicate
+# id is the one thing in this file that could be refused at load.
+[[panes]]
+id = "picker"
+title = "Find projects to work on"
+placement = "popup"
+width = "85%"
+height = "85%"
+command = ["sh", "bin/launcher"]
+platforms = ["macos", "linux"]
 
 [[panes]]
 id = "picker"
@@ -17,4 +86,5 @@ title = "Find projects to work on"
 placement = "popup"
 width = "85%"
 height = "85%"
-command = ["sh", "bin/pick-project"]
+command = ["powershell", "-File", "bin/launcher.ps1"]
+platforms = ["windows"]

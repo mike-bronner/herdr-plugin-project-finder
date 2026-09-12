@@ -2,7 +2,11 @@ mod support;
 
 use serde_json::json;
 
-use pick_project::api::{self, Workspace};
+use herdr_plugin_kit::api::client::Socket;
+use herdr_plugin_kit::api::generated::{
+    AgentStatus, NotificationShowAnswer, NotificationShowReason, OkAnswer, WorkspaceInfo,
+};
+use pick_project::api::{self, is_linked_worktree, Client, PLUGIN_ID};
 use pick_project::app::open_project;
 use pick_project::plan::{pick_focus, plan};
 use support::*;
@@ -44,7 +48,7 @@ fn a_home_label_of_your_own_is_the_one_that_is_held_back() {
 fn a_refused_workspace_list_is_an_error_rather_than_an_empty_list() {
     let stub = Stub::start(Script::default().failing("workspace.list", "server_not_running"));
     let refused = api::open_workspaces(&stub.client(), "~").unwrap_err();
-    assert_eq!(refused.code(), Some("server_not_running"));
+    assert_eq!(refusal_code(&refused), Some("server_not_running"));
 }
 
 #[test]
@@ -52,8 +56,8 @@ fn an_answer_carrying_no_workspace_list_is_an_error_rather_than_an_empty_list() 
     let stub = Stub::start(Script::default().listing(json!({"type": "workspace_list"})));
     let refused = api::workspaces(&stub.client()).unwrap_err();
     assert!(
-        refused.to_string().contains("without a workspace list"),
-        "{}",
+        refused.to_string().contains("workspaces"),
+        "the refusal has to name the field that was missing: {}",
         refused
     );
 }
@@ -61,23 +65,33 @@ fn an_answer_carrying_no_workspace_list_is_an_error_rather_than_an_empty_list() 
 #[test]
 fn an_answer_carrying_an_empty_workspace_list_is_no_error_at_all() {
     let stub = Stub::start(Script::default());
-    assert_eq!(api::workspaces(&stub.client()).unwrap(), Vec::new());
+    assert!(api::workspaces(&stub.client()).unwrap().is_empty());
 }
 
 #[test]
-fn a_workspace_row_with_no_id_is_dropped_rather_than_guessed_at() {
-    let stub =
-        Stub::start(Script::default().open(vec![json!({"label": "a"}), workspace("b", "w2")]));
-    let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
-    assert_eq!(labels(&others), vec!["b"]);
+fn a_workspace_row_with_no_id_refuses_the_answer_rather_than_being_dropped() {
+    let mut nameless = workspace("a", "w1");
+    nameless.as_object_mut().unwrap().remove("workspace_id");
+    let stub = Stub::start(Script::default().open(vec![nameless, workspace("b", "w2")]));
+    let refused = api::open_workspaces(&stub.client(), "~").unwrap_err();
+    assert!(
+        refused.to_string().contains("workspace_id"),
+        "the refusal has to name the field that was missing: {}",
+        refused
+    );
 }
 
 #[test]
-fn a_workspace_with_no_agent_status_reads_as_unknown() {
-    let stub =
-        Stub::start(Script::default().open(vec![json!({"workspace_id": "w1", "label": "a"})]));
-    let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
-    assert_eq!(others[0].agent_status, "unknown");
+fn a_workspace_row_with_no_agent_status_refuses_the_answer_rather_than_guessing_one() {
+    let mut statusless = workspace("a", "w1");
+    statusless.as_object_mut().unwrap().remove("agent_status");
+    let stub = Stub::start(Script::default().open(vec![statusless]));
+    let refused = api::open_workspaces(&stub.client(), "~").unwrap_err();
+    assert!(
+        refused.to_string().contains("agent_status"),
+        "the refusal has to name the field that was missing: {}",
+        refused
+    );
 }
 
 #[test]
@@ -145,7 +159,7 @@ fn a_linked_worktree_workspace_is_marked_as_one() {
         Script::default().open(vec![workspace_in_repo("feat-x", "w1", "/x/alpha", true)]),
     );
     let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
-    assert!(others[0].linked_worktree);
+    assert!(is_linked_worktree(&others[0]));
 }
 
 #[test]
@@ -154,20 +168,31 @@ fn a_repository_opened_as_a_worktree_is_not_a_linked_worktree() {
         Script::default().open(vec![workspace_in_repo("alpha", "w1", "/x/alpha", false)]),
     );
     let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
-    assert!(!others[0].linked_worktree);
+    assert!(!is_linked_worktree(&others[0]));
 }
 
 #[test]
 fn a_workspace_the_server_reports_no_worktree_for_is_not_a_linked_worktree() {
-    for row in [
-        workspace("alpha", "w1"),
-        json!({"workspace_id": "w1", "label": "alpha", "worktree": null}),
-        json!({"workspace_id": "w1", "label": "alpha", "worktree": "nonsense"}),
-    ] {
+    let mut explicitly_null = workspace("alpha", "w1");
+    explicitly_null["worktree"] = json!(null);
+    for row in [workspace("alpha", "w1"), explicitly_null] {
         let stub = Stub::start(Script::default().open(vec![row.clone()]));
         let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
-        assert!(!others[0].linked_worktree, "{}", row);
+        assert!(!is_linked_worktree(&others[0]), "{}", row);
     }
+}
+
+#[test]
+fn a_worktree_field_that_is_not_a_worktree_refuses_the_answer() {
+    let mut nonsense = workspace("alpha", "w1");
+    nonsense["worktree"] = json!("nonsense");
+    let stub = Stub::start(Script::default().open(vec![nonsense]));
+    let refused = api::open_workspaces(&stub.client(), "~").unwrap_err();
+    assert!(
+        refused.to_string().contains("WorkspaceWorktreeInfo"),
+        "the refusal has to name the shape it could not read: {}",
+        refused
+    );
 }
 
 #[test]
@@ -368,7 +393,7 @@ fn nothing_is_ever_focused_as_it_is_opened() {
 
 #[test]
 fn the_plugin_is_asked_for_by_the_id_it_was_given() {
-    let stub = Stub::start(Script::default().plugins(vec![json!({"plugin_root": "/x/tool"})]));
+    let stub = Stub::start(Script::default().plugins(vec![plugin_row("/x/tool")]));
     api::plugin_root(&stub.client(), "some.plugin");
     assert_eq!(
         stub.params_for("plugin.list"),
@@ -378,7 +403,7 @@ fn the_plugin_is_asked_for_by_the_id_it_was_given() {
 
 #[test]
 fn the_reported_plugin_root_is_returned() {
-    let stub = Stub::start(Script::default().plugins(vec![json!({"plugin_root": "/x/tool"})]));
+    let stub = Stub::start(Script::default().plugins(vec![plugin_row("/x/tool")]));
     assert_eq!(
         api::plugin_root(&stub.client(), "some.plugin"),
         Some("/x/tool".to_string())
@@ -392,12 +417,14 @@ fn no_plugin_row_yields_no_root() {
 }
 
 #[test]
-fn a_plugin_row_with_no_root_yields_no_root() {
-    for row in [
-        json!({"plugin_root": ""}),
-        json!({}),
-        json!({"plugin_root": null}),
-    ] {
+fn a_plugin_row_with_an_empty_root_yields_no_root() {
+    let stub = Stub::start(Script::default().plugins(vec![plugin_row("")]));
+    assert_eq!(api::plugin_root(&stub.client(), "some.plugin"), None);
+}
+
+#[test]
+fn a_plugin_row_this_build_cannot_read_yields_no_root() {
+    for row in [json!({}), json!({"plugin_root": null})] {
         let stub = Stub::start(Script::default().plugins(vec![row.clone()]));
         assert_eq!(
             api::plugin_root(&stub.client(), "some.plugin"),
@@ -416,9 +443,9 @@ fn an_unreachable_server_yields_no_plugin_root_rather_than_failing() {
 
 #[test]
 fn a_disabled_plugin_is_still_resolved() {
-    let stub = Stub::start(
-        Script::default().plugins(vec![json!({"plugin_root": "/x/tool", "enabled": false})]),
-    );
+    let mut disabled = plugin_row("/x/tool");
+    disabled["enabled"] = json!(false);
+    let stub = Stub::start(Script::default().plugins(vec![disabled]));
     assert_eq!(
         api::plugin_root(&stub.client(), "some.plugin"),
         Some("/x/tool".to_string())
@@ -427,10 +454,8 @@ fn a_disabled_plugin_is_still_resolved() {
 
 #[test]
 fn the_first_plugin_row_carrying_a_root_wins() {
-    let stub = Stub::start(Script::default().plugins(vec![
-        json!({"plugin_root": ""}),
-        json!({"plugin_root": "/x/second"}),
-    ]));
+    let stub =
+        Stub::start(Script::default().plugins(vec![plugin_row(""), plugin_row("/x/second")]));
     assert_eq!(
         api::plugin_root(&stub.client(), "some.plugin"),
         Some("/x/second".to_string())
@@ -461,14 +486,17 @@ fn focusing_a_workspace_names_it_by_id() {
 fn a_refused_call_carries_the_servers_own_code() {
     let stub = Stub::start(Script::default().failing("workspace.close", "workspace_not_found"));
     let err = api::workspace_close(&stub.client(), "w7").unwrap_err();
-    assert_eq!(err.code(), Some("workspace_not_found"));
+    assert_eq!(refusal_code(&err), Some("workspace_not_found"));
 }
 
 #[test]
 fn a_socket_that_is_not_there_is_a_transport_error_not_an_api_one() {
-    let client = pick_project::api::Client::new("/private/tmp/pick-project-absent.sock".into());
+    let client = Client::new(
+        Socket::at("/private/tmp/pick-project-absent.sock"),
+        PLUGIN_ID,
+    );
     let err = api::workspace_close(&client, "w7").unwrap_err();
-    assert_eq!(err.code(), None);
+    assert_eq!(refusal_code(&err), None);
 }
 
 #[test]
@@ -510,7 +538,7 @@ fn workspaces_keep_the_order_the_server_listed_them_in() {
         workspace("a", "w1"),
         workspace("b", "w2"),
     ]));
-    let listed: Vec<Workspace> = api::workspaces(&stub.client()).unwrap();
+    let listed: Vec<WorkspaceInfo> = api::workspaces(&stub.client()).unwrap();
     assert_eq!(
         ids(&listed
             .iter()
@@ -526,5 +554,90 @@ fn a_focused_workspace_is_reported_as_focused() {
         Stub::start(Script::default().open(vec![workspace_with("a", "w1", true, "working")]));
     let listed = api::workspaces(&stub.client()).unwrap();
     assert!(listed[0].focused);
-    assert_eq!(listed[0].agent_status, "working");
+    assert_eq!(listed[0].agent_status, AgentStatus::Working);
+}
+
+#[test]
+fn workspace_list_refuses_a_result_that_is_not_a_workspace_list() {
+    let stub = Stub::start(Script::default().listing(json!({"type": "ok"})));
+    let refused = api::workspaces(&stub.client()).unwrap_err();
+    assert!(
+        refused.to_string().contains("workspace_list"),
+        "{}",
+        refused
+    );
+}
+
+#[test]
+fn workspace_close_refuses_a_result_that_is_not_ok() {
+    let stub = Stub::start(Script::default().answering(
+        "workspace.close",
+        json!({"type": "workspace_list",
+                                                              "workspaces": []}),
+    ));
+    let refused = api::workspace_close(&stub.client(), "w7").unwrap_err();
+    assert!(refused.to_string().contains("ok"), "{}", refused);
+}
+
+#[test]
+fn workspace_focus_refuses_ok_because_it_answers_with_the_workspace() {
+    let stub = Stub::start(Script::default().answering("workspace.focus", json!({"type": "ok"})));
+    let refused = api::workspace_focus(&stub.client(), "w7").unwrap_err();
+    assert!(
+        refused.to_string().contains("workspace_info"),
+        "{}",
+        refused
+    );
+}
+
+#[test]
+fn workspace_focus_refuses_the_workspace_focused_event_shape() {
+    let stub = Stub::start(Script::default().answering(
+        "workspace.focus",
+        json!({"type": "workspace_focused", "workspace_id": "w7"}),
+    ));
+    let refused = api::workspace_focus(&stub.client(), "w7").unwrap_err();
+    assert!(
+        refused.to_string().contains("workspace_info"),
+        "{}",
+        refused
+    );
+}
+
+#[test]
+fn workspace_create_refuses_a_result_that_is_not_a_created_workspace() {
+    let dir = TempDir::new();
+    let plain = dir.dir("notes");
+    let stub = Stub::start(Script::default().answering("workspace.create", json!({"type": "ok"})));
+    assert_eq!(open_project(&stub.client(), "notes", &plain), None);
+}
+
+#[test]
+fn worktree_open_refuses_the_workspace_created_shape_it_used_to_be_given() {
+    let dir = TempDir::new();
+    let (_, checkout) = worktree_checkout(&dir);
+    let stub = Stub::start(
+        Script::default()
+            .answering("worktree.open", json!({"type": "workspace_created"}))
+            .answering("workspace.create", json!({"type": "ok"})),
+    );
+    assert_eq!(open_project(&stub.client(), "feat-x", &checkout), None);
+}
+
+#[test]
+fn plugin_list_refuses_a_result_that_is_not_a_plugin_list() {
+    let stub = Stub::start(Script::default().answering("plugin.list", json!({"type": "ok"})));
+    assert_eq!(api::plugin_root(&stub.client(), "some.plugin"), None);
+}
+
+#[test]
+fn the_notification_answer_is_the_shape_notification_show_answer_reads() {
+    let measured = json!({"type": "notification_show", "shown": true, "reason": "shown"});
+    let read: NotificationShowAnswer = serde_json::from_value(measured.clone())
+        .expect("the measured answer is not the named type");
+    assert_eq!(read.reason, NotificationShowReason::Shown);
+    assert!(
+        serde_json::from_value::<OkAnswer>(measured).is_err(),
+        "if `ok` also read this answer, naming the type would establish nothing"
+    );
 }

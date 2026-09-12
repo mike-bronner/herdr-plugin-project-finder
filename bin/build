@@ -1,282 +1,49 @@
 #!/bin/sh
+# Gets this plugin's binary, two ways: fetch a published one, or compile it.
+#
+# ⚠️ SYNCED FROM herdr-plugin-kit. Edit templates/bin/build in the kit, never
+# this copy. It is byte-identical in every plugin, and a `diff` between two
+# plugins' copies is drift and nothing else.
+#
+# Runs from two manifest entries, and has to tell them apart:
+#
+#     [[build]]    command = ["sh", "bin/build", "--install"]
+#     [[startup]]  command = ["sh", "bin/build"]
+#
+# 🔑 The flag names the **context**, not the action. [[build]] fires only on
+# `herdr plugin install` and never on `herdr plugin link` — measured
+# 2026-09-09 with a throwaway plugin whose build command wrote a marker file,
+# which was never created by a link. So during [[build]] the install is
+# `github` by construction, and the question of what kind of install this is
+# only becomes live on the [[startup]] path and on a direct invocation.
+#
+# The whole order is SCOPE.md section 9.4.
 set -eu
 
-PLUGIN_ROOT="${HERDR_PLUGIN_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}"
-BIN="$PLUGIN_ROOT/target/release/pick-project"
+. "$(dirname -- "$0")/common"
+. "$(dirname -- "$0")/progress"
 
-note() { printf 'project-finder: %s\n' "$*" >&2; }
-die() { note "$*"; exit 1; }
+PLUGIN_NAME="$(toml_top_level "$MANIFEST" name)"
+[ -n "$PLUGIN_NAME" ] || PLUGIN_NAME="$SLUG"
 
-find_cargo() {
-    if command -v cargo >/dev/null 2>&1; then
-        command -v cargo
-        return 0
-    fi
-    for candidate in \
-        "${CARGO:-}" \
-        "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" \
-        "$HOME/.cargo/bin/cargo" \
-        /opt/homebrew/opt/rustup/bin/cargo \
-        /opt/homebrew/bin/cargo \
-        /usr/local/opt/rustup/bin/cargo \
-        /usr/local/bin/cargo
-    do
-        [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
-    done
-    return 1
-}
+BUILD_MESSAGE="$PLUGIN_NAME is compiling. This happens only during the first install, or the first time it runs after an update."
+FETCH_MESSAGE="$PLUGIN_NAME is downloading the build published for this platform."
 
-needs_build() {
-    [ -x "$BIN" ] || return 0
-    [ -n "$(find "$PLUGIN_ROOT/src" "$PLUGIN_ROOT/Cargo.toml" "$PLUGIN_ROOT/Cargo.lock" \
-            -newer "$BIN" -print -quit 2>/dev/null)" ]
-}
+CONTEXT='runtime'
+case "${1:-}" in
+    --install) CONTEXT='install' ;;
+    '') ;;
+    *) die "unknown argument \`$1\`; run it with no arguments, or with --install from the manifest's [[build]] entry" ;;
+esac
 
-platform() {
-    case "$(uname -s 2>/dev/null || true)" in
-        Darwin) _os='macos' ;;
-        Linux) _os='linux' ;;
-        *) return 1 ;;
-    esac
-    case "$(uname -m 2>/dev/null || true)" in
-        arm64|aarch64) _arch='arm64' ;;
-        x86_64|amd64) _arch='x64' ;;
-        *) return 1 ;;
-    esac
-    printf '%s-%s\n' "$_os" "$_arch"
-}
-
-manifest_version() {
-    _version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' \
-        "$PLUGIN_ROOT/herdr-plugin.toml" 2>/dev/null)" || return 1
-    case "$_version" in
-        ''|*[!0-9A-Za-z.-]*) return 1 ;;
-    esac
-    printf '%s\n' "$_version"
-}
-
-released_commit() {
-    _top="$(git -C "$PLUGIN_ROOT" rev-parse --show-toplevel 2>/dev/null)" || return 1
-    _here="$(CDPATH='' cd -P -- "$PLUGIN_ROOT" 2>/dev/null && pwd)" || return 1
-    [ "$_top" = "$_here" ] || return 1
-    _dirty="$(git -C "$PLUGIN_ROOT" status --porcelain -- src Cargo.toml Cargo.lock \
-            build.rs .cargo rust-toolchain rust-toolchain.toml 2>/dev/null)" || return 1
-    [ -z "$_dirty" ] || return 1
-    _commit="$(git -C "$PLUGIN_ROOT" rev-parse HEAD 2>/dev/null)" || return 1
-    case "$_commit" in
-        *[!0-9a-f]*) return 1 ;;
-        ????????????*) ;;
-        *) return 1 ;;
-    esac
-    printf '%s\n' "$_commit" | cut -c1-12
-}
-
-repo_slug() {
-    _url="$(git -C "$PLUGIN_ROOT" remote get-url origin 2>/dev/null)" || return 1
-    case "$_url" in
-        *github.com/*|*github.com:*) ;;
-        *) return 1 ;;
-    esac
-    _slug="${_url##*github.com}"
-    _slug="${_slug#:}"
-    _slug="${_slug#/}"
-    _slug="${_slug%.git}"
-    case "$_slug" in
-        */*/*|*/|*[!0-9A-Za-z._/-]*) return 1 ;;
-        */*) printf '%s\n' "$_slug" ;;
-        *) return 1 ;;
-    esac
-}
-
-asset_url() {
-    _platform="$(platform)" || return 1
-    _version="$(manifest_version)" || return 1
-    _slug="$(repo_slug)" || return 1
-    _short="$(released_commit)" || return 1
-    printf 'https://github.com/%s/releases/download/%s/pick-project-%s-%s\n' \
-        "$_slug" "$_version" "$_platform" "$_short"
-}
-
-download() {
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --connect-timeout 10 --max-time 120 -o "$2" "$1"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --timeout=10 --tries=2 -O "$2" "$1"
-    else
-        return 1
-    fi
-}
-
-sha256_of() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        _sum="$(sha256sum "$1")" || return 1
-    elif command -v shasum >/dev/null 2>&1; then
-        _sum="$(shasum -a 256 "$1")" || return 1
-    else
-        return 1
-    fi
-    printf '%s\n' "${_sum%% *}"
-}
-
-fetch() {
-    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 1
-    mkdir -p "$PLUGIN_ROOT/target/release" || return 1
-    FETCH_DIR="$(mktemp -d "$PLUGIN_ROOT/target/fetch.XXXXXX")" || return 1
-    download "$1" "$FETCH_DIR/pick-project" || return 1
-    download "$1.sha256" "$FETCH_DIR/sha256" || return 1
-    _want="$(cat "$FETCH_DIR/sha256")" || return 1
-    _want="${_want%% *}"
-    [ "${#_want}" -eq 64 ] || return 1
-    _got="$(sha256_of "$FETCH_DIR/pick-project")" || return 1
-    [ "$_want" = "$_got" ] || return 1
-    chmod 755 "$FETCH_DIR/pick-project" || return 1
-    mv -f "$FETCH_DIR/pick-project" "$BIN"
-}
-
-MAIN_PID=$$
-SPINNER_PID=''
 BUILD_LOG=''
 FETCH_DIR=''
-BUILD_MESSAGE='Project Finder is compiling. This happens only during the first install or the first time it is opened after an update.'
-FETCH_MESSAGE='Project Finder is downloading the picker built for this platform.'
-MESSAGE="$BUILD_MESSAGE"
-
-PANE_SIZE=''
-SPIN_ROW=1
-SPIN_COL=1
-TEXT_TOP=1
-TEXT=''
-
-pane_size() {
-    _size="$(stty size <&2 2>/dev/null || true)"
-    case "$_size" in
-        [1-9]*' '[1-9]*) printf '%s\n' "$_size"; return 0 ;;
-    esac
-    printf '24 80\n'
-}
-
-wrap() {
-    _text="$1"
-    _width="$2"
-    _line=''
-    for _word in $_text; do
-        while [ "${#_word}" -gt "$_width" ]; do
-            [ -z "$_line" ] || { printf '%s\n' "$_line"; _line=''; }
-            _head="$(printf "%.${_width}s" "$_word")"
-            printf '%s\n' "$_head"
-            _word="${_word#"$_head"}"
-        done
-        if [ -z "$_line" ]; then
-            _line="$_word"
-        elif [ "$(( ${#_line} + 1 + ${#_word} ))" -le "$_width" ]; then
-            _line="$_line $_word"
-        else
-            printf '%s\n' "$_line"
-            _line="$_word"
-        fi
-    done
-    [ -z "$_line" ] || printf '%s\n' "$_line"
-}
-
-layout() {
-    _rows="${1%% *}"
-    _cols="${1##* }"
-    _width="$(( _cols - 4 ))"
-    [ "$_width" -ge 1 ] || _width="$(( _cols - 1 ))"
-    [ "$_width" -ge 1 ] || _width=1
-    _wrapped="$(wrap "$MESSAGE" "$_width")"
-
-    _saved="$IFS"
-    IFS='
-'
-    _count=0
-    for _line in $_wrapped; do
-        _count="$(( _count + 1 ))"
-    done
-
-    _gap=1
-    [ "$(( _count + 2 ))" -le "$_rows" ] || _gap=0
-    _shown="$_count"
-    [ "$(( _shown + _gap + 1 ))" -le "$_rows" ] || _shown="$(( _rows - _gap - 1 ))"
-    [ "$_shown" -ge 1 ] || { _shown=0; _gap=0; }
-
-    TEXT=''
-    _taken=0
-    for _line in $_wrapped; do
-        [ "$_taken" -lt "$_shown" ] || break
-        TEXT="$TEXT$_line
-"
-        _taken="$(( _taken + 1 ))"
-    done
-    IFS="$_saved"
-
-    _total="$(( 1 + _gap + _shown ))"
-    SPIN_ROW="$(( (_rows - _total) / 2 + 1 ))"
-    [ "$SPIN_ROW" -ge 1 ] || SPIN_ROW=1
-    SPIN_COL="$(( (_cols - 1) / 2 + 1 ))"
-    [ "$SPIN_COL" -ge 1 ] || SPIN_COL=1
-    TEXT_TOP="$(( SPIN_ROW + 1 + _gap ))"
-}
-
-paint() {
-    _size="$(pane_size)"
-    if [ "$_size" != "$PANE_SIZE" ]; then
-        PANE_SIZE="$_size"
-        layout "$_size"
-        printf '\033[2J' >&2
-    fi
-    printf '\033[%s;%sH%s' "$SPIN_ROW" "$SPIN_COL" "$1" >&2
-    [ -n "$TEXT" ] || return 0
-    _cols="${PANE_SIZE##* }"
-    _row="$TEXT_TOP"
-    _saved="$IFS"
-    IFS='
-'
-    for _line in $TEXT; do
-        _col="$(( (_cols - ${#_line}) / 2 + 1 ))"
-        [ "$_col" -ge 1 ] || _col=1
-        printf '\033[%s;%sH%s' "$_row" "$_col" "$_line" >&2
-        _row="$(( _row + 1 ))"
-    done
-    IFS="$_saved"
-}
-
-spin() {
-    printf '\033[?25l' >&2
-    while kill -0 "$MAIN_PID" 2>/dev/null; do
-        for frame in '|' '/' '-' '\'; do
-            paint "$frame"
-            sleep 0.1
-        done
-    done
-}
-
-start_spinner() {
-    [ -t 2 ] || return 0
-    MESSAGE="$1"
-    PANE_SIZE=''
-    spin &
-    SPINNER_PID=$!
-}
-
-stop_spinner() {
-    [ -n "$SPINNER_PID" ] || return 0
-    kill "$SPINNER_PID" 2>/dev/null || true
-    wait "$SPINNER_PID" 2>/dev/null || true
-    SPINNER_PID=''
-    printf '\033[2J\033[H\033[?25h' >&2
-}
 
 cleanup() {
-    stop_spinner
+    progress_stop
     [ -z "$BUILD_LOG" ] || rm -f "$BUILD_LOG"
     [ -z "$FETCH_DIR" ] || rm -rf "$FETCH_DIR"
     return 0
-}
-
-run_cargo() {
-    PATH="$CARGO_DIR:$PATH" "$CARGO_BIN" \
-        build --release --manifest-path "$PLUGIN_ROOT/Cargo.toml"
 }
 
 trap 'cleanup' EXIT
@@ -284,37 +51,285 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 trap 'cleanup; exit 129' HUP
 
+# ── Which way round ───────────────────────────────────────────────────────
+
+# Asks Herdr what kind of install this is, and fails closed to `local`.
+#
+# 🔑 `local` means somebody's working tree, so it compiles. Everything that is
+# not plainly `github` reaches that same answer: no HERDR_BIN_PATH, an
+# unreachable socket, a response that will not parse, or a `source` table
+# Herdr grows another field in later. Being wrong in that direction costs a
+# slow compile. Being wrong the other way hands a developer who asked to
+# compile a binary somebody else built.
+#
+# ⚠️ Herdr's own enum defaults to `local` for the same reason, so this agrees
+# with the server rather than second-guessing it.
+#
+# ⚠️ It is a substring match against a one-line JSON response, which is what
+# `plugin list --json` emits today. Pretty-printed output would not match and
+# would compile, which is the safe direction, so this fails the right way when
+# it is wrong.
+source_kind() {
+    if [ -z "${HERDR_BIN_PATH:-}" ] || [ ! -x "${HERDR_BIN_PATH:-}" ]; then
+        printf 'local\n'
+        return 0
+    fi
+    _plugin_id="$(plugin_id)"
+    if [ -z "$_plugin_id" ]; then
+        printf 'local\n'
+        return 0
+    fi
+    _json="$("$HERDR_BIN_PATH" plugin list --plugin "$_plugin_id" --json 2>/dev/null || true)"
+    case "$_json" in
+        *'"source":{"kind":"github"}'*) printf 'github\n' ;;
+        *) printf 'local\n' ;;
+    esac
+}
+
+SKIP_REASON=''
+
+# SCOPE.md section 8.3's table, in its order.
+should_fetch() {
+    if [ -f "$PLUGIN_ROOT/$OVERRIDE_FILE" ]; then
+        SKIP_REASON="$OVERRIDE_FILE is in the plugin root, so this tree compiles"
+        return 1
+    fi
+    if [ "$CONTEXT" = install ]; then
+        return 0
+    fi
+    if [ "$(source_kind)" = github ]; then
+        return 0
+    fi
+    SKIP_REASON='Herdr reports this as a local install, so this tree compiles'
+    return 1
+}
+
+# ── Fetching ──────────────────────────────────────────────────────────────
+
+# curl and nothing else.
+#
+# ⚠️ A wget rung was considered and dropped. curl, shasum and git are all in
+# /usr/bin, which is what lets a fetch work under Herdr's launchd PATH of
+# /usr/bin:/bin:/usr/sbin:/sbin. A second downloader would need its own
+# exit-code classification to keep the loudness rules below honest, and
+# nothing here could test it. A machine with no curl compiles, and says so.
+DOWNLOAD_STATUS=0
+download() {
+    DOWNLOAD_STATUS=0
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        --connect-timeout 10 --max-time 120 --output "$2" -- "$1" \
+        2>/dev/null || DOWNLOAD_STATUS=$?
+    return "$DOWNLOAD_STATUS"
+}
+
+checksummer_present() {
+    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        _sum="$(sha256sum "$1")" || return 1
+    else
+        _sum="$(shasum -a 256 "$1")" || return 1
+    fi
+    printf '%s\n' "${_sum%% *}" | tr 'ABCDEF' 'abcdef'
+}
+
+# Records how this binary arrived, beside the binary it describes.
+#
+# 🚨 Without this a fetched binary reports itself as "built from source on this
+# machine", because that is exactly what the absence of this file means. A
+# fetch path that does not write it makes its own binary lie about how it
+# arrived, and then tells whoever holds a stale one to run `cargo build` —
+# advice a user who installed a published binary has no toolchain to follow.
+# The four keys are the shape herdr_plugin_kit::version::provenance_of reads.
+#
+# Beside the binary rather than in the state directory, because the two have to
+# travel together: a note that outlived the binary would describe the wrong one.
+write_provenance() {
+    printf 'version=%s\nasset=%s\nsha256=%s\nurl=%s\n' "$1" "$2" "$3" "$4" >"$MARK"
+}
+
+# The state directory keeps the last attempt, so repeated failures become
+# visible rather than something somebody has to notice. Best effort: a
+# diagnostic that cannot be written must never stop an install.
+record_attempt() {
+    [ -n "${HERDR_PLUGIN_STATE_DIR:-}" ] || return 0
+    mkdir -p "$HERDR_PLUGIN_STATE_DIR" 2>/dev/null || return 0
+    printf 'when=%s\noutcome=%s\nurl=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')" "$1" "$2" \
+        >"$HERDR_PLUGIN_STATE_DIR/last-fetch" 2>/dev/null || true
+    return 0
+}
+
+FETCH_REASON=''
+FETCH_OUTCOME=''
+URL=''
+
+# curl's own exit codes, mapped to the loudness SCOPE.md section 9.5 asks for.
+#
+# ⚠️ 22 is any HTTP status past 400, and a 404 there is *expected* for a clean
+# checkout one commit past the tag: section 9.6 calls compiling in that case
+# the correct outcome, reached with no comparison logic. So a 404 says why it
+# is compiling and does not shout. Nothing here can tell that case from a
+# release that failed to publish its assets without the network call section
+# 9.6 rejects, and the state file keeps the distinction for whoever looks.
+classify_download_failure() {
+    case "$DOWNLOAD_STATUS" in
+        22)
+            FETCH_REASON="nothing is published at $URL"
+            FETCH_OUTCOME='http-error'
+            ;;
+        6 | 7 | 28 | 35)
+            FETCH_REASON='the release could not be reached'
+            FETCH_OUTCOME='unreachable'
+            ;;
+        *)
+            FETCH_REASON="the download failed (curl exit $DOWNLOAD_STATUS)"
+            FETCH_OUTCOME='download-failed'
+            ;;
+    esac
+}
+
+# Downloads the published binary and moves it into place only once its
+# published checksum has matched.
+#
+# 🔑 The move is the gate. Verification happens in a temporary directory, and
+# an unverified file never occupies the path the launcher execs, so there is no
+# flag, variable or failure mode that can run one. Every refusal returns 1 so
+# the caller can compile instead.
+fetch_binary() {
+    if ! asset_url; then
+        FETCH_REASON="$ASSET_REASON"
+        FETCH_OUTCOME='no-asset'
+        return 1
+    fi
+    URL="$ASSET_URL"
+    if ! command -v curl >/dev/null 2>&1; then
+        FETCH_REASON='curl is not here, so nothing could be downloaded'
+        FETCH_OUTCOME='no-curl'
+        return 1
+    fi
+    if ! checksummer_present; then
+        FETCH_REASON='neither sha256sum nor shasum is here, so a download could not be verified'
+        FETCH_OUTCOME='no-checksummer'
+        return 1
+    fi
+
+    mkdir -p "$PLUGIN_ROOT/target/release" || return 1
+    FETCH_DIR="$(mktemp -d "$PLUGIN_ROOT/target/fetch.XXXXXX")" || return 1
+
+    if ! download "$URL" "$FETCH_DIR/binary"; then
+        classify_download_failure
+        return 1
+    fi
+    if ! download "$URL.sha256" "$FETCH_DIR/sha256"; then
+        classify_download_failure
+        FETCH_REASON="no checksum is published beside $URL, so it could not be verified"
+        return 1
+    fi
+
+    _want="$(cut -d' ' -f1 <"$FETCH_DIR/sha256" | head -1 | tr 'ABCDEF' 'abcdef')"
+    case "$_want" in
+        *[!0-9a-f]* | '')
+            FETCH_REASON='the published checksum is not a sha256 digest'
+            FETCH_OUTCOME='bad-checksum-file'
+            return 1
+            ;;
+    esac
+    if [ "${#_want}" -ne 64 ]; then
+        FETCH_REASON='the published checksum is not a sha256 digest'
+        FETCH_OUTCOME='bad-checksum-file'
+        return 1
+    fi
+
+    _got="$(sha256_of "$FETCH_DIR/binary")" || {
+        FETCH_REASON='the download could not be checksummed'
+        FETCH_OUTCOME='checksum-failed'
+        return 1
+    }
+
+    # 🚨 Loud, and never cached. A mismatch still falls back to compiling,
+    # because building from the cloned source is safe, but it must never be
+    # quiet and the bad artifact must never be reused.
+    if [ "$_want" != "$_got" ]; then
+        note 'SECURITY: the downloaded binary does not match its published checksum.'
+        note "  url:      $URL"
+        note "  expected: $_want"
+        note "  actual:   $_got"
+        note 'The download has been deleted. Compiling from source instead.'
+        rm -rf "$FETCH_DIR"
+        FETCH_DIR=''
+        FETCH_REASON='the download did not match its published checksum'
+        FETCH_OUTCOME='checksum-mismatch'
+        return 1
+    fi
+
+    chmod 0755 "$FETCH_DIR/binary" || return 1
+    mv -f "$FETCH_DIR/binary" "$BIN" || return 1
+    write_provenance "$(manifest_version)" "${URL##*/}" "$_got" "$URL"
+    return 0
+}
+
+# ── Compiling ─────────────────────────────────────────────────────────────
+
+run_cargo() {
+    PATH="$CARGO_DIR:$PATH" "$CARGO_BIN" \
+        build --release --manifest-path "$PLUGIN_ROOT/Cargo.toml"
+}
+
+compile() {
+    CARGO_BIN="$(sh "$PLUGIN_ROOT/bin/find-cargo" || true)"
+    if [ -z "$CARGO_BIN" ]; then
+        note 'no Rust toolchain here, and no published binary could be used.'
+        die "install Rust with \`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh\`, then run \`cargo build --release\` in $PLUGIN_ROOT"
+    fi
+    CARGO_DIR="$(dirname -- "$CARGO_BIN")"
+
+    progress_start "$BUILD_MESSAGE"
+    # can_draw decides where cargo's own output goes, because the two compete
+    # for the same stderr: a display is drawing on it, so cargo is captured and
+    # shown only on failure. With nothing drawing, cargo streams straight
+    # through and the server log gets the real build output.
+    if can_draw; then
+        BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/$SLUG-build.XXXXXX")" ||
+            die 'cannot make a temporary file to hold the build output'
+        if run_cargo >"$BUILD_LOG" 2>&1; then
+            progress_stop
+        else
+            progress_stop
+            cat "$BUILD_LOG" >&2
+            die "cargo build --release failed in $PLUGIN_ROOT"
+        fi
+    else
+        run_cargo >&2 || die "cargo build --release failed in $PLUGIN_ROOT"
+    fi
+
+    # 🔑 The other half of write_provenance. A compiled binary that kept a note
+    # from an earlier fetch would report itself as downloaded, and would then
+    # tell somebody holding a stale binary to reinstall rather than rebuild.
+    rm -f "$MARK"
+}
+
+# ── The order ─────────────────────────────────────────────────────────────
+
+# 1. Is a build needed at all? First, so the common case costs no network call
+#    and no git.
 needs_build || exit 0
 
-URL="$(asset_url 2>/dev/null || true)"
-if [ -n "$URL" ]; then
-    [ -t 2 ] || note "downloading the picker built for this platform"
-    start_spinner "$FETCH_MESSAGE"
-    if fetch "$URL"; then
-        stop_spinner
+# 2. Which context is this, and what does Herdr say about the install?
+if should_fetch; then
+    progress_start "$FETCH_MESSAGE"
+    if fetch_binary; then
+        progress_stop
+        record_attempt 'fetched' "$URL"
         exit 0
     fi
-    stop_spinner
-    [ -t 2 ] || note "no prebuilt picker for this release and platform; compiling instead"
-fi
-
-CARGO_BIN="$(find_cargo || true)"
-[ -n "$CARGO_BIN" ] || die "cargo not found; install a Rust toolchain (1.75 or newer), then run \`cargo build --release\` in $PLUGIN_ROOT"
-
-CARGO_DIR="$(dirname -- "$CARGO_BIN")"
-
-if [ -t 2 ]; then
-    BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/project-finder-build.XXXXXX")" \
-        || die "cannot make a temporary file to hold the build output"
-    start_spinner "$BUILD_MESSAGE"
-    if run_cargo >"$BUILD_LOG" 2>&1; then
-        stop_spinner
-    else
-        stop_spinner
-        cat "$BUILD_LOG" >&2
-        die "cargo build --release failed in $PLUGIN_ROOT"
-    fi
+    progress_stop
+    note "$FETCH_REASON, so compiling instead"
+    record_attempt "$FETCH_OUTCOME" "$URL"
 else
-    note "building the picker with $CARGO_BIN"
-    run_cargo >&2 || die "cargo build --release failed in $PLUGIN_ROOT"
+    note "$SKIP_REASON"
 fi
+
+compile

@@ -1,17 +1,19 @@
-use crate::api::Workspace;
+use herdr_plugin_kit::api::generated::WorkspaceInfo;
 
-#[derive(Debug, PartialEq)]
+use crate::api::is_linked_worktree;
+
+#[derive(Debug)]
 pub struct Plan {
-    pub to_close: Vec<Workspace>,
+    pub to_close: Vec<WorkspaceInfo>,
     pub to_create: Vec<String>,
 }
 
-pub fn plan(selected: &[String], open_ws: &[Workspace]) -> Plan {
-    let (worktrees, repos): (Vec<Workspace>, Vec<Workspace>) = open_ws
+pub fn plan(selected: &[String], open_ws: &[WorkspaceInfo]) -> Plan {
+    let (worktrees, repos): (Vec<WorkspaceInfo>, Vec<WorkspaceInfo>) = open_ws
         .iter()
         .filter(|w| !selected.contains(&w.label))
         .cloned()
-        .partition(|w| w.linked_worktree);
+        .partition(is_linked_worktree);
     let to_close = [worktrees, repos].concat();
     let to_create = selected
         .iter()

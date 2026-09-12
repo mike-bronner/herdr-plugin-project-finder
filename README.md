@@ -9,17 +9,18 @@ Fuzzy-pick git repos and open them as workspaces in
 herdr plugin install mike-bronner/herdr-plugin-project-finder
 ```
 
-Nothing else needs installing on macOS or Linux, x86-64 or arm64: for any
-revision that has one published, the install step downloads a prebuilt picker
-for the platform and verifies its SHA-256. A Rust toolchain is only the
-fallback, for a platform or a revision without one. See
+Nothing else needs installing on macOS, Linux or Windows, x86-64 or arm64: for
+any revision that has one published, the install step downloads a prebuilt
+picker for the platform and verifies its SHA-256. A Rust toolchain is only the
+fallback, for a platform or a revision without one. ⚠️ Windows compiles and is
+published, and nobody has ever run it — see [Windows](#windows) and
 [requires](#requires).
 
 Pin a particular revision with `--ref`, which is also the surest way to land on
 one that has binaries published:
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.8.1
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.0
 ```
 
 To work on the plugin instead, clone it and link the checkout:
@@ -63,7 +64,7 @@ checkout matches a release, by compiling otherwise. See
 
 ## What it does
 
-`bin/pick-project` opens a popup listing every git repo up to three levels
+`bin/launcher` opens a popup listing every git repo up to three levels
 under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere), plus the
 linked worktrees belonging to those repos. Open workspaces are listed first and
 pre-checked, so what is checked is exactly what is loaded.
@@ -121,7 +122,8 @@ The command is run **detached**, so a ten-project selection never waits on one
 of them. The command line is yours down to the last flag, and the only thing the
 picker contributes to it is the id of the workspace it just opened. That
 command's failures are its own to report: the picker reads neither its output
-nor its exit code.
+nor its exit code. ⚠️ "Detached" is a weaker promise on Windows than on Unix,
+and the difference is spelt out under [Windows](#windows).
 
 Out of the box the setting hands each workspace to the sibling
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
@@ -314,10 +316,43 @@ which keeps the sidebar in most-recently-used order.
 ## How it talks to Herdr
 
 Over Herdr's socket, at `HERDR_SOCKET_PATH`, and not by shelling out to the CLI.
-The wire protocol is newline-delimited JSON with no handshake: one connection
-per request, `{id, method, params}` out and `{id, result}` or `{id, error}`
-back. The picker uses `workspace.list`, `workspace.create`, `workspace.close`,
-`workspace.focus`, `worktree.open`, `plugin.list` and `notification.show`.
+The client, the envelope and every wire type come from
+[herdr-plugin-kit](https://github.com/mike-bronner/herdr-plugin-kit), pinned by
+tag, and the types in it are generated from Herdr's own published API schema.
+The picker hand-maintains none of it.
+
+The wire protocol is newline-delimited JSON: one connection per request,
+`{id, method, params}` out and `{id, result}` or `{id, error}` back. The id is
+minted per call and checked on the way in, so an answer addressed to somebody
+else is refused rather than read. The picker opens no handshake of its own —
+Herdr's `ping` exists and reports the server's protocol number, and a one-shot
+popup has nothing useful to do with the answer.
+
+The picker makes seven calls, and **each one names the single result type it
+expects**. Herdr's schema declares no link between a method and the result that
+answers it, so every pairing below was measured against a live Herdr 0.9.0 on
+2026-09-12. A name that looks obvious is a guess, and a wrong guess is a
+runtime failure rather than a compile error.
+
+| Call | Answers with |
+|---|---|
+| `workspace.list` | `workspace_list` |
+| `workspace.create` | `workspace_created` |
+| `workspace.close` | `ok` |
+| `workspace.focus` | `workspace_info` |
+| `worktree.open` | `worktree_opened` |
+| `plugin.list` | `plugin_list` |
+| `notification.show` | `notification_show` |
+
+`workspace.focus` is the one nobody would guess. `ok` is wrong, and there is no
+`workspace_focused` result type to reach for either: that name is an event Herdr
+publishes to subscribers, never an answer it gives a caller.
+
+Naming one type rather than the union of all 64 is what keeps the binary small,
+and it is silent when it is not done: the union still builds and still works.
+The suite therefore answers each call with some *other* valid Herdr result and
+checks that the call refuses it, so swapping a type reddens the tests instead of
+costing a megabyte quietly.
 
 An error comes back with a code, so a refusal can be told apart from a crash
 without reading stderr for a phrase. That is the whole reason for the choice: a
@@ -344,8 +379,14 @@ refusal with it. It would close worktrees you left checked, and the selection is
 the contract. Holding the row keeps that contract from the other end: nothing is
 closed that you did not uncheck.
 
-With `HERDR_SOCKET_PATH` unset the picker says so and draws nothing, because a
-selection it cannot act on is worse than no popup at all.
+With `HERDR_SOCKET_PATH` unset the picker falls back to the documented default,
+`~/.config/herdr/herdr.sock`, which is what lets it run by hand from a shell.
+Herdr sets the variable for a pane, so the fallback is the by-hand case rather
+than the normal one. A socket it cannot reach either way ends the run before the
+list is drawn, and the message says which of the two paths it tried and where
+that path came from, because "cannot reach this path" and "cannot reach this
+path, and nothing named it" are different problems. A selection the picker
+cannot act on is worse than no popup at all.
 
 A `workspace.list` the server refuses is treated the same way, and for the same
 reason. The list is what every row's checked state is read from, so an answer
@@ -357,56 +398,91 @@ run. An answer carrying no list at all is refused on the same grounds. An answer
 carrying an **empty** list is not a refusal: no projects are open, which is an
 ordinary thing for it to say.
 
+A row the picker cannot read is refused too, and that is a change. The
+hand-written client used to walk each workspace field by field and drop one it
+did not understand, so a Herdr that changed the shape of a workspace cost the
+picker a row and said nothing. The generated types refuse the whole answer and
+name the field, and the picker reports a server it cannot read.
+
 ## How the binary arrives
 
 The plugin is a Rust binary, and there are two ways it gets there: downloaded
-from a GitHub release, or compiled on the spot. `bin/build` decides which, and
-`bin/pick-project` is a small `sh` shim that calls it: the shim checks whether
-anything under `src/`, `Cargo.toml` or `Cargo.lock` is newer than the built
-binary, calls `bin/build` if so, and then runs the binary. The manifest points
-Herdr at the shim and never at the build output, so nothing breaks when a
-profile or a path changes.
+from a GitHub release, or compiled on the spot.
 
-The shim exists because Herdr's `[[build]]` steps run **only** during
+Everything under `bin/` is written by
+[herdr-plugin-kit](https://github.com/mike-bronner/herdr-plugin-kit)'s sync task
+and lands **byte-identical in every plugin that uses it**, so a `diff` between
+two plugins' `bin/` directories shows drift and nothing else. Nothing there is
+edited by hand, and CI fails a build where a synced file was changed. Each shim
+infers the two facts it needs at run time: the binary's name from `Cargo.toml`'s
+`[[bin]]` entry, and this plugin's name from `herdr-plugin.toml`'s top-level
+`id`.
+
+Three of the eight files matter to a reader:
+
+- `bin/build` decides between downloading and compiling, and does whichever it
+  picked.
+- `bin/launcher` is what the manifest points a pane at. It rebuilds when the
+  binary is behind and then execs it, so a `git pull` cannot leave the old
+  picker running. `--version` is answered **before** that check, because a
+  rebuild would replace the very binary the report exists to diagnose.
+- `bin/find-cargo` locates a toolchain, and the `.ps1` files mirror the shell
+  ones for a Windows this plugin does not yet ship (see
+  [requires](#requires)).
+
+The manifest points Herdr at the shims and never at the build output, so nothing
+breaks when a profile or a path changes.
+
+The launcher exists because Herdr's `[[build]]` steps run **only** during
 `herdr plugin install owner/repo`. They do not run for `herdr plugin link`, and
 they do not run on update. A linked checkout would therefore never build itself,
-and an update would keep running the old binary. `[[build]]` is declared as well,
-so that a GitHub install shows a visible install step rather than stalling
-silently on first use.
+and an update would keep running the old binary. `[[build]]` is declared as
+well, so that a GitHub install shows a visible install step rather than stalling
+silently on first use, and it passes `--install` to name that context.
 
 ### When it downloads, and when it compiles
 
-`bin/build` downloads a prebuilt binary only when the checkout it is sitting in
-is **exactly a released one**. All of this has to hold:
+`bin/build` asks four questions, in order, and the first "no" compiles:
 
-- the plugin folder is the root of its own git checkout, not a folder inside
-  somebody else's;
-- `git status --porcelain` says nothing about the files the binary is built
-  from, so none of them is modified and nothing untracked is lying around
-  inside them that `.gitignore` does not already cover;
-- `origin` is a GitHub remote;
-- and a release asset exists whose name carries **the first 12 characters of the
-  checked-out commit**.
+1. **Is `BUILD_FROM_SOURCE` sitting in the plugin root?** That file is the
+   developer override: create it and this tree always compiles, whatever else
+   is true. `.gitignore` carries an entry for it, because committing it would
+   turn every install of that release into a source build and say so only in a
+   line of a server log.
+2. **Is this the install context?** `[[build]]` passes `--install`, and during
+   an install the source is a GitHub checkout by construction. On any other path
+   — `[[startup]]`, a direct run — the shim asks Herdr what kind of install this
+   is and compiles for anything that is not plainly `github`, which includes a
+   socket it cannot reach.
+3. **Is this checkout exactly a released one?** The plugin folder has to be the
+   root of its own git checkout rather than a folder inside somebody else's,
+   `origin` has to be a GitHub remote, and `git status --porcelain` has to say
+   nothing about the files the binary is built from.
+4. **Does the asset exist?** Its name carries **the first 12 characters of the
+   checked-out commit**.
 
 That last point is what makes the rule safe rather than hopeful. The asset name
 is `pick-project-<platform>-<commit>`, so the download URL itself asserts that
 the binary was built from the source in this folder. A checkout one commit past
 the tag asks for a file that does not exist, gets a 404, and compiles.
 
-"The files the binary is built from" is `src/`, `Cargo.toml` and `Cargo.lock`,
-which is exactly what `bin/pick-project` compares timestamps against, so the
-two staleness checks agree on what counts as code. The download check also
-names `build.rs`, `.cargo/` and a `rust-toolchain` file in either of its
-spellings. None of those exists in this repository, and each would decide the
-binary if one ever did: a build script runs at compile time, `.cargo/config.toml`
-changes how cargo invokes the compiler, and a toolchain file pins which compiler
-that is. Naming them now costs a needless compile in a case that cannot arise
-yet. Leaving them out would cost a wrong binary on the day one appears.
+"The files the binary is built from" is seven entries — `src/`, `Cargo.toml`,
+`Cargo.lock`, `build.rs`, `.cargo/`, `rust-toolchain` and
+`rust-toolchain.toml` — and it is one list, used by the download check, by the
+launcher's staleness check, and by the build stamp that records which commit the
+binary came from. Letting those disagree is what makes a staleness marker
+incoherent. Both toolchain spellings are listed because a git pathspec matches
+whole path components, so `rust-toolchain` does not match `rust-toolchain.toml`.
+
+`build.rs` is in this repository now and does exactly one thing: it calls the
+kit's stamp helper, which writes the commit and the build instant into the
+binary for `--version` to read. It is a `[build-dependencies]` entry, so it is
+compiled for the host, used once, and left out of the shipped binary.
 
 Everything else is outside the set. A test, the shipped `defaults.toml`, the
-release workflow, and this README are read by somebody or something other than
-the compiler, so editing one leaves the released asset an exact copy of what
-this source still compiles to.
+workflows, and this README are read by somebody or something other than the
+compiler, so editing one leaves the released asset an exact copy of what this
+source still compiles to.
 
 So a GitHub install downloads, and a checkout you are working in compiles as
 soon as you touch its code. Editing a file the compiler reads never downloads —
@@ -414,14 +490,26 @@ which matters, because a download would otherwise drop a released binary on top
 of the change you are testing. Editing a file it never reads still downloads,
 because there is no change to drop anything on top of.
 
+A binary that was downloaded is tracked differently from one that was compiled.
+The fetch writes a note beside the binary recording the version, the asset and
+the URL it came from; after that the launcher compares the manifest's version
+against that note rather than comparing timestamps, because a downloaded file's
+timestamp says nothing about which release it is. The same note is what
+`--version` reads to tell you whether to rebuild or to reinstall.
+
 Downloads are verified. A `.sha256` file is published beside every binary, and a
 binary whose hash does not match it is deleted rather than run. That catches a
 truncated or corrupted transfer; it is not a signature, and the trust anchor is
-GitHub over TLS either way. If the platform is not one of the four published, or
-the network is down, or curl and wget are both missing, or there is no
-`sha256sum` and no `shasum` to check the hash with — then nothing is downloaded
-and the source build runs instead. There is no path where an unverified binary
-is executed.
+GitHub over TLS either way. If the platform is not one this plugin publishes
+for, or the network is down, or `curl` is missing, or there is no `sha256sum`
+and no `shasum` to check the hash with — then nothing is downloaded and the
+source build runs instead, and the shim says which of those it was. There is no
+path where an unverified binary is executed.
+
+`curl` and nothing else, deliberately. `curl`, `shasum` and `git` are all in
+`/usr/bin`, which is what lets a fetch work under the launchd `PATH` Herdr's
+server runs with. A second downloader would need its own exit-code handling to
+keep the failure messages honest, and nothing could test it.
 
 ### The source build
 
@@ -429,42 +517,99 @@ Finding `cargo` by absolute path is not enough. Herdr's server runs under launch
 with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and `cargo` is a rustup shim that
 execs `rustc` out of its own directory — so a cold build dies with
 `could not execute process rustc -vV`. `bin/build` therefore prepends the cargo
-binary's own directory to the `PATH` it builds under. It looks on the `PATH`
-first, then at `$CARGO`, `$CARGO_HOME/bin/cargo`, `~/.cargo/bin/cargo`, and the
-usual Homebrew rustup and `/usr/local` locations.
+binary's own directory to the `PATH` it builds under. `bin/find-cargo` looks on
+the `PATH` first, then at `$CARGO`, `$CARGO_HOME/bin/cargo`,
+`~/.cargo/bin/cargo`, and the usual Homebrew rustup and `/usr/local` locations.
 
-When cargo is missing but a binary is already there, the shim runs that binary
-and says on stderr that it may be stale. When there is neither, it stops and
-says how to install a toolchain.
+When cargo is missing but a binary is already there, the launcher runs that
+binary and says on stderr that it may be stale. When there is neither, it stops
+and says how to install a toolchain.
 
 What it prints depends on where it runs. With a terminal on stderr — the popup —
 cargo's own compile and download output is captured, and a spinner and one line
-saying the picker is building take its place. A download draws the same spinner
-under a message of its own, because a stalled connection deserves something to
-look at. With no terminal there — Herdr's install step, a pipe, a file, CI —
-nothing is drawn at all: one plain line says whether it is downloading or
-compiling, and cargo prints what it always printed, because a spinner in a log
-is thousands of repeated lines. A build that fails prints everything cargo said
-either way, and the captured file is removed on success, on failure, and on an
-interruption.
+saying what is happening take its place. With no terminal there — Herdr's
+install step, a pipe, a file, CI — nothing is drawn at all: one plain line says
+whether it is downloading or compiling and why, and cargo prints what it always
+printed, because a spinner in a log is thousands of repeated lines. A build that
+fails prints everything cargo said either way, and the captured file is removed
+on success, on failure, and on an interruption.
 
-Nothing runs at all when the binary is already newer than the sources. That is
-what keeps `[[startup]]` off the network on every server start.
+Nothing runs at all when the binary is already current. That is what keeps
+`[[startup]]` off the network on every server start.
 
 ### Where the prebuilt binaries come from
 
-`.github/workflows/release.yml` runs when a release is created, builds the four
-targets the manifest's `platforms` allow, and uploads each binary and its
-checksum to that release. Both macOS architectures build on the macOS runner,
-which needs nothing extra to target the other one. Linux cross-compiles to
-statically linked musl through `cargo-zigbuild`, because Zig bundles the
-cross-linker, and one static binary per architecture then runs on glibc
-distributions, Alpine and NixOS alike.
+`.github/workflows/release.yml` runs when a release is created, and it is a
+caller and nothing more: the whole job is herdr-plugin-kit's own reusable
+`plugin-release.yml`, pinned to the tag `Cargo.toml` pins. A copy of the build
+here would be a second opinion about a convention that is already written down,
+and the consuming half — the URL `bin/build` asks for — has no way to disagree
+out loud. A producer and a consumer that name an asset differently is a 404, a
+silent fall back to compiling, and nobody finding out.
+
+That workflow builds six targets on native runners and uploads each binary with
+its checksum:
+
+| Target | Runner |
+|---|---|
+| `aarch64-apple-darwin` | `macos-latest` |
+| `x86_64-apple-darwin` | `macos-latest` |
+| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` |
+| `x86_64-unknown-linux-musl` | `ubuntu-24.04` |
+| `aarch64-pc-windows-msvc` | `windows-11-arm` |
+| `x86_64-pc-windows-msvc` | `windows-latest` |
+
+Native runners are why this needs neither Zig nor `cargo-zigbuild`, which the
+previous workflow used to reach arm64 Linux from an x86 runner. Linux is musl
+rather than gnu on purpose: a gnu build carries the glibc floor of the runner
+that produced it, and a user on an older distribution would get a download that
+passes its checksum and *then* refuses to start — worse than a 404, because the
+fetch succeeded and no fallback fires.
+
+All six, or none. The publish step counts what every leg produced against the
+size of that table and uploads nothing if one is missing, because five platforms
+published and a sixth quietly compiling on every install forever is not a
+partial success.
+
+All six compile, and CI compiles all six on every push so that a release cannot
+be the first thing to discover otherwise. What CI cannot prove is that any of
+them *runs*, which for the two Windows rows nobody has ever checked. See
+[Windows](#windows).
 
 The assets do not exist until that workflow has finished, so a release is only
 fetchable a few minutes after it is published. Before then, and for any release
 cut before this workflow existed, an install compiles — which is the old
 behaviour, not a failure.
+
+## What this binary is
+
+```sh
+sh bin/launcher --version
+```
+
+Three lines of fact, and a fourth only when there is something wrong:
+
+```
+pick-project 0.9.0 (a1b2c3d, built 2026-09-12T11:04:22Z)
+manifest 0.9.0 at /path/to/herdr-plugin-project-finder/herdr-plugin.toml
+built from source on this machine
+```
+
+The first line is what the binary was compiled from: the crate version, the
+short commit, and when. The commit carries `-dirty` when a file the compiler
+reads had uncommitted changes, and `-unverified` when the check could not run at
+all — unknown is never reported as clean. The second line is what Herdr reads.
+The third says whether this binary was downloaded or compiled here.
+
+A `STALE:` line is appended when the first two disagree, and it tells you what
+to do about it based on how the binary arrived rather than how it was made:
+rebuild if it was compiled here, reinstall if it was fetched, because whoever
+installed a published binary has no toolchain to rebuild with.
+
+Nothing in the report can fail. It never touches the socket, because `--version`
+has to answer when the server is down, which is exactly when somebody runs it.
+Every lookup degrades to a word: a missing stamp reads `unknown`, and an
+unreadable manifest says so and names the path it tried.
 
 ## Open on launch
 
@@ -703,23 +848,93 @@ every normal run. To read the line it is easier to run the picker from a shell
 than from the popup, since it takes the whole pane:
 
 ```sh
-HERDR_PICKER_DEBUG=1 sh bin/pick-project
+HERDR_PICKER_DEBUG=1 sh bin/launcher
 ```
 
 ## Requires
 
-Nothing, on macOS or Linux on x86-64 or arm64. Installing from GitHub downloads
-a prebuilt picker for the platform and checks it against a published SHA-256.
+Nothing, on macOS, Linux or Windows on x86-64 or arm64. Installing from GitHub
+downloads a prebuilt picker for the platform and checks it against a published
+SHA-256.
 The picker draws its own list and talks to Herdr over the socket, so there is no
 runtime dependency to install either.
 
-A Rust toolchain — `cargo` 1.75 or newer — is the fallback, and it is needed
-whenever a download cannot happen or cannot be trusted: an architecture with no
-published binary, a release whose assets have not been built yet, no network, no
-`curl` and no `wget`, no way to compute a SHA-256, or a checkout with local
-changes to the code the binary is built from. Working on the plugin therefore
-still needs a toolchain, because an edited source tree always compiles. See
+A Rust toolchain is the fallback, and it is needed whenever a download cannot
+happen or cannot be trusted: an architecture with no published binary, a release
+whose assets have not been built yet, no network, no `curl`, no way to compute a
+SHA-256, or a checkout with local changes to the code the binary is built from.
+Working on the plugin therefore still needs a toolchain, because an edited source
+tree always compiles. See
 [when it downloads, and when it compiles](#when-it-downloads-and-when-it-compiles).
+
+**No minimum version is declared, and that is deliberate.** `Cargo.toml` carries
+no `rust-version`. It used to say 1.75, which was false twice over: the kit's
+generated types need `LazyLock`, from 1.80, and `regress`, which the kit pulls
+in, declares `edition = "2024"` and so needs **1.85**. The second is what binds
+today. A floor is a promise to the people who compile this, and under
+download-by-default almost nobody does; the number it would carry is whatever
+the dependency tree currently demands rather than anything this plugin chose.
+The one case that is not useless is the fallback path above, and its failure is
+loud and names itself.
+
+### Windows
+
+Declared, compiled, and **never run by anyone**. Treat a bug there as new
+information rather than as a regression.
+
+All six release targets compile, and CI compiles every one of them on a native
+runner on every push. That job is the entire Windows guarantee: nobody on this
+project has Windows hardware, so the compiler is the only reader those code
+paths ever get. It exists mainly to catch `std::os::unix` creeping back into
+`src/layout.rs`, which is the one file that had to be ported and the one most
+likely to regress.
+
+Two things in that file differ per platform, and the second is a real difference
+in behaviour rather than a difference in spelling.
+
+**Deciding whether a layout command can be run.** On Unix the picker checks the
+execute bit. Windows has no execute bit, so it checks only that the path is a
+file. `PATHEXT` is not consulted: a bare `agent-layout` will not be found on
+Windows unless a file with exactly that name is on the `PATH`. Name the
+executable in full, extension included, or give an absolute path.
+
+**Detaching the layout process.** This is the part to read carefully, because
+the guarantee is genuinely weaker on Windows and nothing here can measure it.
+
+| | Unix | Windows |
+|---|---|---|
+| Mechanism | `setsid` in the child, before `exec` | `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` |
+| New process group | yes | yes |
+| Free of the terminal | yes — a new session with no controlling terminal | no console attached |
+| Survives the picker's own death | yes | **not guaranteed** |
+
+On Unix the child becomes a session leader, which is what makes it outlive the
+popup that started it. Windows has no session concept to reach for. The flags
+used give the child its own process group and no console, so a Ctrl-C aimed at
+the picker will not reach it — but if the picker is running inside a job object
+configured to kill its children when it closes, the layout process dies with it.
+Whether Herdr runs plugin panes inside such a job object is not something anyone
+here has checked.
+
+So on Windows, read the hand-off as "started, in its own group, not attached to
+a console" — not as "will certainly still be running a second later". The
+picker never reads the layout command's output or exit code on either platform,
+so nothing tells you when this goes wrong.
+
+`bin/build.ps1`, `bin/launcher.ps1` and `bin/common.ps1` are the kit's, and they
+reach a lower bar still. PowerShell has no compiler and no CI job, and it is not
+installed on the machine they were written on, so **no `.ps1` file here has ever
+been run or even parsed**. Each one says so in its own header.
+
+Each manifest entry is declared twice, once for `sh` and once for `powershell`,
+using Herdr's per-item `platforms` override. Both `[[panes]]` entries carry the
+id `picker`, so the keybinding stays one line everywhere. Herdr's schema puts
+`platforms` on a pane exactly as it does on a build step, so filtering by
+platform and then resolving the id is the reading that field implies — but that
+is a reading, not a measurement, and a duplicate id is the one thing in that
+file that could be refused at load. The shell entry is declared first in every
+pair on purpose: if Herdr ever took the first match regardless of platform, the
+tested platforms are the ones that would win.
 
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
 is wanted, not required, and only because it is what the `layout` setting
@@ -728,14 +943,15 @@ opens them, and says once per run why they are bare. Point `layout` at something
 else and this plugin is not wanted either.
 
 Herdr's manifest has no dependency field, so the fallback is declared as a
-`[[build]]` step that runs `sh bin/build` at install time. With no terminal
-attached it says on stderr whether it is downloading or compiling, and where it
-found cargo. When a download is impossible and there is no toolchain either, it
-stops wherever it runs and says how to install one:
+`[[build]]` step that runs `sh bin/build --install` at install time. With no
+terminal attached it says on stderr whether it is downloading or compiling, and
+why. When a download is impossible and there is no toolchain either, it stops
+wherever it runs and says how to install one:
 
 ```
-project-finder: cargo not found; install a Rust toolchain (1.75 or newer), then
-run `cargo build --release` in /path/to/herdr-plugin-project-finder
+project-finder: install Rust with `curl --proto '=https' --tlsv1.2 -sSf
+https://sh.rustup.rs | sh`, then run `cargo build --release` in
+/path/to/herdr-plugin-project-finder
 ```
 
 ## Tests
@@ -745,10 +961,29 @@ cargo test
 ```
 
 The suite runs the picker against a stub Herdr server over a real Unix socket,
-so what is checked is the requests it does and does not send. Nothing is mocked
-in process except the terminal itself, which `cargo test` cannot give it; the
-screen is checked instead by rendering into ratatui's test backend and reading
-the cells back.
+so what is checked is the requests it does and does not send — and, since the
+migration onto the kit, the results it accepts. The stub answers each method
+with the shape a live Herdr was measured to send, and a separate set of tests
+answers each call with a *different* valid Herdr result to prove the call
+refuses it. Nothing is mocked in process except the terminal itself, which
+`cargo test` cannot give it; the screen is checked instead by rendering into
+ratatui's test backend and reading the cells back.
+
+Two more checks run in CI and are not part of `cargo test`, because both need
+herdr-plugin-kit checked out at the tag this plugin pins:
+
+```sh
+python3 ../herdr-plugin-kit/templates/sync_bin.py . --check
+python3 ../herdr-plugin-kit/tools/plugin_gate.py versions .
+```
+
+The first fails when a file under `bin/` differs from the kit's template or when
+`.gitignore` has lost its `BUILD_FROM_SOURCE` entry. The second asserts that
+`bin/common` and cargo name the same binary, that `herdr-plugin.toml` and
+`Cargo.toml` state the same version, that no `v`-prefixed tag names that
+version, and that no release tag sorts above it. Every one of those failures is
+silent in production: the install still works, it just stops using the prebuilt
+binary the whole mechanism exists to deliver.
 
 The tree is rustfmt-formatted on the tool's defaults, with no `rustfmt.toml` to
 carry: `cargo fmt --check` is expected to pass, and `cargo fmt` is expected to

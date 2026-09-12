@@ -2,7 +2,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::Workspace;
+use herdr_plugin_kit::api::generated::WorkspaceInfo;
+
 use crate::config::normpath;
 
 pub const DEPTH_BANDS: [usize; 3] = [1, 2, 3];
@@ -277,7 +278,7 @@ pub struct Row {
 
 pub fn order_rows(
     labelled: &[(String, PathBuf)],
-    open_ws: &[Workspace],
+    open_ws: &[WorkspaceInfo],
     touch: &mut dyn FnMut(&Path) -> u64,
 ) -> (Vec<Row>, Vec<Row>) {
     let mut head: Vec<Row> = Vec::new();

@@ -3,10 +3,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::api::{self, Client};
+use herdr_plugin_kit::env::BIN_PATH_VAR;
+
+use crate::api::{self, Client, Socket, PLUGIN_ID};
 use crate::config::{
     herdr_config_path, home_label, read_sources, resolve_root, resolve_settings,
-    worktree_locations, Environment, HerdrConfig,
+    worktree_locations, Environment, EnvironmentExt, HerdrConfig,
 };
 use crate::discover::{
     debug_line, human_age, labelled, now, order_rows, parent_repo, repos, row_kind, touched_at,
@@ -70,7 +72,7 @@ fn unlistable(why: api::CallError) -> Fatal {
 }
 
 pub fn herdr_binary(env: &Environment) -> Option<String> {
-    if let Some(path) = env.get("HERDR_BIN_PATH").filter(|p| !p.is_empty()) {
+    if let Some(path) = env.get(BIN_PATH_VAR).filter(|p| !p.is_empty()) {
         return Some(path.to_string());
     }
     crate::layout::which(env, "herdr").map(|p| p.to_string_lossy().to_string())
@@ -113,8 +115,9 @@ pub fn run(
         )));
     }
 
-    let client = Client::from_env_of(env)
+    let socket = Socket::resolve(env)
         .map_err(|why| Fatal::NoServer(format!("the picker cannot reach Herdr: {}", why)))?;
+    let client = Client::new(socket, PLUGIN_ID);
 
     let home = home_label(&settings);
     let (_, open_ws) = api::open_workspaces(&client, &home).map_err(unlistable)?;
@@ -144,7 +147,7 @@ pub fn run(
             status: open_ws
                 .iter()
                 .find(|w| w.label == row.label)
-                .map(|w| w.agent_status.clone()),
+                .map(|w| w.agent_status.to_string()),
             selected,
         });
     }

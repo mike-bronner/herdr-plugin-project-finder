@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use pick_project::config::{
     herdr_config_path, home_label, parse_env_file, parse_picker_config, read_env_file,
-    read_picker_config, read_sources, resolve_root, resolve_settings, Environment, HerdrConfig,
-    Settings, DEBUG_VAR, HOME_VAR, LAYOUT_VAR, PICKER_KEYS, ROOT_VAR,
+    read_picker_config, read_sources, resolve_root, resolve_settings, Environment, EnvironmentExt,
+    HerdrConfig, Settings, DEBUG_VAR, HOME_VAR, LAYOUT_VAR, PICKER_KEYS, ROOT_VAR,
 };
 use support::*;
 
@@ -131,6 +131,48 @@ fn an_env_file_setting_the_layout_command_reads_is_carried_to_the_child() {
     let env = Environment::from_pairs(&[("PATH", "/usr/bin")]);
     let child = env.overlaid(&settings.env_file);
     assert_eq!(child.get("SOME_TOOL_RATIO"), Some("0.3"));
+}
+
+#[test]
+fn an_env_file_fills_in_underneath_and_never_replaces_what_is_already_set() {
+    let dir = TempDir::new();
+    let settings = settings_from(
+        &dir,
+        None,
+        Some("SOME_TOOL_RATIO=0.3\nPATH=/from/the/file\n"),
+        &[],
+    );
+    let env = Environment::from_pairs(&[("PATH", "/usr/bin")]);
+    let child = env.overlaid(&settings.env_file);
+    assert_eq!(
+        child.get("PATH"),
+        Some("/usr/bin"),
+        "a file in the config directory must not take a variable away from what actually \
+         launched this process"
+    );
+    assert_eq!(child.get("SOME_TOOL_RATIO"), Some("0.3"));
+}
+
+#[test]
+fn an_overridden_variable_replaces_one_that_was_already_there() {
+    let env = Environment::from_pairs(&[("PATH", "/usr/bin"), ("KEEP", "me")]);
+    let widened = env.overridden("PATH", "/opt/homebrew/bin:/usr/bin");
+    assert_eq!(widened.get("PATH"), Some("/opt/homebrew/bin:/usr/bin"));
+    assert_eq!(widened.get("KEEP"), Some("me"));
+    assert_eq!(
+        env.get("PATH"),
+        Some("/usr/bin"),
+        "the original is left alone"
+    );
+}
+
+#[test]
+fn an_overridden_variable_that_was_not_there_is_added() {
+    let env = Environment::from_pairs(&[("KEEP", "me")]);
+    assert_eq!(
+        env.overridden("PATH", "/usr/bin").get("PATH"),
+        Some("/usr/bin")
+    );
 }
 
 #[test]
@@ -498,12 +540,38 @@ fn the_source_names_no_plugin_executable_or_flag_of_anothers() {
         "agentic-panes-layout",
         "agent-layout",
         "AGENT_LAYOUT",
-        "mikebronner.",
         "--agent-name",
         "--no-agent",
     ] {
         assert!(!source.contains(token), "the source names {}", token);
     }
+}
+
+#[test]
+fn the_only_plugin_id_the_source_names_is_this_plugins_own() {
+    let own = read_repo_file("herdr-plugin.toml")
+        .parse::<toml::Table>()
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let source = repo_source();
+    let mut named: Vec<String> = Vec::new();
+    let mut rest = source.as_str();
+    while let Some(at) = rest.find("mikebronner.") {
+        let after = &rest[at..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+            .unwrap_or(after.len());
+        named.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    assert_eq!(
+        named,
+        vec![own.clone()],
+        "the source names a plugin id that is not {}",
+        own
+    );
 }
 
 #[test]
@@ -520,14 +588,10 @@ fn the_source_reads_only_its_own_settings() {
     assert!(!read.is_empty());
     for name in read {
         assert!(
-            name.starts_with("HERDR_PICKER_")
-                || name.starts_with("HERDR_PLUGIN_")
-                || name.starts_with("HERDR_CONFIG_")
-                || name.starts_with("HERDR_BIN_")
-                || name.starts_with("HERDR_SOCKET_")
-                || name == "PATH"
-                || name == "HOME",
-            "the picker reads {}",
+            name == "PATH" || name == "HOME",
+            "the picker reads {} as a bare string; every Herdr launch variable is named by \
+             the kit's own constant, so a literal here is a second spelling of a name the kit \
+             already owns",
             name
         );
     }
@@ -607,6 +671,27 @@ fn an_empty_root_is_treated_as_unset() {
     let home = dir.path().to_string_lossy().to_string();
     let env = Environment::from_pairs(&[("HOME", &home)]);
     assert_eq!(root_of(&env, Some("")), dir.path());
+}
+
+#[test]
+fn a_home_set_to_nothing_never_produces_a_relative_root() {
+    let env = Environment::from_pairs(&[("HOME", "")]);
+    let root = root_of(&env, None);
+    assert!(
+        root.is_absolute(),
+        "an empty HOME used to answer PathBuf::from(\"\"), and every join beneath it was \
+         resolved against whatever directory the picker happened to start in: {:?}",
+        root
+    );
+    assert_eq!(root, PathBuf::from("/"));
+}
+
+#[test]
+fn a_home_set_to_nothing_never_produces_a_relative_config_path() {
+    let env = Environment::from_pairs(&[("HOME", "")]);
+    let path = herdr_config_path(&env);
+    assert!(path.is_absolute(), "{:?}", path);
+    assert_eq!(path, PathBuf::from("/.config/herdr/config.toml"));
 }
 
 #[test]

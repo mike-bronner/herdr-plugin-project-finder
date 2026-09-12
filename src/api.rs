@@ -1,168 +1,42 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::collections::HashMap;
 
-use serde_json::{json, Map, Value};
+use herdr_plugin_kit::api::generated::{
+    EmptyParams, NotificationShowAnswer, NotificationShowParams, OkAnswer, PluginListAnswer,
+    PluginListParams, RequestMethod, WorkspaceCloseParams, WorkspaceCreateParams,
+    WorkspaceCreatedAnswer, WorkspaceInfo, WorkspaceInfoAnswer, WorkspaceListAnswer,
+    WorkspaceTarget, WorktreeOpenParams, WorktreeOpenedAnswer,
+};
 
-pub const SOCKET_VAR: &str = "HERDR_SOCKET_PATH";
+pub use herdr_plugin_kit::api::client::{CallError, Client, Socket};
 
-#[derive(Debug)]
-pub struct ApiError {
-    pub code: String,
-    pub message: String,
+pub const PLUGIN_ID: &str = "mikebronner.project-finder";
+
+pub const NOTIFICATION_TITLE: &str = "project finder";
+
+pub fn is_linked_worktree(workspace: &WorkspaceInfo) -> bool {
+    workspace
+        .worktree
+        .as_ref()
+        .is_some_and(|worktree| worktree.is_linked_worktree)
 }
 
-#[derive(Debug)]
-pub enum CallError {
-    Transport(String),
-    Api(ApiError),
-}
-
-impl CallError {
-    pub fn code(&self) -> Option<&str> {
-        match self {
-            CallError::Api(e) => Some(e.code.as_str()),
-            CallError::Transport(_) => None,
-        }
-    }
-}
-
-impl std::fmt::Display for CallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CallError::Transport(m) => write!(f, "{}", m),
-            CallError::Api(e) => write!(f, "{} ({})", e.message, e.code),
-        }
-    }
-}
-
-pub struct Client {
-    socket: PathBuf,
-}
-
-impl Client {
-    pub fn new(socket: PathBuf) -> Client {
-        Client { socket }
-    }
-
-    pub fn from_env_of(env: &crate::config::Environment) -> Result<Client, String> {
-        match env.get(SOCKET_VAR) {
-            Some(v) if !v.is_empty() => Ok(Client::new(PathBuf::from(v))),
-            _ => Err(format!("{} is not set", SOCKET_VAR)),
-        }
-    }
-
-    pub fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
-        let request = json!({"id": format!("pick-project:{}", method),
-                             "method": method,
-                             "params": params});
-
-        let stream = UnixStream::connect(&self.socket).map_err(|e| {
-            CallError::Transport(format!("cannot reach {}: {}", self.socket.display(), e))
-        })?;
-        let mut writer = &stream;
-        writer
-            .write_all(format!("{}\n", request).as_bytes())
-            .and_then(|()| writer.flush())
-            .map_err(|e| CallError::Transport(format!("cannot send {}: {}", method, e)))?;
-
-        let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line).map_err(|e| {
-            CallError::Transport(format!("cannot read the answer to {}: {}", method, e))
-        })?;
-        if line.trim().is_empty() {
-            return Err(CallError::Transport(format!(
-                "the server closed the connection without answering {}",
-                method
-            )));
-        }
-
-        let answer: Value = serde_json::from_str(&line).map_err(|e| {
-            CallError::Transport(format!("the answer to {} is not JSON: {}", method, e))
-        })?;
-
-        if let Some(err) = answer.get("error") {
-            return Err(CallError::Api(ApiError {
-                code: string_at(err, "code").unwrap_or_default(),
-                message: string_at(err, "message")
-                    .unwrap_or_else(|| format!("{} failed with no message", method)),
-            }));
-        }
-        match answer.get("result") {
-            Some(result) => Ok(result.clone()),
-            None => Err(CallError::Transport(format!(
-                "the answer to {} carries neither a result nor an error",
-                method
-            ))),
-        }
-    }
-}
-
-fn string_at(value: &Value, key: &str) -> Option<String> {
-    value.get(key)?.as_str().map(|s| s.to_string())
-}
-
-pub fn params(pairs: Vec<(&str, Value)>) -> Value {
-    let mut map = Map::new();
-    for (key, value) in pairs {
-        if !value.is_null() {
-            map.insert(key.to_string(), value);
-        }
-    }
-    Value::Object(map)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Workspace {
-    pub workspace_id: String,
-    pub label: String,
-    pub focused: bool,
-    pub agent_status: String,
-    pub linked_worktree: bool,
-}
-
-pub fn workspaces(client: &Client) -> Result<Vec<Workspace>, CallError> {
-    let result = client.call("workspace.list", json!({}))?;
-    let listed = result
-        .get("workspaces")
-        .and_then(Value::as_array)
-        .cloned()
-        .ok_or_else(|| {
-            CallError::Transport("workspace.list answered without a workspace list".to_string())
-        })?;
-    Ok(listed
-        .iter()
-        .filter_map(|w| {
-            Some(Workspace {
-                workspace_id: string_at(w, "workspace_id")?,
-                label: string_at(w, "label").unwrap_or_default(),
-                focused: w.get("focused").and_then(Value::as_bool).unwrap_or(false),
-                agent_status: string_at(w, "agent_status").unwrap_or_else(|| "unknown".to_string()),
-                linked_worktree: w
-                    .get("worktree")
-                    .and_then(|t| t.get("is_linked_worktree"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            })
-        })
-        .collect())
+pub fn workspaces(client: &Client) -> Result<Vec<WorkspaceInfo>, CallError> {
+    client
+        .call::<WorkspaceListAnswer>(RequestMethod::WorkspaceList(EmptyParams(
+            serde_json::Map::new(),
+        )))
+        .map(|answer| answer.workspaces)
 }
 
 pub fn open_workspaces(
     client: &Client,
     home_label: &str,
-) -> Result<(Option<Workspace>, Vec<Workspace>), CallError> {
+) -> Result<(Option<WorkspaceInfo>, Vec<WorkspaceInfo>), CallError> {
     let mut listed = workspaces(client)?;
     match listed.iter().position(|w| w.label == home_label) {
         Some(at) => Ok((Some(listed.remove(at)), listed)),
         None => Ok((None, listed)),
     }
-}
-
-fn opened_workspace_id(result: &Value) -> Option<String> {
-    result
-        .get("workspace")
-        .and_then(|w| string_at(w, "workspace_id"))
 }
 
 pub fn worktree_open(
@@ -171,51 +45,67 @@ pub fn worktree_open(
     path: &str,
     label: &str,
 ) -> Result<String, CallError> {
-    let result = client.call(
-        "worktree.open",
-        json!({"cwd": cwd, "path": path, "label": label, "focus": false}),
-    )?;
-    opened_workspace_id(&result).ok_or_else(|| {
-        CallError::Transport("worktree.open answered without a workspace id".to_string())
-    })
+    client
+        .call::<WorktreeOpenedAnswer>(RequestMethod::WorktreeOpen(WorktreeOpenParams {
+            branch: None,
+            cwd: Some(cwd.to_string()),
+            focus: false,
+            label: Some(label.to_string()),
+            path: Some(path.to_string()),
+            trust_repository: None,
+            workspace_id: None,
+        }))
+        .map(|answer| answer.workspace.workspace_id)
 }
 
 pub fn workspace_create(client: &Client, cwd: &str, label: &str) -> Result<String, CallError> {
-    let result = client.call(
-        "workspace.create",
-        json!({"cwd": cwd, "label": label, "focus": false}),
-    )?;
-    opened_workspace_id(&result).ok_or_else(|| {
-        CallError::Transport("workspace.create answered without a workspace id".to_string())
-    })
+    client
+        .call::<WorkspaceCreatedAnswer>(RequestMethod::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some(cwd.to_string()),
+            env: HashMap::new(),
+            focus: false,
+            label: Some(label.to_string()),
+            source_workspace_id: None,
+        }))
+        .map(|answer| answer.workspace.workspace_id)
 }
 
 pub fn workspace_close(client: &Client, workspace_id: &str) -> Result<(), CallError> {
     client
-        .call("workspace.close", json!({"workspace_id": workspace_id}))
+        .call::<OkAnswer>(RequestMethod::WorkspaceClose(WorkspaceCloseParams {
+            close_group: None,
+            workspace_id: workspace_id.to_string(),
+        }))
         .map(|_| ())
 }
 
 pub fn workspace_focus(client: &Client, workspace_id: &str) -> Result<(), CallError> {
     client
-        .call("workspace.focus", json!({"workspace_id": workspace_id}))
+        .call::<WorkspaceInfoAnswer>(RequestMethod::WorkspaceFocus(WorkspaceTarget {
+            workspace_id: workspace_id.to_string(),
+        }))
         .map(|_| ())
 }
 
 pub fn plugin_root(client: &Client, plugin_id: &str) -> Option<String> {
-    let result = client
-        .call("plugin.list", json!({"plugin_id": plugin_id}))
-        .ok()?;
-    result
-        .get("plugins")
-        .and_then(Value::as_array)?
-        .iter()
-        .find_map(|p| string_at(p, "plugin_root").filter(|r| !r.is_empty()))
+    client
+        .call::<PluginListAnswer>(RequestMethod::PluginList(PluginListParams {
+            plugin_id: Some(plugin_id.to_string()),
+        }))
+        .ok()?
+        .plugins
+        .into_iter()
+        .find(|plugin| !plugin.plugin_root.is_empty())
+        .map(|plugin| plugin.plugin_root)
 }
 
 pub fn notify(client: &Client, body: &str) {
-    let _ = client.call(
-        "notification.show",
-        json!({"title": "project finder", "body": body}),
-    );
+    let _ = client.call::<NotificationShowAnswer>(RequestMethod::NotificationShow(
+        NotificationShowParams {
+            body: Some(body.to_string()),
+            position: None,
+            sound: None,
+            title: NOTIFICATION_TITLE.to_string(),
+        },
+    ));
 }

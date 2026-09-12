@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use pick_project::api::Workspace;
+use herdr_plugin_kit::api::client::{CallError, Client, Socket};
+use herdr_plugin_kit::api::generated::WorkspaceInfo;
+use pick_project::api::PLUGIN_ID;
 use pick_project::config::Environment;
 
 pub const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -116,21 +118,30 @@ fn basename(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-pub fn open(label: &str, id: &str) -> Workspace {
-    Workspace {
-        workspace_id: id.to_string(),
-        label: label.to_string(),
-        focused: false,
-        agent_status: "idle".to_string(),
-        linked_worktree: false,
-    }
+pub fn plugin_row(plugin_root: &str) -> Value {
+    json!({"plugin_id": "some.plugin", "name": "Some Plugin",
+           "plugin_root": plugin_root, "manifest_path": format!("{}/herdr-plugin.toml", plugin_root),
+           "version": "1.0.0", "enabled": true})
 }
 
-pub fn open_worktree(label: &str, id: &str) -> Workspace {
-    Workspace {
-        linked_worktree: true,
-        ..open(label, id)
-    }
+fn pane_of(workspace_id: &str) -> Value {
+    json!({"pane_id": "p1", "tab_id": "t1", "terminal_id": "term1",
+           "workspace_id": workspace_id, "agent_status": "idle",
+           "focused": true, "revision": 1})
+}
+
+fn tab_of(workspace_id: &str) -> Value {
+    json!({"tab_id": "t1", "workspace_id": workspace_id, "agent_status": "idle",
+           "focused": true, "label": "1", "number": 1, "pane_count": 1})
+}
+
+pub fn open(label: &str, id: &str) -> WorkspaceInfo {
+    serde_json::from_value(workspace(label, id)).expect("the fixture row is not a workspace")
+}
+
+pub fn open_worktree(label: &str, id: &str) -> WorkspaceInfo {
+    serde_json::from_value(workspace_in_repo(label, id, "/x/repo", true))
+        .expect("the fixture row is not a workspace")
 }
 
 #[derive(Clone, Default)]
@@ -140,6 +151,7 @@ pub struct Script {
     pub fail: Vec<(String, String)>,
     pub fail_at: Vec<(String, String, u32)>,
     pub list_result: Option<Value>,
+    pub answer: Vec<(String, Value)>,
 }
 
 impl Script {
@@ -167,6 +179,18 @@ impl Script {
     pub fn listing(mut self, result: Value) -> Script {
         self.list_result = Some(result);
         self
+    }
+
+    pub fn answering(mut self, method: &str, result: Value) -> Script {
+        self.answer.push((method.to_string(), result));
+        self
+    }
+}
+
+pub fn refusal_code(error: &CallError) -> Option<&str> {
+    match error {
+        CallError::Server(body) => Some(body.code.as_str()),
+        _ => None,
     }
 }
 
@@ -212,8 +236,8 @@ impl Stub {
         &self.socket
     }
 
-    pub fn client(&self) -> pick_project::api::Client {
-        pick_project::api::Client::new(self.socket.to_path_buf())
+    pub fn client(&self) -> Client {
+        Client::new(Socket::at(self.socket.to_path_buf()), PLUGIN_ID)
     }
 
     pub fn requests(&self) -> Vec<Value> {
@@ -341,18 +365,37 @@ fn answer_for(
     {
         return fail(code);
     }
+    if let Some((_, result)) = script.answer.iter().find(|(m, _)| m == method) {
+        return ok(result.clone());
+    }
 
     match method {
         "workspace.list" => ok(script
             .list_result
             .clone()
             .unwrap_or_else(|| json!({"type": "workspace_list", "workspaces": script.workspaces}))),
-        "workspace.create" | "worktree.open" => {
-            let n = opened.fetch_add(1, Ordering::SeqCst) + 1;
-            let label = params.get("label").cloned().unwrap_or(json!(""));
+        "workspace.create" => {
+            let (new_id, label) = opened_row(params, opened);
             ok(json!({"type": "workspace_created",
-                      "workspace": {"workspace_id": format!("new{}", n),
-                                    "label": label}}))
+                      "workspace": workspace(&label, &new_id),
+                      "root_pane": pane_of(&new_id),
+                      "tab": tab_of(&new_id)}))
+        }
+        "worktree.open" => {
+            let (new_id, label) = opened_row(params, opened);
+            let path = params
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            ok(json!({"type": "worktree_opened",
+                      "already_open": false,
+                      "workspace": workspace(&label, &new_id),
+                      "root_pane": pane_of(&new_id),
+                      "tab": tab_of(&new_id),
+                      "worktree": {"is_bare": false, "is_detached": false,
+                                   "is_linked_worktree": true, "is_prunable": false,
+                                   "label": label, "path": path}}))
         }
         "workspace.close" => {
             let target = params
@@ -369,14 +412,42 @@ fn answer_for(
                                           to close the group"}});
             }
             shut.insert(target.clone());
-            ok(json!({"type": "workspace_closed", "workspace_id": target}))
+            ok(json!({"type": "ok"}))
         }
-        "workspace.focus" => ok(json!({"type": "workspace_focused",
-                                       "workspace_id": params.get("workspace_id")})),
+        "workspace.focus" => {
+            let target = params
+                .get("workspace_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            ok(json!({"type": "workspace_info",
+                      "workspace": focused_row(script, &target)}))
+        }
         "plugin.list" => ok(json!({"type": "plugin_list", "plugins": script.plugins})),
-        "notification.show" => ok(json!({"type": "notification_show", "shown": false})),
+        "notification.show" => {
+            ok(json!({"type": "notification_show", "shown": true, "reason": "shown"}))
+        }
         _ => fail("unhandled_by_stub"),
     }
+}
+
+fn opened_row(params: &Value, opened: &AtomicU32) -> (String, String) {
+    let n = opened.fetch_add(1, Ordering::SeqCst) + 1;
+    let label = params
+        .get("label")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    (format!("new{}", n), label)
+}
+
+fn focused_row(script: &Script, workspace_id: &str) -> Value {
+    script
+        .workspaces
+        .iter()
+        .find(|w| w["workspace_id"] == json!(workspace_id))
+        .cloned()
+        .unwrap_or_else(|| workspace("focused", workspace_id))
 }
 
 pub fn env_for(stub: &Stub, home: &Path, pairs: &[(&str, &str)]) -> Environment {
@@ -399,7 +470,7 @@ pub fn bare_env(pairs: &[(&str, &str)]) -> Environment {
     Environment::from_pairs(&all)
 }
 
-pub fn labels(workspaces: &[Workspace]) -> Vec<String> {
+pub fn labels(workspaces: &[WorkspaceInfo]) -> Vec<String> {
     workspaces.iter().map(|w| w.label.clone()).collect()
 }
 
