@@ -153,6 +153,50 @@ fn no_socket_to_reach_herdr_on_is_refused_before_anything_is_drawn() {
 }
 
 #[test]
+fn a_refused_workspace_list_is_fatal_and_the_picker_is_never_drawn() {
+    let world = World::new();
+    world.repo("alpha");
+    let stub = Stub::start(Script::default().failing("workspace.list", "server_not_running"));
+    let run = run_choosing(&world, &stub, &["alpha"], &[]);
+    match run.outcome {
+        Err(Fatal::NoServer(message)) => {
+            assert!(message.contains("server_not_running"), "{}", message)
+        }
+        other => panic!("{:?}", other),
+    }
+    assert!(run.listed.is_empty(), "nothing was drawn");
+    assert!(stub.changing().is_empty(), "nothing was opened or closed");
+}
+
+#[test]
+fn a_workspace_list_refused_after_the_picker_closes_and_opens_nothing() {
+    let world = World::new();
+    world.repo("alpha");
+    world.repo("beta");
+    let stub = Stub::start(
+        Script::default()
+            .open(vec![workspace("alpha", "w1")])
+            .failing_at("workspace.list", "server_not_running", 2),
+    );
+    let run = run_choosing(&world, &stub, &["beta"], &[]);
+    match run.outcome {
+        Err(Fatal::NoServer(message)) => {
+            assert!(message.contains("server_not_running"), "{}", message)
+        }
+        other => panic!("{:?}", other),
+    }
+    assert_eq!(
+        run.listed.len(),
+        2,
+        "the picker was drawn from the first listing"
+    );
+    assert!(
+        stub.changing().is_empty(),
+        "a selection acted on a list that never arrived would close alpha and open beta"
+    );
+}
+
+#[test]
 fn open_workspaces_are_listed_first_and_start_checked() {
     let world = World::new();
     world.repo("alpha");

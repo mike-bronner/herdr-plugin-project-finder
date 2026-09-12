@@ -18,7 +18,7 @@ fn the_home_workspace_is_split_out_and_never_listed_among_the_others() {
         workspace("a", "w2"),
         workspace("b", "w3"),
     ]));
-    let (home, others) = api::open_workspaces(&stub.client(), "~");
+    let (home, others) = api::open_workspaces(&stub.client(), "~").unwrap();
     assert_eq!(home.unwrap().workspace_id, "w1");
     assert_eq!(labels(&others), vec!["a", "b"]);
 }
@@ -26,7 +26,7 @@ fn the_home_workspace_is_split_out_and_never_listed_among_the_others() {
 #[test]
 fn no_home_open_leaves_every_workspace_in_the_list() {
     let stub = Stub::start(Script::default().open(vec![workspace("a", "w2")]));
-    let (home, others) = api::open_workspaces(&stub.client(), "~");
+    let (home, others) = api::open_workspaces(&stub.client(), "~").unwrap();
     assert!(home.is_none());
     assert_eq!(others.len(), 1);
 }
@@ -35,25 +35,40 @@ fn no_home_open_leaves_every_workspace_in_the_list() {
 fn a_home_label_of_your_own_is_the_one_that_is_held_back() {
     let stub =
         Stub::start(Script::default().open(vec![workspace("~", "w1"), workspace("base", "w2")]));
-    let (home, others) = api::open_workspaces(&stub.client(), "base");
+    let (home, others) = api::open_workspaces(&stub.client(), "base").unwrap();
     assert_eq!(home.unwrap().workspace_id, "w2");
     assert_eq!(labels(&others), vec!["~"]);
 }
 
 #[test]
-fn an_unreachable_server_lists_nothing_rather_than_failing() {
+fn a_refused_workspace_list_is_an_error_rather_than_an_empty_list() {
     let stub = Stub::start(Script::default().failing("workspace.list", "server_not_running"));
-    assert_eq!(
-        api::open_workspaces(&stub.client(), "~"),
-        (None, Vec::new())
+    let refused = api::open_workspaces(&stub.client(), "~").unwrap_err();
+    assert_eq!(refused.code(), Some("server_not_running"));
+}
+
+#[test]
+fn an_answer_carrying_no_workspace_list_is_an_error_rather_than_an_empty_list() {
+    let stub = Stub::start(Script::default().listing(json!({"type": "workspace_list"})));
+    let refused = api::workspaces(&stub.client()).unwrap_err();
+    assert!(
+        refused.to_string().contains("without a workspace list"),
+        "{}",
+        refused
     );
+}
+
+#[test]
+fn an_answer_carrying_an_empty_workspace_list_is_no_error_at_all() {
+    let stub = Stub::start(Script::default());
+    assert_eq!(api::workspaces(&stub.client()).unwrap(), Vec::new());
 }
 
 #[test]
 fn a_workspace_row_with_no_id_is_dropped_rather_than_guessed_at() {
     let stub =
         Stub::start(Script::default().open(vec![json!({"label": "a"}), workspace("b", "w2")]));
-    let (_, others) = api::open_workspaces(&stub.client(), "~");
+    let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
     assert_eq!(labels(&others), vec!["b"]);
 }
 
@@ -61,7 +76,7 @@ fn a_workspace_row_with_no_id_is_dropped_rather_than_guessed_at() {
 fn a_workspace_with_no_agent_status_reads_as_unknown() {
     let stub =
         Stub::start(Script::default().open(vec![json!({"workspace_id": "w1", "label": "a"})]));
-    let (_, others) = api::open_workspaces(&stub.client(), "~");
+    let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
     assert_eq!(others[0].agent_status, "unknown");
 }
 
@@ -129,7 +144,7 @@ fn a_linked_worktree_workspace_is_marked_as_one() {
     let stub = Stub::start(
         Script::default().open(vec![workspace_in_repo("feat-x", "w1", "/x/alpha", true)]),
     );
-    let (_, others) = api::open_workspaces(&stub.client(), "~");
+    let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
     assert!(others[0].linked_worktree);
 }
 
@@ -138,7 +153,7 @@ fn a_repository_opened_as_a_worktree_is_not_a_linked_worktree() {
     let stub = Stub::start(
         Script::default().open(vec![workspace_in_repo("alpha", "w1", "/x/alpha", false)]),
     );
-    let (_, others) = api::open_workspaces(&stub.client(), "~");
+    let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
     assert!(!others[0].linked_worktree);
 }
 
@@ -150,7 +165,7 @@ fn a_workspace_the_server_reports_no_worktree_for_is_not_a_linked_worktree() {
         json!({"workspace_id": "w1", "label": "alpha", "worktree": "nonsense"}),
     ] {
         let stub = Stub::start(Script::default().open(vec![row.clone()]));
-        let (_, others) = api::open_workspaces(&stub.client(), "~");
+        let (_, others) = api::open_workspaces(&stub.client(), "~").unwrap();
         assert!(!others[0].linked_worktree, "{}", row);
     }
 }
@@ -495,7 +510,7 @@ fn workspaces_keep_the_order_the_server_listed_them_in() {
         workspace("a", "w1"),
         workspace("b", "w2"),
     ]));
-    let listed: Vec<Workspace> = api::workspaces(&stub.client());
+    let listed: Vec<Workspace> = api::workspaces(&stub.client()).unwrap();
     assert_eq!(
         ids(&listed
             .iter()
@@ -509,7 +524,7 @@ fn workspaces_keep_the_order_the_server_listed_them_in() {
 fn a_focused_workspace_is_reported_as_focused() {
     let stub =
         Stub::start(Script::default().open(vec![workspace_with("a", "w1", true, "working")]));
-    let listed = api::workspaces(&stub.client());
+    let listed = api::workspaces(&stub.client()).unwrap();
     assert!(listed[0].focused);
     assert_eq!(listed[0].agent_status, "working");
 }

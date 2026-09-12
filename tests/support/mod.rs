@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -138,6 +138,8 @@ pub struct Script {
     pub workspaces: Vec<Value>,
     pub plugins: Vec<Value>,
     pub fail: Vec<(String, String)>,
+    pub fail_at: Vec<(String, String, u32)>,
+    pub list_result: Option<Value>,
 }
 
 impl Script {
@@ -153,6 +155,17 @@ impl Script {
 
     pub fn failing(mut self, method: &str, code: &str) -> Script {
         self.fail.push((method.to_string(), code.to_string()));
+        self
+    }
+
+    pub fn failing_at(mut self, method: &str, code: &str, nth: u32) -> Script {
+        self.fail_at
+            .push((method.to_string(), code.to_string(), nth));
+        self
+    }
+
+    pub fn listing(mut self, result: Value) -> Script {
+        self.list_result = Some(result);
         self
     }
 }
@@ -177,12 +190,13 @@ impl Stub {
         std::thread::spawn(move || {
             let opened = AtomicU32::new(0);
             let shut = Mutex::new(HashSet::new());
+            let calls = Mutex::new(HashMap::new());
             for stream in listener.incoming() {
                 if thread_stop.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(stream) = stream else { break };
-                serve(&stream, &script, &thread_log, &opened, &shut);
+                serve(&stream, &script, &thread_log, &opened, &shut, &calls);
             }
         });
 
@@ -247,6 +261,7 @@ fn serve(
     log: &Arc<Mutex<Vec<Value>>>,
     opened: &AtomicU32,
     shut: &Mutex<HashSet<String>>,
+    calls: &Mutex<HashMap<String, u32>>,
 ) {
     let mut line = String::new();
     if BufReader::new(stream).read_line(&mut line).is_err() || line.trim().is_empty() {
@@ -267,7 +282,13 @@ fn serve(
         .push(json!({"method": method, "params": params}));
 
     let id = request.get("id").cloned().unwrap_or(json!("stub"));
-    let answer = answer_for(&method, &params, script, opened, shut, &id);
+    let nth = {
+        let mut calls = calls.lock().unwrap();
+        let seen = calls.entry(method.clone()).or_insert(0);
+        *seen += 1;
+        *seen
+    };
+    let answer = answer_for(&method, &params, script, opened, shut, nth, &id);
     let mut out = stream;
     let _ = out.write_all(format!("{}\n", answer).as_bytes());
     let _ = out.flush();
@@ -301,6 +322,7 @@ fn answer_for(
     script: &Script,
     opened: &AtomicU32,
     shut: &Mutex<HashSet<String>>,
+    nth: u32,
     id: &Value,
 ) -> Value {
     let fail = |code: &str| {
@@ -312,10 +334,19 @@ fn answer_for(
     if let Some((_, code)) = script.fail.iter().find(|(m, _)| m == method) {
         return fail(code);
     }
+    if let Some((_, code, _)) = script
+        .fail_at
+        .iter()
+        .find(|(m, _, at)| m == method && *at == nth)
+    {
+        return fail(code);
+    }
 
     match method {
-        "workspace.list" => ok(json!({"type": "workspace_list",
-                                      "workspaces": script.workspaces})),
+        "workspace.list" => ok(script
+            .list_result
+            .clone()
+            .unwrap_or_else(|| json!({"type": "workspace_list", "workspaces": script.workspaces}))),
         "workspace.create" | "worktree.open" => {
             let n = opened.fetch_add(1, Ordering::SeqCst) + 1;
             let label = params.get("label").cloned().unwrap_or(json!(""));

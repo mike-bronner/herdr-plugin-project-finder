@@ -121,16 +121,16 @@ pub struct Workspace {
     pub linked_worktree: bool,
 }
 
-pub fn workspaces(client: &Client) -> Vec<Workspace> {
-    let Ok(result) = client.call("workspace.list", json!({})) else {
-        return Vec::new();
-    };
+pub fn workspaces(client: &Client) -> Result<Vec<Workspace>, CallError> {
+    let result = client.call("workspace.list", json!({}))?;
     let listed = result
         .get("workspaces")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
-    listed
+        .ok_or_else(|| {
+            CallError::Transport("workspace.list answered without a workspace list".to_string())
+        })?;
+    Ok(listed
         .iter()
         .filter_map(|w| {
             Some(Workspace {
@@ -145,19 +145,17 @@ pub fn workspaces(client: &Client) -> Vec<Workspace> {
                     .unwrap_or(false),
             })
         })
-        .collect()
+        .collect())
 }
 
-pub fn open_workspaces(client: &Client, home_label: &str) -> (Option<Workspace>, Vec<Workspace>) {
-    let listed = workspaces(client);
-    let home_at = listed.iter().position(|w| w.label == home_label);
-    match home_at {
-        Some(at) => {
-            let mut rest = listed;
-            let home = rest.remove(at);
-            (Some(home), rest)
-        }
-        None => (None, listed),
+pub fn open_workspaces(
+    client: &Client,
+    home_label: &str,
+) -> Result<(Option<Workspace>, Vec<Workspace>), CallError> {
+    let mut listed = workspaces(client)?;
+    match listed.iter().position(|w| w.label == home_label) {
+        Some(at) => Ok((Some(listed.remove(at)), listed)),
+        None => Ok((None, listed)),
     }
 }
 

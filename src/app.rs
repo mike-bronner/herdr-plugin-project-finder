@@ -62,6 +62,13 @@ pub fn with_extra_path(env: Environment) -> Environment {
     env.overridden("PATH", &dirs.join(":"))
 }
 
+fn unlistable(why: api::CallError) -> Fatal {
+    Fatal::NoServer(format!(
+        "the picker cannot read what Herdr has open: {}",
+        why
+    ))
+}
+
 pub fn herdr_binary(env: &Environment) -> Option<String> {
     if let Some(path) = env.get("HERDR_BIN_PATH").filter(|p| !p.is_empty()) {
         return Some(path.to_string());
@@ -110,7 +117,7 @@ pub fn run(
         .map_err(|why| Fatal::NoServer(format!("the picker cannot reach Herdr: {}", why)))?;
 
     let home = home_label(&settings);
-    let (_, open_ws) = api::open_workspaces(&client, &home);
+    let (_, open_ws) = api::open_workspaces(&client, &home).map_err(unlistable)?;
     let herdr_bin = herdr_binary(env);
     let theme = resolve_theme(&herdr_config, &|field| {
         herdr_rejects_theme(herdr_bin.as_deref(), field)
@@ -171,7 +178,7 @@ pub fn run(
         .filter_map(|p| label_of.get(p).cloned())
         .collect();
 
-    let (home, open_ws) = api::open_workspaces(&client, &home);
+    let (home, open_ws) = api::open_workspaces(&client, &home).map_err(unlistable)?;
     let steps = plan(&selected, &open_ws);
 
     let mut closed: Vec<String> = Vec::new();

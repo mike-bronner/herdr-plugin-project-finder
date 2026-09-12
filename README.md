@@ -332,6 +332,16 @@ closed that you did not uncheck.
 With `HERDR_SOCKET_PATH` unset the picker says so and draws nothing, because a
 selection it cannot act on is worse than no popup at all.
 
+A `workspace.list` the server refuses is treated the same way, and for the same
+reason. The list is what every row's checked state is read from, so an answer
+that does not arrive is not an empty list of open projects: read as one, every
+row would draw unchecked, nothing would close, and every checked row would be
+opened a second time. The picker reports the refusal and stops instead. It reads
+the list twice, once to draw and once before it acts, and either refusal ends the
+run. An answer carrying no list at all is refused on the same grounds. An answer
+carrying an **empty** list is not a refusal: no projects are open, which is an
+ordinary thing for it to say.
+
 ## How the binary arrives
 
 The plugin is a Rust binary, and there are two ways it gets there: downloaded
