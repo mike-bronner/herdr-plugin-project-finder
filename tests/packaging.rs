@@ -139,6 +139,34 @@ fn the_manifest_and_the_crate_agree_on_the_version() {
 }
 
 #[test]
+fn the_readme_pins_its_install_example_to_the_version_the_manifest_declares() {
+    let parsed = manifest();
+    let version = parsed["version"].as_str().unwrap();
+    let readme = read_repo_file("README.md");
+    let pinned: Vec<&str> = readme
+        .lines()
+        .filter(|line| line.contains("plugin install") && line.contains("--ref"))
+        .map(|line| {
+            line.split_whitespace()
+                .skip_while(|word| *word != "--ref")
+                .nth(1)
+                .unwrap_or_else(|| panic!("an install example names --ref with no tag: {}", line))
+        })
+        .collect();
+
+    assert!(
+        !pinned.is_empty(),
+        "README.md shows no --ref install example, so nothing holds the documented version to the manifest"
+    );
+    for tag in pinned {
+        assert_eq!(
+            tag, version,
+            "the README pins an install to a tag the manifest does not declare; a release tag is the version verbatim, with no v prefix from 0.8.0 on"
+        );
+    }
+}
+
+#[test]
 fn the_shipped_defaults_keep_the_comments_that_are_their_interface() {
     let text = read_repo_file("defaults.toml");
     let comments = text
