@@ -84,8 +84,10 @@ worktrees still works exactly as it did. A repository that is **not** open holds
 nothing, because there is no close for Herdr to refuse, and checking a worktree
 of one never opens it.
 
-A held row is drawn dim, and the line under the heading counts them and says
-what holds them.
+A held row is drawn dim, and says on the row itself what holds it. The note
+stands where that row's `KIND`, `TOUCHED` and `AGENT STATUS` would be, because
+none of the three informs a decision the hold has already taken away. The line
+under the heading counts the held rows as well.
 
 The list is drawn by the plugin itself, with
 [ratatui](https://ratatui.rs) and [nucleo](https://github.com/helix-editor/nucleo)
@@ -233,18 +235,18 @@ Three cases fall back to `workspace.create`, where the row opens with no repo
 recorded: a directory that is no git checkout at all, a worktree `.git` that
 does not carry git's pointer shape, and a Herdr that refuses the call.
 
-An `AGENT STATUS` column shows the agent state of every open project, drawn with
-the same glyph and colour Herdr's own spaces sidebar uses. Both are read from
-`~/.config/herdr/config.toml` rather than assumed: `[ui] status_indicators`
-picks `dots` or `symbols`, and `[theme]` plus any `[theme.custom]` override of
-`green`, `yellow`, `red`, `teal`, or `overlay0` decides the colour. `accent`,
-for the `KIND` column, and `match`, for the characters the filter matched, are
-read the same way, and each falls back to a palette slot no status uses —
-`teal` for the accent, `mauve` for the match. All eighteen built-in themes are
-covered, and under `theme.name = "terminal"` the colours are ANSI indexes, so
-the picker follows your terminal profile exactly as Herdr does. Herdr shows the
-glyph alone; the picker keeps the status word beside it because the filter
-searches it.
+An `AGENT STATUS` column shows the agent state of every open project a hold
+does not cover, drawn with the same glyph and colour Herdr's own spaces sidebar
+uses. Both are read from `~/.config/herdr/config.toml` rather than assumed:
+`[ui] status_indicators` picks `dots` or `symbols`, and `[theme]` plus any
+`[theme.custom]` override of `green`, `yellow`, `red`, `teal`, or `overlay0`
+decides the colour. `accent`, for the `KIND` column, and `match`, for the
+characters the filter matched, are read the same way, and each falls back to a
+palette slot no status uses — `teal` for the accent, `mauve` for the match. All
+eighteen built-in themes are covered, and under `theme.name = "terminal"` the
+colours are ANSI indexes, so the picker follows your terminal profile exactly
+as Herdr does. Herdr shows the glyph alone; the picker keeps the status word
+beside it because the filter searches it.
 
 The palette is a copy, because Herdr keeps its own inside the renderer: there is
 no colour on the socket API and no theme event to subscribe to. So the picker
@@ -295,14 +297,16 @@ match in ANSI bright magenta instead, which stays inside the theme's own ANSI
 vocabulary. Every other mauve in the table is Herdr's own value, and
 `[theme.custom] match` overrules any of them.
 
-Three rows read the marks differently, on purpose. A repository prefix is never
+Four rows read the marks differently, on purpose. A repository prefix is never
 marked, because it is display only and takes no part in the match. A name cut
 with a `…` marks the ellipsis when the match landed in the part that was cut,
 so a row is never left with no mark at all. The `KIND` cell searches on the
 word `worktree` but shows `tree`, so a match on the `work` half has nothing on
-screen to mark and marks nothing. A marked `KIND` or `AGENT STATUS` cell keeps
-its own colour and is told apart by the emphasis alone, so no signal is painted
-over by another.
+screen to mark and marks nothing. A held row draws none of the three cells the
+note takes, so a match in any of them has nothing on screen to mark either. The
+row still answers the filter, and still shows its own name marked. A marked
+`KIND` or `AGENT STATUS` cell keeps its own colour and is told apart by the
+emphasis alone, so no signal is painted over by another.
 
 Pairs well with [herdr-plugin-recent-spaces](https://github.com/mike-bronner/herdr-plugin-recent-spaces),
 which keeps the sidebar in most-recently-used order.

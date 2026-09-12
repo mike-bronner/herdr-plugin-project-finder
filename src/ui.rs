@@ -204,15 +204,20 @@ fn draw_list(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
             let found = picker.highlights(row).cloned().unwrap_or_default();
             let plain = Style::default();
             let hit = plain.fg(ratatui_colour(theme.matched)).patch(emphasis());
+            let dim = Style::default().add_modifier(Modifier::DIM);
+            let mut spans = vec![
+                Span::styled(marker, Style::default().fg(Color::Indexed(2))),
+                Span::styled(cells.repo, dim),
+            ];
+            spans.extend(marked(&cells.name, &found.name, plain, hit));
+            if picker.held(*at) {
+                spans.push(Span::raw(HELD_NOTE));
+                return ListItem::new(Line::from(spans).style(dim));
+            }
             let kind = match entry.kind {
                 Kind::Worktree => Style::default().fg(ratatui_colour(theme.accent)),
                 Kind::Repo => Style::default(),
             };
-            let mut spans = vec![
-                Span::styled(marker, Style::default().fg(Color::Indexed(2))),
-                Span::styled(cells.repo, Style::default().add_modifier(Modifier::DIM)),
-            ];
-            spans.extend(marked(&cells.name, &found.name, plain, hit));
             spans.extend(marked(
                 &cells.kind,
                 &found.kind,
@@ -229,10 +234,6 @@ fn draw_list(frame: &mut Frame, picker: &Picker, theme: &Theme, area: Rect) {
                     style,
                     style.patch(emphasis()),
                 ));
-            }
-            if picker.held(*at) {
-                let dim = Style::default().add_modifier(Modifier::DIM);
-                return ListItem::new(Line::from(spans).style(dim));
             }
             ListItem::new(Line::from(spans))
         })

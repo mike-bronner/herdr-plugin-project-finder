@@ -990,6 +990,101 @@ fn every_held_row_is_counted_on_the_count_line() {
 }
 
 #[test]
+fn a_held_row_says_on_the_row_itself_what_holds_it() {
+    let entries = vec![open_repo("alpha"), open_worktree_of("alpha", "feat-x")];
+    for width in [130u16, 160, 200] {
+        let screen = rendered(&Picker::new(entries.clone()), "", width, 12);
+        assert!(
+            screen[5].contains("alpha"),
+            "row 5 is the held one: {:?}",
+            screen
+        );
+        assert!(
+            screen[5].contains(HELD_NOTE),
+            "the whole note is drawn at {} columns: {:?}",
+            width,
+            screen[5]
+        );
+    }
+}
+
+#[test]
+fn the_note_is_no_wider_than_the_cells_it_stands_in_for() {
+    use pick_project::theme::STATUS_WIDTH;
+
+    let cells = row_cells(&open_repo("alpha"));
+    let room = cells.kind.chars().count() + cells.age.chars().count() + STATUS_WIDTH;
+    assert!(
+        HELD_NOTE.chars().count() <= room,
+        "a held row must not reach further right than the same row unheld: {} > {}",
+        HELD_NOTE.chars().count(),
+        room
+    );
+}
+
+#[test]
+fn the_note_stands_where_a_held_rows_own_cells_would_be() {
+    let entries = vec![open_repo("alpha"), open_worktree_of("alpha", "feat-x")];
+    let screen = rendered(&Picker::new(entries), "", 160, 12);
+    assert_eq!(
+        at(&screen[5], HELD_NOTE),
+        Some(MARKER.chars().count() + LABEL_WIDTH + 1),
+        "the note starts at the KIND column: {:?}",
+        screen[5]
+    );
+    for cell in ["repo", "1m ago", "idle"] {
+        assert!(
+            !screen[5].contains(cell),
+            "the note takes the place of {}: {:?}",
+            cell,
+            screen[5]
+        );
+    }
+}
+
+#[test]
+fn a_row_that_is_not_held_keeps_the_cells_the_note_would_take() {
+    let screen = rendered(&Picker::new(vec![open_repo("alpha")]), "", 160, 12);
+    assert!(!screen[5].contains(HELD_NOTE), "{:?}", screen[5]);
+    for cell in ["repo", "1m ago", "idle"] {
+        assert!(
+            screen[5].contains(cell),
+            "{} survives: {:?}",
+            cell,
+            screen[5]
+        );
+    }
+}
+
+#[test]
+fn a_held_row_still_answers_the_filter_and_still_marks_its_name() {
+    use ratatui::style::Modifier;
+
+    let held = vec![open_repo("alpha"), open_worktree_of("alpha", "feat-x")];
+
+    let mut by_status = Picker::new(held.clone());
+    type_in(&mut by_status, "idle");
+    assert!(by_status.held(0), "alpha is the held row");
+    assert!(
+        shown(&by_status).contains(&"alpha".to_string()),
+        "a status the note took still finds the row: {:?}",
+        shown(&by_status)
+    );
+
+    let mut by_name = Picker::new(held);
+    type_in(&mut by_name, "alph");
+    let cells = drawn_styles(&by_name, 160, 5);
+    let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
+    assert!(text.contains(HELD_NOTE), "row 5 is the held one: {}", text);
+    let start = at(&text, "alph").unwrap();
+    assert!(
+        cells[start].1.add_modifier.contains(Modifier::UNDERLINED),
+        "the name is still marked: {}",
+        text
+    );
+}
+
+#[test]
 fn a_held_row_is_drawn_dim_and_a_free_one_is_not() {
     use ratatui::style::Modifier;
 
@@ -1138,6 +1233,44 @@ fn a_narrow_screen_cuts_the_row_short_rather_than_wrapping_it() {
         "a cut row must not wrap onto the next one: {:?}",
         screen
     );
+}
+
+#[test]
+fn a_narrow_screen_cuts_the_held_note_short_rather_than_wrapping_it() {
+    let entries = vec![open_repo("alpha"), open_worktree_of("alpha", "feat-x")];
+    let screen = rendered(&Picker::new(entries), "", 100, 12);
+    assert!(
+        screen[5].starts_with(&format!("{}alpha", MARKER)),
+        "the label is drawn in full: {:?}",
+        screen[5]
+    );
+    let words: Vec<&str> = HELD_NOTE.split_whitespace().collect();
+    assert!(
+        screen[5].contains(&words[..2].join(" ")),
+        "the words that carry the reason survive the cut: {:?}",
+        screen[5]
+    );
+    assert!(
+        !screen[5].contains(words[words.len() - 1]),
+        "a narrow list pane cuts the note short: {:?}",
+        screen[5]
+    );
+    assert!(
+        !screen
+            .iter()
+            .skip(6)
+            .any(|l| l.contains(words[words.len() - 1])),
+        "a cut note must not wrap onto the rows below: {:?}",
+        screen
+    );
+}
+
+#[test]
+fn a_narrow_screen_still_draws_a_held_row_without_panicking() {
+    let entries = vec![open_repo("alpha"), open_worktree_of("alpha", "feat-x")];
+    for width in [20u16, 40, 200] {
+        rendered(&Picker::new(entries.clone()), "text", width, 12);
+    }
 }
 
 #[test]
