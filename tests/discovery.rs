@@ -7,8 +7,8 @@ use pick_project::config::{
     normpath, worktree_locations, Environment, HerdrConfig, FIXED_WORKTREE_DIRS,
 };
 use pick_project::discover::{
-    debug_line, duplicated_basenames, elide, human_age, label_for, labelled, order_rows,
-    parent_repo, repos, row_kind, touched_at, Counts, Kind,
+    debug_line, elide, human_age, labelled, order_rows, parent_repo, repos, row_kind, tails,
+    touched_at, Counts, Kind,
 };
 use support::*;
 
@@ -719,17 +719,82 @@ fn ages_are_reported_in_the_largest_unit_that_fits() {
     assert_eq!(human_age(100, 100 + 604800), "1w ago");
 }
 
+fn labels(paths: &[&str]) -> Vec<String> {
+    let owned: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    labelled(&owned).into_iter().map(|(l, _)| l).collect()
+}
+
 #[test]
 fn a_duplicated_basename_is_qualified_by_its_parent() {
-    let paths = vec![
-        PathBuf::from("/x/group-a/api"),
-        PathBuf::from("/x/group-b/api"),
-        PathBuf::from("/x/solo"),
-    ];
-    let dupes = duplicated_basenames(&paths);
-    assert_eq!(label_for(&paths[0], &dupes), "group-a/api");
-    assert_eq!(label_for(&paths[1], &dupes), "group-b/api");
-    assert_eq!(label_for(&paths[2], &dupes), "solo");
+    assert_eq!(
+        labels(&["/x/group-a/api", "/x/group-b/api", "/x/solo"]),
+        vec!["group-a/api", "group-b/api", "solo"]
+    );
+}
+
+#[test]
+fn a_parent_that_is_shared_too_is_qualified_further_until_the_labels_differ() {
+    assert_eq!(
+        labels(&[
+            "/x/alpha/worktrees/slug",
+            "/x/beta/worktrees/slug",
+            "/x/gamma/worktrees/slug",
+        ]),
+        vec![
+            "alpha/worktrees/slug",
+            "beta/worktrees/slug",
+            "gamma/worktrees/slug",
+        ]
+    );
+}
+
+#[test]
+fn only_the_paths_that_collide_are_qualified() {
+    assert_eq!(
+        labels(&[
+            "/x/alpha/worktrees/slug",
+            "/x/beta/worktrees/slug",
+            "/x/api"
+        ]),
+        vec!["alpha/worktrees/slug", "beta/worktrees/slug", "api"]
+    );
+}
+
+#[test]
+fn a_path_one_of_the_others_ends_with_is_still_told_apart() {
+    assert_eq!(
+        labels(&["/x/alpha/api", "/alpha/api"]),
+        vec!["x/alpha/api", "/alpha/api"]
+    );
+}
+
+#[test]
+fn every_label_a_run_hands_out_is_its_own() {
+    let listed = labels(&[
+        "/x/alpha/worktrees/slug",
+        "/x/beta/worktrees/slug",
+        "/y/alpha/worktrees/slug",
+        "/x/alpha/slug",
+        "/x/slug",
+    ]);
+    let unique: std::collections::HashSet<&String> = listed.iter().collect();
+    assert_eq!(unique.len(), listed.len(), "{:?}", listed);
+}
+
+#[test]
+fn the_tails_of_a_path_run_from_its_name_up_to_the_whole_of_it() {
+    assert_eq!(
+        tails(&PathBuf::from("/x/group-a/api")),
+        vec!["api", "group-a/api", "x/group-a/api", "/x/group-a/api"]
+    );
+}
+
+#[test]
+fn a_relative_path_is_its_own_last_tail_rather_than_repeating_it() {
+    assert_eq!(
+        tails(&PathBuf::from("group-a/api")),
+        vec!["api", "group-a/api"]
+    );
 }
 
 #[test]

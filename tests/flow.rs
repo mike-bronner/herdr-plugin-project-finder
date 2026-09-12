@@ -719,6 +719,44 @@ fn two_projects_sharing_a_name_are_told_apart_by_their_parent() {
 }
 
 #[test]
+fn worktrees_sharing_a_name_under_containers_sharing_one_are_each_reachable() {
+    let world = World::new();
+    for repo in ["alpha", "beta"] {
+        let root = world.repo(repo);
+        make_worktree(
+            &world.tree.join(&format!("{}/worktrees/slug", repo)),
+            &format!("{}/.git/worktrees/slug", root.to_string_lossy()),
+        );
+    }
+    let stub = Stub::start(Script::default());
+    let run = run_with(&world, &stub, &[], |entries| {
+        Some(entries.iter().map(|e| e.path.clone()).collect())
+    });
+    run.outcome.unwrap();
+
+    let labels: Vec<String> = run.listed.iter().map(|e| e.label.clone()).collect();
+    let named: std::collections::HashSet<&String> = labels.iter().collect();
+    assert_eq!(
+        named.len(),
+        4,
+        "every row is labelled its own: {:?}",
+        labels
+    );
+
+    let opened: std::collections::HashSet<String> = stub
+        .params_for("worktree.open")
+        .iter()
+        .filter_map(|p| p["path"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        opened.len(),
+        4,
+        "a label two rows share leaves one path unreachable: {:?}",
+        opened
+    );
+}
+
+#[test]
 fn the_homebrew_directories_are_put_on_the_path_the_launchd_server_lacks() {
     let bare = Environment::from_pairs(&[("PATH", LAUNCHD_PATH)]);
     let widened = app::with_extra_path(bare);

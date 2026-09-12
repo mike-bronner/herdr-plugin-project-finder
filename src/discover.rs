@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::Workspace;
@@ -222,39 +222,49 @@ pub fn elide(text: &str, width: usize) -> String {
     cut
 }
 
-pub fn label_for(path: &Path, duplicated: &HashSet<String>) -> String {
-    let base = basename(path);
-    if duplicated.contains(&base) {
-        let parent = path.parent().map(basename).unwrap_or_default();
-        format!("{}/{}", parent, base)
-    } else {
-        base
-    }
-}
-
 pub fn basename(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
 }
 
-pub fn duplicated_basenames(paths: &[PathBuf]) -> HashSet<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut dupes: HashSet<String> = HashSet::new();
-    for path in paths {
-        let base = basename(path);
-        if !seen.insert(base.clone()) {
-            dupes.insert(base);
-        }
+pub fn tails(path: &Path) -> Vec<String> {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut ladder: Vec<String> = (1..=parts.len())
+        .map(|take| parts[parts.len() - take..].join("/"))
+        .collect();
+    let whole = path.to_string_lossy().to_string();
+    if ladder.last() != Some(&whole) {
+        ladder.push(whole);
     }
-    dupes
+    ladder
 }
 
 pub fn labelled(paths: &[PathBuf]) -> Vec<(String, PathBuf)> {
-    let dupes = duplicated_basenames(paths);
-    paths
+    let ladders: Vec<Vec<String>> = paths.iter().map(|path| tails(path)).collect();
+    ladders
         .iter()
-        .map(|p| (label_for(p, &dupes), p.clone()))
+        .enumerate()
+        .map(|(at, ladder)| {
+            let label = ladder
+                .iter()
+                .enumerate()
+                .find(|(depth, tail)| {
+                    ladders
+                        .iter()
+                        .enumerate()
+                        .all(|(other, theirs)| other == at || theirs.get(*depth) != Some(*tail))
+                })
+                .map(|(_, tail)| tail.clone())
+                .unwrap_or_else(|| ladder.last().cloned().unwrap_or_default());
+            (label, paths[at].clone())
+        })
         .collect()
 }
 

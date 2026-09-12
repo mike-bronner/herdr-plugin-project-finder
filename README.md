@@ -145,6 +145,17 @@ accent is the cool slot of whichever of the eighteen built-in palettes is in
 force — ANSI cyan under `theme.name = "terminal"`. Nothing is hardcoded, so the
 column belongs to your colour scheme instead of fighting it.
 
+A row is named by as much of the end of its path as it takes to be the only row
+with that name. Usually that is the directory name on its own. Two `api`
+directories under `group-a` and `group-b` are named `group-a/api` and
+`group-b/api`; where those parents share a name as well, the next directory up
+joins in, and so on as far as the whole path. Herdr is handed that name as the
+workspace label, and it is what an open workspace is matched back to its row by,
+so two rows sharing one are two rows the picker cannot tell apart: one of the
+two could never be opened, closed or listed as open at all. Names that grow are
+elided in the `PROJECT` column, from the right, so the part that does the
+telling apart is the part that survives.
+
 A worktree row also names the repository it belongs to in front of the branch:
 `tru-data/feat-x`. The prefix carries the terminal's DIM attribute, so it reads
 as secondary to the branch without claiming a colour of its own. Two worktrees
