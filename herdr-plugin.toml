@@ -1,6 +1,6 @@
 id = "mikebronner.project-finder"
 name = "Project Finder"
-version = "0.9.0"
+version = "0.9.1"
 min_herdr_version = "0.9.0"
 description = "Fuzzy-pick git repos and open them as workspaces"
 
@@ -22,15 +22,18 @@ description = "Fuzzy-pick git repos and open them as workspaces"
 # new information rather than as a regression.
 platforms = ["macos", "linux", "windows"]
 
-# Every entry below is declared twice, because `["sh", ...]` cannot run on
-# Windows and `["powershell", ...]` cannot run anywhere else. Herdr supports
-# per-item `platforms` that override the top-level list, which is what makes one
-# manifest serve both.
+# Every [[build]] and [[startup]] entry is declared twice, because `["sh", ...]`
+# cannot run on Windows and `["powershell", ...]` cannot run anywhere else.
+# Herdr supports per-item `platforms` that override the top-level list, which is
+# what makes one manifest serve both. [[panes]] is the one exception, and the
+# reason it is an exception is measured rather than assumed — see the note above
+# the pane itself.
 #
 # 🔑 The `sh` entry comes first in every pair, deliberately. Whether Herdr
-# filters by platform before resolving is not something anyone here has
-# verified; if it ever took the first entry regardless, the platforms that are
-# actually tested are the ones that would win.
+# filters a build or a startup step by platform before it runs one is not
+# something anyone here has verified; if it ever took the first entry
+# regardless, the platforms that are actually tested are the ones that would
+# win.
 
 # Getting the binary: fetch the one published for this platform, and compile
 # only when no verified binary can be had. Installing therefore needs no Rust
@@ -66,11 +69,22 @@ platforms = ["windows"]
 # leave the old picker running, and a path under target/ would break the moment
 # the profile changed.
 #
-# ⚠️ Both entries carry the id `picker`, so the keybinding stays one line on
-# every platform. Herdr's schema puts `platforms` on a pane exactly as it does
-# on a build step, so filtering first and resolving the id second is the
-# reading that field implies — but nobody here has confirmed it, and a duplicate
-# id is the one thing in this file that could be refused at load.
+# 🚨 One entry, and `platforms` is absent on purpose: on a pane that key does
+# not do what it does on a build step. ✅ Measured against a live Herdr 0.9.0 on
+# 2026-09-13: two [[panes]] entries that share the id `picker` are refused even
+# when their `platforms` lists are disjoint. A pane id has to be unique across
+# every entry, whatever `platforms` says, and that is what makes the doubling
+# above legal and the same doubling here fatal. 0.9.0 shipped the opposite
+# reading, that `platforms` filters first, and so it did not load at all:
+# `manifest unavailable: duplicate pane id 'picker'`. Herdr served its cached
+# 0.3.1 manifest instead, whose pane ran `bin/pick-project` under Python, a file
+# 0.9.0 itself had deleted. The keybinding opened nothing until 0.9.1.
+#
+# ⚠️ Two distinct ids would load, and were weighed and rejected: the keybinding
+# is one line naming `--entrypoint picker`, and a second id makes it
+# platform-dependent for a platform nobody here can test. So this pane runs `sh`
+# everywhere, and `prefix+f` on Windows will not work. No Windows machine has
+# ever run this plugin; bin/launcher.ps1 stays in the tree for the day one does.
 [[panes]]
 id = "picker"
 title = "Find projects to work on"
@@ -78,13 +92,3 @@ placement = "popup"
 width = "85%"
 height = "85%"
 command = ["sh", "bin/launcher"]
-platforms = ["macos", "linux"]
-
-[[panes]]
-id = "picker"
-title = "Find projects to work on"
-placement = "popup"
-width = "85%"
-height = "85%"
-command = ["powershell", "-File", "bin/launcher.ps1"]
-platforms = ["windows"]

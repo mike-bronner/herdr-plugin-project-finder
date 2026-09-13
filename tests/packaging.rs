@@ -52,6 +52,8 @@ fn the_herdr_floor_stays_where_it_was_set() {
 
 const SECTIONS: [&str; 3] = ["build", "startup", "panes"];
 
+const DOUBLED_SECTIONS: [&str; 2] = ["build", "startup"];
+
 fn declared_platforms() -> Vec<String> {
     manifest()["platforms"]
         .as_array()
@@ -105,7 +107,7 @@ fn command_for(section: &str, platform: &str) -> Vec<String> {
 }
 
 #[test]
-fn every_declared_platform_can_run_every_kind_of_entry() {
+fn every_declared_platform_resolves_one_command_for_every_kind_of_entry() {
     for platform in declared_platforms() {
         for section in SECTIONS {
             let command = command_for(section, &platform);
@@ -126,7 +128,7 @@ fn every_declared_platform_can_run_every_kind_of_entry() {
 
 #[test]
 fn the_shell_entry_is_declared_before_the_powershell_one() {
-    for section in SECTIONS {
+    for section in DOUBLED_SECTIONS {
         let all = entries(section);
         let shell = all.iter().position(|e| command_of(e)[0] == "sh");
         let powershell = all.iter().position(|e| command_of(e)[0] == "powershell");
@@ -138,33 +140,76 @@ fn the_shell_entry_is_declared_before_the_powershell_one() {
         };
         assert!(
             shell < powershell,
-            "whether Herdr filters by platform before resolving is unverified; if it ever took \
-             the first entry regardless, the tested platforms have to be the ones that win: {}",
+            "whether Herdr filters a build or a startup step by platform before it runs one is \
+             unverified; if it ever took the first entry regardless, the tested platforms have \
+             to be the ones that win: {}",
             section
         );
     }
 }
 
 #[test]
-fn the_pane_is_dispatched_through_the_shim_not_a_build_artifact() {
-    assert_eq!(command_for("panes", "macos"), vec!["sh", "bin/launcher"]);
+fn the_manifest_declares_exactly_one_pane_so_herdr_will_load_it() {
+    let panes = entries("panes");
     assert_eq!(
-        command_for("panes", "windows"),
-        vec!["powershell", "-File", "bin/launcher.ps1"]
+        panes.len(),
+        1,
+        "measured against a live Herdr 0.9.0: a pane id has to be unique across every entry, \
+         whatever `platforms` says, so a second entry sharing the id is refused with `manifest \
+         unavailable: duplicate pane id` and the whole plugin falls back to the manifest Herdr \
+         last cached — which is how 0.9.0 left the keybinding running a Python file that \
+         release had deleted. Two distinct ids do load, and were weighed and rejected: the \
+         keybinding names one entrypoint. {:?}",
+        panes
     );
 }
 
 #[test]
-fn every_pane_entry_answers_to_the_same_id_so_one_keybinding_serves_every_platform() {
-    let ids: Vec<String> = entries("panes")
-        .iter()
-        .map(|e| e["id"].as_str().unwrap().to_string())
+fn the_pane_is_dispatched_through_the_shim_not_a_build_artifact() {
+    for platform in declared_platforms() {
+        assert_eq!(
+            command_for("panes", &platform),
+            vec!["sh", "bin/launcher"],
+            "one pane answers for every declared platform, and Windows being handed `sh` is \
+             the known cost of that: {}",
+            platform
+        );
+    }
+}
+
+#[test]
+fn the_readme_binds_the_key_to_the_entrypoint_the_manifest_declares() {
+    let declared = entries("panes")[0]["id"].as_str().unwrap().to_string();
+    let readme = read_repo_file("README.md");
+    let named: Vec<String> = readme
+        .lines()
+        .filter(|line| line.contains("--entrypoint"))
+        .map(|line| {
+            line.split_whitespace()
+                .skip_while(|word| *word != "--entrypoint")
+                .nth(1)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a documented command names --entrypoint with no id: {}",
+                        line
+                    )
+                })
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                .to_string()
+        })
         .collect();
+
     assert!(
-        ids.windows(2).all(|pair| pair[0] == pair[1]),
-        "the keybinding names one entrypoint, so every platform's pane has to answer to it: {:?}",
-        ids
+        !named.is_empty(),
+        "README.md documents no --entrypoint, so nothing holds the keybinding to the pane"
     );
+    for entrypoint in named {
+        assert_eq!(
+            entrypoint, declared,
+            "the documented keybinding opens an entrypoint the manifest does not declare, which \
+             Herdr answers with a pane that never opens"
+        );
+    }
 }
 
 #[test]

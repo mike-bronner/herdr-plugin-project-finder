@@ -20,7 +20,7 @@ Pin a particular revision with `--ref`, which is also the surest way to land on
 one that has binaries published:
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.0
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.1
 ```
 
 To work on the plugin instead, clone it and link the checkout:
@@ -427,8 +427,9 @@ Three of the eight files matter to a reader:
   picker running. `--version` is answered **before** that check, because a
   rebuild would replace the very binary the report exists to diagnose.
 - `bin/find-cargo` locates a toolchain, and the `.ps1` files mirror the shell
-  ones for a Windows this plugin does not yet ship (see
-  [requires](#requires)).
+  ones for a Windows nobody here has ever run (see [requires](#requires)).
+  `bin/launcher.ps1` is the one the manifest no longer points at, and
+  [Windows](#windows) says why.
 
 The manifest points Herdr at the shims and never at the build output, so nothing
 breaks when a profile or a path changes.
@@ -926,15 +927,27 @@ reach a lower bar still. PowerShell has no compiler and no CI job, and it is not
 installed on the machine they were written on, so **no `.ps1` file here has ever
 been run or even parsed**. Each one says so in its own header.
 
-Each manifest entry is declared twice, once for `sh` and once for `powershell`,
-using Herdr's per-item `platforms` override. Both `[[panes]]` entries carry the
-id `picker`, so the keybinding stays one line everywhere. Herdr's schema puts
-`platforms` on a pane exactly as it does on a build step, so filtering by
-platform and then resolving the id is the reading that field implies — but that
-is a reading, not a measurement, and a duplicate id is the one thing in that
-file that could be refused at load. The shell entry is declared first in every
-pair on purpose: if Herdr ever took the first match regardless of platform, the
-tested platforms are the ones that would win.
+Each `[[build]]` and `[[startup]]` entry is declared twice, once for `sh` and
+once for `powershell`, using Herdr's per-item `platforms` override. The shell
+entry is declared first in every pair on purpose: if Herdr ever took the first
+match regardless of platform, the tested platforms are the ones that would win.
+
+**`[[panes]]` is declared once, because `platforms` does not mean there what it
+means on a build step.** 0.9.0 doubled the pane too, both entries carrying the
+id `picker` so that the keybinding stayed one line. Herdr 0.9.0 refused the
+whole manifest — `manifest unavailable: duplicate pane id 'picker'` — and served
+its cached copy of 0.3.1 instead, whose pane still ran the Python entry point
+that same release had deleted. `prefix+f` opened nothing at all until 0.9.1.
+
+Measured on 2026-09-13: two pane entries sharing an id are refused even when
+their platform lists are disjoint. A pane id has to be unique across every
+entry, whatever `platforms` says, and that is what makes the doubling legal on a
+build step and fatal here. So the pane is the `sh` one, with no `platforms` key,
+and on Windows it would run `sh bin/launcher`, which will not work there. That
+cost is paid knowingly: a second id would make the keybinding
+platform-dependent for a platform nobody here can test, and no Windows machine
+has ever run this plugin. `bin/launcher.ps1` stays in the tree for the day one
+does.
 
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
 is wanted, not required, and only because it is what the `layout` setting
@@ -984,6 +997,23 @@ The first fails when a file under `bin/` differs from the kit's template or when
 version, and that no release tag sorts above it. Every one of those failures is
 silent in production: the install still works, it just stops using the prebuilt
 binary the whole mechanism exists to deliver.
+
+One check belongs to no automation at all, and skipping it is what let 0.9.0
+ship a manifest Herdr would not load:
+
+```sh
+herdr plugin list --json
+```
+
+A refused manifest fails nothing. The plugin stays listed and keeps serving
+whatever Herdr last cached, with the reason in a `warnings` array beside it — so
+ask the live server before tagging, and read three fields of this plugin's
+entry: `warnings` is absent, `version` is the one `herdr-plugin.toml` declares,
+and the pane's `command` names `bin/launcher`. `cargo test` cannot make that
+call, because CI runs no Herdr and a test that skips itself when the binary is
+absent would be green there for the wrong reason. The suite pins the property
+the refusal turned on instead, in
+`the_manifest_declares_exactly_one_pane_so_herdr_will_load_it`.
 
 The tree is rustfmt-formatted on the tool's defaults, with no `rustfmt.toml` to
 carry: `cargo fmt --check` is expected to pass, and `cargo fmt` is expected to
