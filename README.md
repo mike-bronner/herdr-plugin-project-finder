@@ -20,7 +20,7 @@ Pin a particular revision with `--ref`, which is also the surest way to land on
 one that has binaries published:
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.1
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.2
 ```
 
 To work on the plugin instead, clone it and link the checkout:

@@ -1,6 +1,6 @@
 id = "mikebronner.project-finder"
 name = "Project Finder"
-version = "0.9.1"
+version = "0.9.2"
 min_herdr_version = "0.9.0"
 description = "Fuzzy-pick git repos and open them as workspaces"
 
