@@ -895,7 +895,7 @@ in behaviour rather than a difference in spelling.
 
 **Deciding whether a layout command can be run.** On Unix the picker checks the
 execute bit. Windows has no execute bit, so it checks only that the path is a
-file. `PATHEXT` is not consulted: a bare `agent-layout` will not be found on
+file. `PATHEXT` is not consulted: a bare `launcher` will not be found on
 Windows unless a file with exactly that name is on the `PATH`. Name the
 executable in full, extension included, or give an absolute path.
 

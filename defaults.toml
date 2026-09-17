@@ -26,16 +26,19 @@
 # written down. The picker reads none of them and passes the whole environment
 # through, so a value you export, or write in this plugin's .env, reaches it.
 #
-# Two of its flags are deliberately NOT passed here. --agent-name would take it
+# It names that plugin's bin/launcher and never the binary the launcher runs.
+# The launcher is what every entry in that plugin's own manifest points at: it
+# rebuilds the binary when the checkout is ahead of it, which is what makes an
+# edit made there take effect. Naming the binary would skip that.
+#
+# One of its flags is deliberately NOT passed here. --agent-name would take it
 # off its own dedupe: left off it derives the name from the workspace label and
 # retries as base-2, base-3 when Herdr answers agent_name_taken, and that
 # arbitration is the server's, so it holds across the detached processes the
-# picker fires and against an agent you started by hand. --no-agent would stop
-# it starting the agent at all, which would put a blocking agent start per
-# project back on the critical path of a multi-select.
+# picker fires and against an agent you started by hand.
 #
 # Nothing lays a picked workspace out twice. That plugin also subscribes to
 # worktree events, and its hook exits on two gates before reaching the layout:
 # the event is not worktree.created, and the workspace is not focused, which a
 # workspace the picker opened never is.
-layout = "{plugin:mikebronner.agentic-panes-layout}/bin/agent-layout --workspace {workspace}"
+layout = "{plugin:mikebronner.agentic-panes-layout}/bin/launcher --workspace {workspace}"

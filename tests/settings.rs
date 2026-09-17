@@ -477,13 +477,47 @@ fn an_env_file_beats_the_shipped_default_too() {
     );
 }
 
+fn shipped_plugin_and_command_read_from_the_default_itself() -> (String, String) {
+    use pick_project::layout::{split_command, substitute_plugin};
+    const CHECKOUT: &str = "/x/checkout";
+
+    let layout = shipped().table.layout.expect("the defaults set no layout");
+    let argv = split_command(&layout).expect("the default is not a command line");
+    let first = argv.first().expect("the default is an empty command line");
+    let asked = std::cell::RefCell::new(Vec::new());
+    let (command, missing) = substitute_plugin(first, &|plugin_id| {
+        asked.borrow_mut().push(plugin_id.to_string());
+        Some(CHECKOUT.to_string())
+    });
+    assert!(missing.is_empty(), "{:?}", missing);
+    let asked = asked.into_inner();
+    assert_eq!(asked.len(), 1, "the default names {:?}", asked);
+    let under = command
+        .strip_prefix(&format!("{}/", CHECKOUT))
+        .expect("the default runs a command from outside the checkout it names")
+        .to_string();
+    (asked.into_iter().next().unwrap(), under)
+}
+
+fn sibling_checkout_declaring(plugin_id: &str) -> Option<PathBuf> {
+    std::fs::read_dir(manifest_dir().parent()?)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            let text = std::fs::read_to_string(path.join("herdr-plugin.toml")).ok()?;
+            let declared = text.parse::<toml::Table>().ok()?;
+            (declared.get("id")?.as_str()? == plugin_id).then_some(path)
+        })
+}
+
 #[test]
 fn the_default_still_lays_a_workspace_out_the_way_it_used_to() {
     use pick_project::layout::{resolve_layout, WORKSPACE_TOKEN};
+    let (plugin_id, under) = shipped_plugin_and_command_read_from_the_default_itself();
     let dir = TempDir::new();
-    let tool = dir.dir("panes/bin");
-    let command = tool.join("agent-layout");
-    std::fs::write(&command, "#!/bin/sh\n").unwrap();
+    let checkout = dir.join("panes");
+    let command = dir.write(&format!("panes/{}", under), "#!/bin/sh\n");
     make_executable(&command);
     let asked = std::cell::RefCell::new(Vec::new());
     let env = Environment::from_pairs(&[("PATH", LAUNCHD_PATH), ("HOME", "/private/tmp")]);
@@ -493,11 +527,11 @@ fn the_default_still_lays_a_workspace_out_the_way_it_used_to() {
         &env,
         &|plugin_id| {
             asked.borrow_mut().push(plugin_id.to_string());
-            Some(dir.join("panes").to_string_lossy().to_string())
+            Some(checkout.to_string_lossy().to_string())
         },
     );
     assert_eq!(resolved.warning, None);
-    assert_eq!(asked.into_inner(), vec!["mikebronner.agentic-panes-layout"]);
+    assert_eq!(asked.into_inner(), vec![plugin_id]);
     assert_eq!(
         resolved.argv,
         Some(vec![
@@ -505,6 +539,29 @@ fn the_default_still_lays_a_workspace_out_the_way_it_used_to() {
             "--workspace".to_string(),
             WORKSPACE_TOKEN.to_string()
         ])
+    );
+}
+
+#[test]
+fn the_default_runs_a_command_the_plugin_it_names_really_ships() {
+    use pick_project::layout::which;
+    let (plugin_id, under) = shipped_plugin_and_command_read_from_the_default_itself();
+    let Some(checkout) = sibling_checkout_declaring(&plugin_id) else {
+        println!(
+            "skipped: no {} checkout beside this one, which is what CI sees",
+            plugin_id
+        );
+        return;
+    };
+    let command = checkout.join(&under);
+    let env = Environment::from_pairs(&[("PATH", LAUNCHD_PATH)]);
+    assert_eq!(
+        which(&env, &command.to_string_lossy()),
+        Some(command.clone()),
+        "the default runs {}, which {} does not ship. Every workspace the \
+         picker opens would come up as one bare pane.",
+        under,
+        plugin_id
     );
 }
 
@@ -539,6 +596,7 @@ fn the_source_names_no_plugin_executable_or_flag_of_anothers() {
     for token in [
         "agentic-panes-layout",
         "agent-layout",
+        "bin/launcher",
         "AGENT_LAYOUT",
         "--agent-name",
         "--no-agent",
