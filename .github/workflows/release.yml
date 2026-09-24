@@ -13,7 +13,8 @@ name: Release
 # differently is a 404, a silent fall back to compiling, and nobody finding out.
 #
 # 🚨 The `@` ref and Cargo.toml's two `tag =` pins have to name the same kit.
-# Nothing in the kit's own gates compares them, so tests/packaging.rs does.
+# The kit's release job checks that with `plugin_gate.py kit-pins`, but only
+# after a tag exists. tests/packaging.rs checks it on every push, before that.
 #
 # ⚠️ The tag carries no `v`. The kit's version gate refuses the other form by
 # name, which is what stops the two conventions crossing at the one place that
@@ -31,7 +32,7 @@ permissions:
 
 jobs:
   release:
-    uses: mike-bronner/herdr-plugin-kit/.github/workflows/plugin-release.yml@0.4.1
+    uses: mike-bronner/herdr-plugin-kit/.github/workflows/plugin-release.yml@0.5.1
     # 🚨 Required. A called workflow runs on the caller's permissions and
     # cannot raise its own, so without this the run fails before it starts.
     permissions:

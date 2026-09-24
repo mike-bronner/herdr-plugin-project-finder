@@ -427,8 +427,8 @@ fn every_kit_pin_in_the_repository_names_the_same_tag() {
         named.len(),
         1,
         "a crate pin and a CI pin that disagree check this plugin against one kit and build \
-         it against another, and nothing in the kit's own gates compares the two: {:?} against \
-         the workflow's {}",
+         it against another, and the kit's own kit-pins gate runs only at release: {:?} \
+         against the workflow's {}",
         pins,
         called_kit_tag()
     );
