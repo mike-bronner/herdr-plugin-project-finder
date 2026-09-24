@@ -1,21 +1,28 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
+use herdr_plugin_kit::dialog;
 use herdr_plugin_kit::env::Environment;
+use herdr_plugin_kit::update::{self as kit, CurlReleases, HerdrInstaller};
+use pick_project::api::{self, Client, Socket, PLUGIN_ID};
 use pick_project::app::{self, with_extra_path};
-use pick_project::ui;
 use pick_project::version::{self, Request};
+use pick_project::{ui, update};
 
 fn main() {
     match version::requested(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
         Request::Pick => pick(),
         Request::Report => report(),
+        Request::Dialog => ask(),
+        Request::CheckUpdate => check_update(),
         Request::Refuse(argument) => refuse(&argument),
     }
 }
 
 fn pick() {
     let env = with_extra_path(Environment::from_process());
+    launch_offer(&env);
     let own_root = plugin_root(&env);
     let mut err = std::io::stderr();
 
@@ -24,6 +31,48 @@ fn pick() {
     }) {
         Ok(_) => {}
         Err(fatal) => die(fatal.message()),
+    }
+}
+
+fn launch_offer(env: &Environment) {
+    if let Ok(socket) = Socket::resolve(env) {
+        update::on_launch(
+            &Client::new(socket, PLUGIN_ID),
+            SystemTime::now(),
+            &mut kit::spawn_check_if_due,
+            &mut || {
+                std::env::current_exe()
+                    .map(|me| update::spawn_detached(&me))
+                    .unwrap_or(false)
+            },
+        );
+    }
+}
+
+fn check_update() {
+    let env = with_extra_path(Environment::from_process());
+    let Ok(socket) = Socket::resolve(&env) else {
+        return;
+    };
+    let client = Client::new(socket, PLUGIN_ID);
+    if let Some(note) = update::answer_check(
+        &client,
+        &mut client.clone(),
+        app::herdr_binary(&env).map(HerdrInstaller::at),
+        &CurlReleases::default(),
+        &update::Clock {
+            now: &SystemTime::now,
+            sleep: &std::thread::sleep,
+        },
+    ) {
+        api::notify(&client, &note);
+    }
+}
+
+fn ask() {
+    if let Err(why) = dialog::run(&Environment::from_process()) {
+        let _ = writeln!(std::io::stderr(), "project-finder: {}", why);
+        std::process::exit(1);
     }
 }
 

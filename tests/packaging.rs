@@ -90,11 +90,16 @@ fn runs_on(entry: &toml::Value, platform: &str) -> bool {
     }
 }
 
-fn command_for(section: &str, platform: &str) -> Vec<String> {
-    let matched: Vec<toml::Value> = entries(section)
-        .into_iter()
+fn commands_for(section: &str, platform: &str) -> Vec<Vec<String>> {
+    entries(section)
+        .iter()
         .filter(|entry| runs_on(entry, platform))
-        .collect();
+        .map(command_of)
+        .collect()
+}
+
+fn command_for(section: &str, platform: &str) -> Vec<String> {
+    let matched = commands_for(section, platform);
     assert_eq!(
         matched.len(),
         1,
@@ -103,25 +108,60 @@ fn command_for(section: &str, platform: &str) -> Vec<String> {
         matched.len(),
         platform
     );
+    matched[0].clone()
+}
+
+fn pane_command(id: &str) -> Vec<String> {
+    let matched: Vec<toml::Value> = entries("panes")
+        .into_iter()
+        .filter(|entry| entry["id"].as_str() == Some(id))
+        .collect();
+    assert_eq!(
+        matched.len(),
+        1,
+        "the manifest declares no single pane `{}`",
+        id
+    );
     command_of(&matched[0])
 }
 
+fn strings(of: &[&[&str]]) -> Vec<Vec<String>> {
+    of.iter()
+        .map(|command| command.iter().map(|a| a.to_string()).collect())
+        .collect()
+}
+
 #[test]
-fn every_declared_platform_resolves_one_command_for_every_kind_of_entry() {
+fn every_declared_platform_resolves_each_entry_to_one_command() {
     for platform in declared_platforms() {
         for section in SECTIONS {
-            let command = command_for(section, &platform);
+            let commands = commands_for(section, &platform);
             assert!(
-                !command.is_empty(),
+                !commands.is_empty(),
                 "{} on {} names no command",
                 section,
                 platform
             );
-            assert!(
-                !command.iter().any(|a| a.contains("target/")),
-                "a build-artifact path breaks the moment the profile changes: {:?}",
-                command
-            );
+            for (at, command) in commands.iter().enumerate() {
+                assert!(
+                    !command.is_empty(),
+                    "{} on {} names an empty command",
+                    section,
+                    platform
+                );
+                assert!(
+                    !command.iter().any(|a| a.contains("target/")),
+                    "a build-artifact path breaks the moment the profile changes: {:?}",
+                    command
+                );
+                assert!(
+                    !commands[..at].contains(command),
+                    "{} runs {:?} twice on {}",
+                    section,
+                    command,
+                    platform
+                );
+            }
         }
     }
 }
@@ -129,52 +169,70 @@ fn every_declared_platform_resolves_one_command_for_every_kind_of_entry() {
 #[test]
 fn the_shell_entry_is_declared_before_the_powershell_one() {
     for section in DOUBLED_SECTIONS {
-        let all = entries(section);
-        let shell = all.iter().position(|e| command_of(e)[0] == "sh");
-        let powershell = all.iter().position(|e| command_of(e)[0] == "powershell");
-        let (Some(shell), Some(powershell)) = (shell, powershell) else {
-            panic!(
-                "{} does not declare both a shell and a PowerShell entry",
-                section
-            );
-        };
-        assert!(
+        let all: Vec<Vec<String>> = entries(section).iter().map(command_of).collect();
+        let shells: Vec<usize> = (0..all.len()).filter(|&at| all[at][0] == "sh").collect();
+        assert!(!shells.is_empty(), "{} declares no shell entry", section);
+        for shell in shells {
+            let mut twin = vec![
+                "powershell".to_string(),
+                "-File".to_string(),
+                format!("{}.ps1", all[shell][1]),
+            ];
+            twin.extend(all[shell][2..].iter().cloned());
+            let Some(powershell) = all.iter().position(|command| *command == twin) else {
+                panic!(
+                    "{} does not declare a PowerShell twin of {:?}",
+                    section, all[shell]
+                );
+            };
+            assert!(
             shell < powershell,
             "whether Herdr filters a build or a startup step by platform before it runs one is \
              unverified; if it ever took the first entry regardless, the tested platforms have \
-             to be the ones that win: {}",
-            section
-        );
+             to be the ones that win: {} {:?}",
+                section,
+                all[shell]
+            );
+        }
     }
 }
 
 #[test]
-fn the_manifest_declares_exactly_one_pane_so_herdr_will_load_it() {
+fn the_manifest_declares_the_picker_and_the_dialog_under_distinct_ids() {
     let panes = entries("panes");
+    let ids: Vec<&str> = panes.iter().filter_map(|p| p["id"].as_str()).collect();
     assert_eq!(
-        panes.len(),
-        1,
+        ids,
+        vec!["picker", herdr_plugin_kit::dialog::ENTRYPOINT],
         "measured against a live Herdr 0.9.0: a pane id has to be unique across every entry, \
          whatever `platforms` says, so a second entry sharing the id is refused with `manifest \
          unavailable: duplicate pane id` and the whole plugin falls back to the manifest Herdr \
          last cached — which is how 0.9.0 left the keybinding running a Python file that \
-         release had deleted. Two distinct ids do load, and were weighed and rejected: the \
-         keybinding names one entrypoint. {:?}",
+         release had deleted. So the picker is declared once, under the id the keybinding \
+         names, and the update dialog under the id herdr-plugin-kit opens it by. {:?}",
         panes
     );
 }
 
 #[test]
-fn the_pane_is_dispatched_through_the_shim_not_a_build_artifact() {
+fn the_panes_are_dispatched_through_the_shim_not_a_build_artifact() {
     for platform in declared_platforms() {
         assert_eq!(
-            command_for("panes", &platform),
-            vec!["sh", "bin/launcher"],
-            "one pane answers for every declared platform, and Windows being handed `sh` is \
+            commands_for("panes", &platform),
+            strings(&[
+                &["sh", "bin/launcher"],
+                &["sh", "bin/launcher", pick_project::version::DIALOG_FLAG],
+            ]),
+            "each pane answers for every declared platform, and Windows being handed `sh` is \
              the known cost of that: {}",
             platform
         );
     }
+    assert_eq!(pane_command("picker"), vec!["sh", "bin/launcher"]);
+    assert_eq!(
+        pane_command(herdr_plugin_kit::dialog::ENTRYPOINT),
+        vec!["sh", "bin/launcher", "--dialog"]
+    );
 }
 
 #[test]
@@ -227,6 +285,7 @@ fn the_manifest_declares_a_build_step_so_a_github_install_shows_one() {
 #[test]
 fn the_manifest_rebuilds_at_server_start_so_a_linked_plugin_is_covered_too() {
     assert_eq!(command_for("startup", "macos"), vec!["sh", "bin/build"]);
+    assert_eq!(command_for("startup", "linux"), vec!["sh", "bin/build"]);
     assert_eq!(
         command_for("startup", "windows"),
         vec!["powershell", "-File", "bin/build.ps1"]
@@ -235,8 +294,7 @@ fn the_manifest_rebuilds_at_server_start_so_a_linked_plugin_is_covered_too() {
 
 #[test]
 fn the_startup_step_never_carries_the_install_flag_that_skips_asking_herdr() {
-    for platform in declared_platforms() {
-        let command = command_for("startup", &platform);
+    for command in entries("startup").iter().map(command_of) {
         assert!(
             !command.iter().any(|a| a == "--install"),
             "the flag says this is a GitHub install by construction, which is false on a \
@@ -278,6 +336,7 @@ fn the_readme_pins_its_install_example_to_the_version_the_manifest_declares() {
                 .nth(1)
                 .unwrap_or_else(|| panic!("an install example names --ref with no tag: {}", line))
         })
+        .filter(|tag| *tag != "<tag>")
         .collect();
 
     assert!(
@@ -290,6 +349,26 @@ fn the_readme_pins_its_install_example_to_the_version_the_manifest_declares() {
             "the README pins an install to a tag the manifest does not declare; a release tag is the version verbatim, with no v prefix from 0.8.0 on"
         );
     }
+}
+
+#[test]
+fn the_readme_names_the_command_an_accepted_update_really_runs() {
+    let command = format!(
+        "herdr {}",
+        herdr_plugin_kit::update::install_arguments(
+            "mike-bronner",
+            "herdr-plugin-project-finder",
+            "<tag>"
+        )
+        .join(" ")
+    );
+    assert!(
+        read_repo_file("README.md")
+            .lines()
+            .any(|line| line.trim() == command),
+        "README.md does not show the command the update offer runs: {}",
+        command
+    );
 }
 
 #[test]
@@ -347,6 +426,7 @@ fn every_rust_source_file_is_covered_by_that_guard() {
         "picker.rs",
         "ui.rs",
         "version.rs",
+        "update.rs",
         "mod.rs",
     ] {
         assert!(
@@ -451,11 +531,12 @@ fn the_release_workflow_calls_the_kits_own_and_grants_the_write_it_needs() {
 }
 
 #[test]
-fn the_ci_workflow_runs_both_conformance_gates_against_a_full_clone() {
+fn the_ci_workflow_runs_every_conformance_gate_against_a_full_clone() {
     let text = workflow("ci.yml");
     for gate in [
         "kit/templates/sync_bin.py . --check",
         "kit/tools/plugin_gate.py versions .",
+        "kit/tools/plugin_gate.py pin-block .",
     ] {
         assert!(text.contains(gate), "ci.yml never runs `{}`", gate);
     }

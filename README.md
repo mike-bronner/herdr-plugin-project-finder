@@ -20,7 +20,7 @@ Pin a particular revision with `--ref`, which is also the surest way to land on
 one that has binaries published:
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.3
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.4
 ```
 
 To work on the plugin instead, clone it and link the checkout:
@@ -61,6 +61,52 @@ unreliable.
 Either way the picker refreshes itself on the next run — by download where the
 checkout matches a release, by compiling otherwise. See
 [how the binary arrives](#how-the-binary-arrives).
+
+#### The update offer
+
+A GitHub install asks GitHub for the newest release at most once a day, and
+offers it in a dialog when it is newer than what you have. Enter updates, and
+Escape answers "not now". Updating runs this command, and takes effect from the
+next launch:
+
+```sh
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref <tag> --yes
+```
+
+`--ref` keeps the install pinned, and moves the pin to the new tag. `--yes`
+answers Herdr's own confirmation, because the update runs in a background
+process with nobody there to confirm it. The dialog is where you said yes.
+
+- **When it checks.** At a picker launch, once 24 hours have passed since the
+  last attempt. The check runs as a separate, detached process, so the picker
+  never waits on the network.
+- **When it asks.** Usually as soon as the check finds a newer release. Herdr
+  allows one popup at a time, and the picker is usually still open then, so the
+  dialog tries again every two seconds until the slot is free. After ten
+  minutes it stops. The release is saved, and the next picker launch offers it
+  again.
+- **When an attempt fails.** Any other failure to open the dialog is not
+  retried. The saved release is offered at the next picker launch instead.
+  That launch starts the offer in the background and does not wait for it.
+- **When it asks again.** A declined or dismissed offer stays quiet for 24 hours.
+  The plugin stops waiting for an answer after two minutes. Silence is not a
+  "no", so the release is offered again at the next picker launch.
+- **Only one question at a time.** The process that asks first holds a claim
+  file, `offering`, from before the dialog opens until it has recorded the
+  answer. Any other offer process that finds the claim exits without asking,
+  and a picker launch starts no offer while it is held. A claim whose process
+  has died, or one older than 30 minutes, is taken over, so a crash never
+  silences the offer for good.
+- **What it never touches.** A linked checkout. Herdr reports it as a local
+  install, and the plugin then checks nothing, writes nothing and offers
+  nothing. Updating it stays a `git pull`.
+
+⚠️ The dialog appears without warning, so an Enter meant for another pane can
+answer it. That trade was made on purpose, to keep the kit's default keys.
+
+The check keeps its state in `.project-finder-update/` inside the installed
+plugin's own directory. An update replaces that directory, and every missing
+file reads as "check again" or "never offered".
 
 ## What it does
 
@@ -343,6 +389,11 @@ runtime failure rather than a compile error.
 | `worktree.open` | `worktree_opened` |
 | `plugin.list` | `plugin_list` |
 | `notification.show` | `notification_show` |
+
+The [update offer](#the-update-offer) runs in its own process and adds one
+call, `plugin.pane.open`, made by herdr-plugin-kit's dialog. The kit owns that
+call and its measured answer: a popup answers `ok`, and a second popup answers
+the error `ui_busy`. The offer's install lookup uses `plugin.list`, as above.
 
 `workspace.focus` is the one nobody would guess. `ok` is wrong, and there is no
 `workspace_focused` result type to reach for either: that name is an event Herdr
@@ -932,8 +983,8 @@ once for `powershell`, using Herdr's per-item `platforms` override. The shell
 entry is declared first in every pair on purpose: if Herdr ever took the first
 match regardless of platform, the tested platforms are the ones that would win.
 
-**`[[panes]]` is declared once, because `platforms` does not mean there what it
-means on a build step.** 0.9.0 doubled the pane too, both entries carrying the
+**Each `[[panes]]` entry is declared once, because `platforms` does not mean
+there what it means on a build step.** 0.9.0 doubled the pane too, both entries carrying the
 id `picker` so that the keybinding stayed one line. Herdr 0.9.0 refused the
 whole manifest — `manifest unavailable: duplicate pane id 'picker'` — and served
 its cached copy of 0.3.1 instead, whose pane still ran the Python entry point
@@ -942,12 +993,13 @@ that same release had deleted. `prefix+f` opened nothing at all until 0.9.1.
 Measured on 2026-09-13: two pane entries sharing an id are refused even when
 their platform lists are disjoint. A pane id has to be unique across every
 entry, whatever `platforms` says, and that is what makes the doubling legal on a
-build step and fatal here. So the pane is the `sh` one, with no `platforms` key,
-and on Windows it would run `sh bin/launcher`, which will not work there. That
-cost is paid knowingly: a second id would make the keybinding
+build step and fatal here. So the picker is the `sh` one, with no `platforms`
+key, and on Windows it would run `sh bin/launcher`, which will not work there.
+That cost is paid knowingly: a second id would make the keybinding
 platform-dependent for a platform nobody here can test, and no Windows machine
-has ever run this plugin. `bin/launcher.ps1` stays in the tree for the day one
-does.
+has ever run this plugin. The update dialog, the second pane, has its own id
+`dialog` and the same `sh` limit. `bin/launcher.ps1` stays in the tree for the
+day one does.
 
 [agentic-panes-layout](https://github.com/mikebronner/herdr-plugin-agentic-panes-layout)
 is wanted, not required, and only because it is what the `layout` setting
@@ -982,12 +1034,13 @@ refuses it. Nothing is mocked in process except the terminal itself, which
 `cargo test` cannot give it; the screen is checked instead by rendering into
 ratatui's test backend and reading the cells back.
 
-Two more checks run in CI and are not part of `cargo test`, because both need
-herdr-plugin-kit checked out at the tag this plugin pins:
+Three more checks run in CI and are not part of `cargo test`, because all three
+need herdr-plugin-kit checked out at the tag this plugin pins:
 
 ```sh
 python3 ../herdr-plugin-kit/templates/sync_bin.py . --check
 python3 ../herdr-plugin-kit/tools/plugin_gate.py versions .
+python3 ../herdr-plugin-kit/tools/plugin_gate.py pin-block .
 ```
 
 The first fails when a file under `bin/` differs from the kit's template or when
@@ -996,7 +1049,9 @@ The first fails when a file under `bin/` differs from the kit's template or when
 `Cargo.toml` state the same version, that no `v`-prefixed tag names that
 version, and that no release tag sorts above it. Every one of those failures is
 silent in production: the install still works, it just stops using the prebuilt
-binary the whole mechanism exists to deliver.
+binary the whole mechanism exists to deliver. The third fails when the kit pin
+resolution block in `.github/workflows/ci.yml` differs from the kit's own copy,
+comments included. Copy that block whole from the kit at every pin bump.
 
 One check belongs to no automation at all, and skipping it is what let 0.9.0
 ship a manifest Herdr would not load:
@@ -1009,11 +1064,11 @@ A refused manifest fails nothing. The plugin stays listed and keeps serving
 whatever Herdr last cached, with the reason in a `warnings` array beside it — so
 ask the live server before tagging, and read three fields of this plugin's
 entry: `warnings` is absent, `version` is the one `herdr-plugin.toml` declares,
-and the pane's `command` names `bin/launcher`. `cargo test` cannot make that
+and each pane's `command` names `bin/launcher`. `cargo test` cannot make that
 call, because CI runs no Herdr and a test that skips itself when the binary is
 absent would be green there for the wrong reason. The suite pins the property
 the refusal turned on instead, in
-`the_manifest_declares_exactly_one_pane_so_herdr_will_load_it`.
+`the_manifest_declares_the_picker_and_the_dialog_under_distinct_ids`.
 
 The tree is rustfmt-formatted on the tool's defaults, with no `rustfmt.toml` to
 carry: `cargo fmt --check` is expected to pass, and `cargo fmt` is expected to

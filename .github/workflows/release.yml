@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   release:
-    uses: mike-bronner/herdr-plugin-kit/.github/workflows/plugin-release.yml@0.5.1
+    uses: mike-bronner/herdr-plugin-kit/.github/workflows/plugin-release.yml@0.5.2
     # 🚨 Required. A called workflow runs on the caller's permissions and
     # cannot raise its own, so without this the run fails before it starts.
     permissions:

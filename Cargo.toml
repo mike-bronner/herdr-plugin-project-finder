@@ -1,6 +1,6 @@
 [package]
 name = "pick-project"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 license = "MIT"
 description = "Fuzzy-pick git repos and open them as Herdr workspaces"
@@ -27,7 +27,7 @@ crossterm = "0.29.0"
 # CI pin that disagree check this plugin against one kit and build it against
 # another. The kit's release job compares them only once a tag is cut, so
 # tests/packaging.rs compares them on every push.
-herdr-plugin-kit = { git = "https://github.com/mike-bronner/herdr-plugin-kit", tag = "0.5.1" }
+herdr-plugin-kit = { git = "https://github.com/mike-bronner/herdr-plugin-kit", tag = "0.5.2", features = ["dialog", "update"] }
 nucleo = "0.5.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache", "underline-color"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,7 +39,7 @@ toml = "0.8"
 # build and belongs in no shipped binary, which is why the kit ships it as a
 # second crate that depends on nothing.
 [build-dependencies]
-herdr-plugin-kit-build = { git = "https://github.com/mike-bronner/herdr-plugin-kit", tag = "0.5.1" }
+herdr-plugin-kit-build = { git = "https://github.com/mike-bronner/herdr-plugin-kit", tag = "0.5.2" }
 
 [dev-dependencies]
 libc = "0.2"

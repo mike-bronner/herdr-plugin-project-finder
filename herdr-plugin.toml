@@ -1,6 +1,6 @@
 id = "mikebronner.project-finder"
 name = "Project Finder"
-version = "0.9.3"
+version = "0.9.4"
 min_herdr_version = "0.9.0"
 description = "Fuzzy-pick git repos and open them as workspaces"
 
@@ -92,3 +92,15 @@ placement = "popup"
 width = "85%"
 height = "85%"
 command = ["sh", "bin/launcher"]
+
+# The update offer's dialog. herdr-plugin-kit opens it as a popup under the id
+# `dialog`, which the kit fixes, and this pane draws it and writes the answer
+# back. It is a second pane under a distinct id, so the one-id rule above is
+# not in play: the picker keeps `picker`, and the keybinding still names it.
+[[panes]]
+id = "dialog"
+title = "Project Finder update"
+placement = "popup"
+width = "60%"
+height = "40%"
+command = ["sh", "bin/launcher", "--dialog"]
