@@ -1,5 +1,7 @@
 mod support;
 
+use std::path::Path;
+
 use serde_json::json;
 
 use herdr_plugin_kit::api::client::Socket;
@@ -13,6 +15,10 @@ use support::*;
 
 fn ids(of: &[String]) -> Vec<&str> {
     of.iter().map(String::as_str).collect()
+}
+
+fn rows(of: &[&str]) -> Vec<String> {
+    of.iter().map(|label| label.to_string()).collect()
 }
 
 #[test]
@@ -97,30 +103,45 @@ fn a_workspace_row_with_no_agent_status_refuses_the_answer_rather_than_guessing_
 #[test]
 fn deselected_workspaces_close_new_ones_are_created_and_the_rest_are_untouched() {
     let open = vec![open("a", "w1"), open("b", "w2")];
-    let steps = plan(&["b".to_string(), "c".to_string()], &open);
+    let steps = plan(&rows(&["b", "c"]), &rows(&["a", "b", "c"]), &open);
     assert_eq!(labels(&steps.to_close), vec!["a"]);
     assert_eq!(steps.to_create, vec!["c"]);
 }
 
 #[test]
 fn an_empty_selection_closes_everything() {
-    let open = vec![open("a", "w1"), open("stray", "w2")];
-    let steps = plan(&[], &open);
-    assert_eq!(labels(&steps.to_close), vec!["a", "stray"]);
+    let open = vec![open("a", "w1"), open("b", "w2")];
+    let steps = plan(&[], &rows(&["a", "b"]), &open);
+    assert_eq!(labels(&steps.to_close), vec!["a", "b"]);
     assert!(steps.to_create.is_empty());
 }
 
 #[test]
 fn an_unchanged_selection_is_a_noop() {
-    let steps = plan(&["a".to_string()], &[open("a", "w1")]);
+    let steps = plan(&rows(&["a"]), &rows(&["a"]), &[open("a", "w1")]);
     assert!(steps.to_close.is_empty());
+    assert!(steps.to_create.is_empty());
+}
+
+#[test]
+fn an_open_workspace_that_was_never_offered_as_a_row_is_never_closed() {
+    let open = vec![open("a", "w1"), open("mike", "w2"), open("~", "w3")];
+    let steps = plan(&[], &rows(&["a"]), &open);
+    assert_eq!(labels(&steps.to_close), vec!["a"]);
+}
+
+#[test]
+fn an_unchecked_row_closes_while_an_open_workspace_beside_it_that_is_no_row_stays() {
+    let open = vec![open("stray", "w1"), open("a", "w2"), open("b", "w3")];
+    let steps = plan(&rows(&["b"]), &rows(&["a", "b"]), &open);
+    assert_eq!(labels(&steps.to_close), vec!["a"]);
     assert!(steps.to_create.is_empty());
 }
 
 #[test]
 fn a_repository_closes_after_the_worktrees_that_belong_to_it() {
     let open = vec![open("alpha", "w1"), open_worktree("feat-x", "w2")];
-    let steps = plan(&[], &open);
+    let steps = plan(&[], &rows(&["alpha", "feat-x"]), &open);
     assert_eq!(labels(&steps.to_close), vec!["feat-x", "alpha"]);
 }
 
@@ -132,7 +153,7 @@ fn repositories_and_worktrees_each_keep_the_order_the_server_listed_them_in() {
         open("beta", "w3"),
         open_worktree("feat-y", "w4"),
     ];
-    let steps = plan(&[], &open);
+    let steps = plan(&[], &rows(&["alpha", "feat-x", "beta", "feat-y"]), &open);
     assert_eq!(
         labels(&steps.to_close),
         vec!["feat-x", "feat-y", "alpha", "beta"]
@@ -142,15 +163,44 @@ fn repositories_and_worktrees_each_keep_the_order_the_server_listed_them_in() {
 #[test]
 fn a_worktree_closes_on_its_own_when_its_repository_stays_checked() {
     let open = vec![open("alpha", "w1"), open_worktree("feat-x", "w2")];
-    let steps = plan(&["alpha".to_string()], &open);
+    let steps = plan(&rows(&["alpha"]), &rows(&["alpha", "feat-x"]), &open);
     assert_eq!(labels(&steps.to_close), vec!["feat-x"]);
 }
 
 #[test]
 fn a_repository_stays_in_the_close_set_when_a_worktree_of_its_stays_checked() {
     let open = vec![open("alpha", "w1"), open_worktree("feat-x", "w2")];
-    let steps = plan(&["feat-x".to_string()], &open);
+    let steps = plan(&rows(&["feat-x"]), &rows(&["alpha", "feat-x"]), &open);
     assert_eq!(labels(&steps.to_close), vec!["alpha"]);
+}
+
+#[test]
+fn every_workspace_with_a_pane_at_the_directory_is_named_once() {
+    let stub = Stub::start(Script::default().panes(vec![
+        pane_in("w1", "/home/someone"),
+        pane_in("w2", "/home/someone/project"),
+        pane_in("w1", "/home/someone/"),
+        pane_in("w3", "/home/someone"),
+    ]));
+    let found = api::workspaces_at(&stub.client(), Path::new("/home/someone")).unwrap();
+    assert_eq!(found, vec!["w1", "w3"]);
+    assert_eq!(stub.params_for("pane.list"), vec![json!({})]);
+}
+
+#[test]
+fn a_pane_with_no_directory_marks_nothing() {
+    let mut bare = pane_in("w1", "/x");
+    bare.as_object_mut().unwrap().remove("cwd");
+    let stub = Stub::start(Script::default().panes(vec![bare]));
+    let found = api::workspaces_at(&stub.client(), Path::new("/x")).unwrap();
+    assert!(found.is_empty());
+}
+
+#[test]
+fn pane_list_refuses_a_result_that_is_not_a_pane_list() {
+    let stub = Stub::start(Script::default().answering("pane.list", json!({"type": "ok"})));
+    let refused = api::workspaces_at(&stub.client(), Path::new("/x")).unwrap_err();
+    assert!(refused.to_string().contains("pane_list"), "{}", refused);
 }
 
 #[test]

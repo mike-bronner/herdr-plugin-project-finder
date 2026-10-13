@@ -46,6 +46,10 @@ impl World {
         env_for(stub, self.tree.path(), &pairs)
     }
 
+    fn home(&self) -> String {
+        self.tree.path().to_string_lossy().to_string()
+    }
+
     fn own_root(&self) -> &Path {
         self.own.path()
     }
@@ -296,6 +300,124 @@ fn a_home_label_of_your_own_is_the_one_held_back() {
     let run = run_choosing(&world, &stub, &["alpha"], &[]);
     assert!(run.outcome.is_ok());
     assert!(closed_ids(&stub).is_empty());
+}
+
+#[test]
+fn a_home_label_that_is_also_a_row_is_still_never_closed() {
+    let world = World::new();
+    world.repo("alpha");
+    world.repo("beta");
+    let stub = Stub::start(
+        Script::default().open(vec![workspace("alpha", "home1"), workspace("beta", "w1")]),
+    );
+    world.configure("[picker]\nhome = \"alpha\"\n");
+    let run = run_choosing(&world, &stub, &[], &[]);
+    assert!(run.outcome.is_ok());
+    assert_eq!(closed_ids(&stub), vec!["w1"]);
+}
+
+#[test]
+fn an_open_workspace_that_was_never_a_row_is_never_closed_whatever_its_label() {
+    let world = World::new();
+    world.repo("alpha");
+    let stub = Stub::start(Script::default().open(vec![
+        workspace("mike", "home1"),
+        workspace("stray", "w2"),
+        workspace("alpha", "w1"),
+    ]));
+    let run = run_choosing(&world, &stub, &[], &[]);
+    assert_eq!(run.outcome.unwrap().closed, vec!["w1"]);
+    assert_eq!(closed_ids(&stub), vec!["w1"]);
+}
+
+#[test]
+fn a_row_whose_workspace_sits_in_the_home_directory_is_never_closed() {
+    let world = World::new();
+    world.repo("alpha");
+    world.repo("beta");
+    let stub = Stub::start(
+        Script::default()
+            .open(vec![workspace("alpha", "home1"), workspace("beta", "w1")])
+            .panes(vec![
+                pane_in("home1", &world.home()),
+                pane_in("w1", &world.repo("beta").to_string_lossy()),
+            ]),
+    );
+    let run = run_choosing(&world, &stub, &[], &[]);
+    assert_eq!(run.outcome.unwrap().closed, vec!["w1"]);
+    assert_eq!(closed_ids(&stub), vec!["w1"]);
+}
+
+#[test]
+fn a_foreground_process_in_the_home_directory_also_marks_home() {
+    let world = World::new();
+    world.repo("alpha");
+    let mut pane = pane_in("home1", "/nowhere");
+    pane["foreground_cwd"] = json!(format!("{}/", world.home()));
+    let stub = Stub::start(
+        Script::default()
+            .open(vec![workspace("alpha", "home1")])
+            .panes(vec![pane]),
+    );
+    run_choosing(&world, &stub, &[], &[]);
+    assert!(closed_ids(&stub).is_empty());
+}
+
+#[test]
+fn a_pane_list_the_server_refuses_closes_and_opens_nothing() {
+    let world = World::new();
+    world.repo("alpha");
+    world.repo("beta");
+    let stub = Stub::start(
+        Script::default()
+            .open(vec![workspace("alpha", "w1")])
+            .failing("pane.list", "server_not_running"),
+    );
+    let run = run_choosing(&world, &stub, &["beta"], &[]);
+    match run.outcome {
+        Err(Fatal::NoServer(message)) => {
+            assert!(message.contains("server_not_running"), "{}", message)
+        }
+        other => panic!("{:?}", other),
+    }
+    assert!(stub.changing().is_empty(), "{:?}", stub.changing());
+}
+
+#[test]
+fn a_run_with_nothing_to_close_never_asks_for_panes() {
+    let world = World::new();
+    world.repo("alpha");
+    world.repo("beta");
+    let stub = Stub::start(
+        Script::default()
+            .open(vec![workspace("alpha", "w1")])
+            .failing("pane.list", "server_not_running"),
+    );
+    let run = run_choosing(&world, &stub, &["alpha", "beta"], &[]);
+    assert!(run.outcome.is_ok());
+    assert!(stub.params_for("pane.list").is_empty());
+    assert_eq!(created_labels(&stub), vec!["beta"]);
+}
+
+#[test]
+fn closing_the_focused_workspace_skips_a_home_held_back_by_directory_for_a_survivor() {
+    let world = World::new();
+    world.repo("alpha");
+    world.repo("beta");
+    world.repo("gamma");
+    let stub = Stub::start(
+        Script::default()
+            .open(vec![
+                workspace("gamma", "home1"),
+                workspace_with("alpha", "w1", true, "idle"),
+                workspace("beta", "w2"),
+            ])
+            .panes(vec![pane_in("home1", &world.home())]),
+    );
+    let run = run_choosing(&world, &stub, &["beta"], &[]);
+    let outcome = run.outcome.unwrap();
+    assert_eq!(outcome.closed, vec!["w1"]);
+    assert_eq!(outcome.focused.as_deref(), Some("w2"));
 }
 
 #[test]

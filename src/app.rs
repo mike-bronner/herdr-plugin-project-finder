@@ -181,8 +181,20 @@ pub fn run(
         .filter_map(|p| label_of.get(p).cloned())
         .collect();
 
+    let offered: Vec<String> = path_of.keys().cloned().collect();
     let (home, open_ws) = api::open_workspaces(&client, &home).map_err(unlistable)?;
-    let steps = plan(&selected, &open_ws);
+    let mut steps = plan(&selected, &offered, &open_ws);
+    if !steps.to_close.is_empty() {
+        let at_home = api::workspaces_at(&client, &env.home()).map_err(|why| {
+            Fatal::NoServer(format!(
+                "the picker cannot tell which workspace is home: {}",
+                why
+            ))
+        })?;
+        steps
+            .to_close
+            .retain(|w| !at_home.contains(&w.workspace_id));
+    }
 
     let mut closed: Vec<String> = Vec::new();
     for workspace in &steps.to_close {

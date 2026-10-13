@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use herdr_plugin_kit::api::generated::{
-    EmptyParams, NotificationShowAnswer, NotificationShowParams, OkAnswer, PluginListAnswer,
-    PluginListParams, RequestMethod, WorkspaceCloseParams, WorkspaceCreateParams,
-    WorkspaceCreatedAnswer, WorkspaceInfo, WorkspaceInfoAnswer, WorkspaceListAnswer,
-    WorkspaceTarget, WorktreeOpenParams, WorktreeOpenedAnswer,
+    EmptyParams, NotificationShowAnswer, NotificationShowParams, OkAnswer, PaneListAnswer,
+    PaneListParams, PluginListAnswer, PluginListParams, RequestMethod, WorkspaceCloseParams,
+    WorkspaceCreateParams, WorkspaceCreatedAnswer, WorkspaceInfo, WorkspaceInfoAnswer,
+    WorkspaceListAnswer, WorkspaceTarget, WorktreeOpenParams, WorktreeOpenedAnswer,
 };
 
 pub use herdr_plugin_kit::api::client::{CallError, Client, Socket};
@@ -37,6 +38,25 @@ pub fn open_workspaces(
         Some(at) => Ok((Some(listed.remove(at)), listed)),
         None => Ok((None, listed)),
     }
+}
+
+pub fn workspaces_at(client: &Client, dir: &Path) -> Result<Vec<String>, CallError> {
+    let panes = client
+        .call::<PaneListAnswer>(RequestMethod::PaneList(PaneListParams {
+            workspace_id: None,
+        }))?
+        .panes;
+    let mut ids: Vec<String> = Vec::new();
+    for pane in panes {
+        let at_dir = [&pane.cwd, &pane.foreground_cwd]
+            .into_iter()
+            .flatten()
+            .any(|cwd| Path::new(cwd) == dir);
+        if at_dir && !ids.contains(&pane.workspace_id) {
+            ids.push(pane.workspace_id);
+        }
+    }
+    Ok(ids)
 }
 
 pub fn worktree_open(

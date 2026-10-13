@@ -20,7 +20,7 @@ Pin a particular revision with `--ref`, which is also the surest way to land on
 one that has binaries published:
 
 ```sh
-herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.4
+herdr plugin install mike-bronner/herdr-plugin-project-finder --ref 0.9.5
 ```
 
 To work on the plugin instead, clone it and link the checkout:
@@ -115,8 +115,9 @@ under your home folder (`HERDR_PICKER_ROOT` to point it elsewhere), plus the
 linked worktrees belonging to those repos. Open workspaces are listed first and
 pre-checked, so what is checked is exactly what is loaded.
 On Enter the selection becomes the truth: unchecked open projects are closed,
-newly checked ones are opened, and an empty selection closes everything except
-the home workspace. Esc changes nothing.
+and newly checked ones are opened. Only a workspace the picker listed as a row
+can close, so an empty selection closes every listed project and leaves every
+other workspace alone. Esc changes nothing.
 
 Unchecked worktrees close before the repositories they belong to. A repository
 and its worktrees therefore all close in one pass, rather than a level at a
@@ -181,7 +182,8 @@ it installed, a picked project still opens as one bare pane, and the picker
 raises one Herdr notification for the whole run saying why.
 
 The home workspace (label `~`, `HERDR_PICKER_HOME` to override) is never
-listed and never closed.
+listed and never closed. A workspace with a pane in your home directory is never
+closed either, whatever its label, so home stays open when its label changes.
 
 A `KIND` column marks each row `repo` or `tree`, so a linked git worktree is
 recognisable at a glance. Four characters say both words, which leaves the room
@@ -374,10 +376,11 @@ else is refused rather than read. The picker opens no handshake of its own —
 Herdr's `ping` exists and reports the server's protocol number, and a one-shot
 popup has nothing useful to do with the answer.
 
-The picker makes seven calls, and **each one names the single result type it
+The picker makes eight calls, and **each one names the single result type it
 expects**. Herdr's schema declares no link between a method and the result that
-answers it, so every pairing below was measured against a live Herdr 0.9.0 on
-2026-09-12. A name that looks obvious is a guess, and a wrong guess is a
+answers it, so every pairing below was measured against a live Herdr: the
+first seven against 0.9.0 on 2026-09-12, and `pane.list` against 0.9.3 on
+2026-10-09. A name that looks obvious is a guess, and a wrong guess is a
 runtime failure rather than a compile error.
 
 | Call | Answers with |
@@ -389,6 +392,7 @@ runtime failure rather than a compile error.
 | `worktree.open` | `worktree_opened` |
 | `plugin.list` | `plugin_list` |
 | `notification.show` | `notification_show` |
+| `pane.list` | `pane_list` |
 
 The [update offer](#the-update-offer) runs in its own process and adds one
 call, `plugin.pane.open`, made by herdr-plugin-kit's dialog. The kit owns that

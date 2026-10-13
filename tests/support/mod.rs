@@ -130,6 +130,12 @@ fn pane_of(workspace_id: &str) -> Value {
            "focused": true, "revision": 1})
 }
 
+pub fn pane_in(workspace_id: &str, cwd: &str) -> Value {
+    let mut pane = pane_of(workspace_id);
+    pane["cwd"] = json!(cwd);
+    pane
+}
+
 fn tab_of(workspace_id: &str) -> Value {
     json!({"tab_id": "t1", "workspace_id": workspace_id, "agent_status": "idle",
            "focused": true, "label": "1", "number": 1, "pane_count": 1})
@@ -147,6 +153,7 @@ pub fn open_worktree(label: &str, id: &str) -> WorkspaceInfo {
 #[derive(Clone, Default)]
 pub struct Script {
     pub workspaces: Vec<Value>,
+    pub panes: Vec<Value>,
     pub plugins: Vec<Value>,
     pub fail: Vec<(String, String)>,
     pub fail_at: Vec<(String, String, u32)>,
@@ -157,6 +164,11 @@ pub struct Script {
 impl Script {
     pub fn open(mut self, workspaces: Vec<Value>) -> Script {
         self.workspaces = workspaces;
+        self
+    }
+
+    pub fn panes(mut self, panes: Vec<Value>) -> Script {
+        self.panes = panes;
         self
     }
 
@@ -423,6 +435,7 @@ fn answer_for(
             ok(json!({"type": "workspace_info",
                       "workspace": focused_row(script, &target)}))
         }
+        "pane.list" => ok(json!({"type": "pane_list", "panes": script.panes})),
         "plugin.list" => ok(json!({"type": "plugin_list", "plugins": script.plugins})),
         "notification.show" => {
             ok(json!({"type": "notification_show", "shown": true, "reason": "shown"}))

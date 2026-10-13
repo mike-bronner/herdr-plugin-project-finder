@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "pick-project"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "crossterm",
  "herdr-plugin-kit",
