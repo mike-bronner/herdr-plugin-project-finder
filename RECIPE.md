@@ -4,6 +4,8 @@ A popup that lists every git repository up to three levels under a root folder, 
 
 ![Project Finder](preview.png)
 
+The preview shows the popup with six made-up projects: three checked and open, with blocked, working and done agents, `repo` and `tree` rows, and two rows on a remote machine named `devbox`. It is an illustration, not a screen capture.
+
 ## What you see
 
 - **A popup** at the top of the window, 40px down, 780px wide, as tall as its content and at most 80% of the window high, on the theme's `popover` color, with 16px padding and 10px between its parts. Text is 13px in the layout's UI font.

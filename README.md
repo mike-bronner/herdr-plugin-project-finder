@@ -3,10 +3,19 @@
 Fuzzy-pick git repos and open them as workspaces in
 [Herdr](https://herdr.dev), the agent-aware terminal multiplexer.
 
-This repo holds two builds of the picker. The Herdr TUI plugin is described
-from [Install](#install) on. The Herdr desktop app does not load TUI plugins, so
-the same picker also ships as an app mod in `mods/project-finder/`: see
-[the Herdr app mod](#the-herdr-app-mod).
+This repo holds two builds of the picker:
+
+- **The Herdr TUI plugin**, described from [Install](#install) on.
+- **The Herdr desktop app mod** in `mods/project-finder/`, because the app does
+  not load TUI plugins. It is a popup that lists the git repos and worktrees on
+  this computer and on every remote machine connected to the app, with a
+  `MACHINE` column. Enter makes the checked rows the open spaces, and the
+  `agent` setting can start an agent in each new space. The popup keeps the
+  last list, shows it at once on the next open, and refreshes it machine by
+  machine. Open it from the command palette or with `cmd-shift-o`. See
+  [the Herdr app mod](#the-herdr-app-mod).
+
+![Project Finder](preview.png)
 
 ## Install
 
@@ -1034,6 +1043,13 @@ The Herdr desktop app runs its terminals on herdr-core and loads JavaScript
 mods, not TUI plugins. `mods/project-finder/` is the picker as an app mod. It
 lists the same rows, with the same names, kinds and order, and Enter makes the
 selection the truth in the same way. `RECIPE.md` describes it in full.
+`RECIPE.md`, `keys.json` and `preview.png` are there to share the mod on
+<https://herdr.dev/mods>.
+
+The preview at the top of this README shows the popup with six made-up
+projects: three checked and open, with blocked, working and done agents, `repo`
+and `tree` rows, and two rows on a remote machine named `devbox`. It is an
+illustration, not a screen capture.
 
 ### Install the app mod
 
@@ -1161,6 +1177,9 @@ herdr-app check mods/project-finder
 The remote tests stand in for herdr-core with an `exec` that runs each
 command on this computer against a folder that plays the remote machine's
 home.
+
+CI runs these tests on Node 24 in its `App mod tests` job, beside the Rust
+suite, with `node --test 'tests/app-mod/*.test.mjs'`.
 
 The check writes `jsconfig.json` and `gpui-kit.d.ts` into the mod folder.
 `.gitignore` keeps them out of the repo.
