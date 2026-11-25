@@ -3,6 +3,11 @@
 Fuzzy-pick git repos and open them as workspaces in
 [Herdr](https://herdr.dev), the agent-aware terminal multiplexer.
 
+This repo holds two builds of the picker. The Herdr TUI plugin is described
+from [Install](#install) on. The Herdr desktop app does not load TUI plugins, so
+the same picker also ships as an app mod in `mods/project-finder/`: see
+[the Herdr app mod](#the-herdr-app-mod).
+
 ## Install
 
 ```sh
@@ -209,7 +214,7 @@ elided in the `PROJECT` column, from the right, so the part that does the
 telling apart is the part that survives.
 
 A worktree row also names the repository it belongs to in front of the branch:
-`tru-data/feat-x`. The prefix carries the terminal's DIM attribute, so it reads
+`sky-mill/feat-x`. The prefix carries the terminal's DIM attribute, so it reads
 as secondary to the branch without claiming a colour of its own. Two worktrees
 called `main` under different repositories are told apart by it, and the picker
 sorts open workspaces first and then by touch time, so a worktree can sit far
@@ -1022,6 +1027,94 @@ project-finder: install Rust with `curl --proto '=https' --tlsv1.2 -sSf
 https://sh.rustup.rs | sh`, then run `cargo build --release` in
 /path/to/herdr-plugin-project-finder
 ```
+
+## The Herdr app mod
+
+The Herdr desktop app runs its terminals on herdr-core and loads JavaScript
+mods, not TUI plugins. `mods/project-finder/` is the picker as an app mod. It
+lists the same rows, with the same names, kinds and order, and Enter makes the
+selection the truth in the same way. `RECIPE.md` describes it in full.
+
+### Install the app mod
+
+Your Herdr agent can install it for you: give it this repo's address. To do it
+yourself, first make sure `~/.config/herdr-app/mods/project-finder` does not
+exist yet. Then run:
+
+```sh
+git clone https://github.com/mike-bronner/herdr-plugin-project-finder.git
+cp -R herdr-plugin-project-finder/mods/project-finder ~/.config/herdr-app/mods/project-finder
+herdr-app check ~/.config/herdr-app/mods/project-finder
+```
+
+Keep the folder name `project-finder`, because the mod reads its settings from
+its own `mod.json` there.
+
+The mod runs `find`, `sh`, `stat`, `awk` and `test` on this computer to find the
+projects. It reads only the root, the worktree folders, its own `mod.json` and
+the app's `settings.json`, and it reaches no network.
+
+### Open it
+
+- From the command palette: **Find projects**.
+- From a key: add the binding in this repo's `keys.json` to your own
+  `~/.config/herdr-app/keys.json`. It binds `cmd-shift-o` to
+  `mod.open:project-finder`. Pick another key if you use that one.
+
+### Use it
+
+The popup works like the TUI picker. Open projects come first and are already
+checked. Type to filter, `Tab` to check or uncheck, `Ctrl-A` and `Ctrl-D` for
+every row the filter left, `Enter` to apply, `Esc` to change nothing. On Enter,
+unchecked open projects close, worktrees before their repositories, and newly
+checked ones open as spaces in their folders. A held repository and the `~`
+space follow the same rules as in the TUI.
+
+Three things differ, because the app works differently:
+
+- **A project is open** when a space's first terminal is inside its folder.
+  Spaces are matched by folder, not by name, and new spaces stay unnamed so
+  they follow their folder and nest under their repository.
+- **Worktree folders** come from the app's `worktrees.directory` in
+  `~/.config/herdr-app/settings.json`, not from the TUI's config. Without that
+  setting, the app's default `~/.herdr/worktrees` is searched.
+- **A new space** is a plain shell in the project folder, or an agent when you
+  set one. The TUI's layout command and its update offer have no app version.
+
+### Configure the app mod
+
+Edit the `settings` object in the installed
+`~/.config/herdr-app/mods/project-finder/mod.json`. The app reloads the mod on
+save.
+
+```json
+"settings": { "root": "~/Developer", "agent": ["claude"] }
+```
+
+- `root`: where to look for git repos, three levels deep. An absolute path or
+  one that starts with `~`. Default `~`. A folder that does not exist falls
+  back to home.
+- `agent`: the program each new space starts in its first tab, as a list of
+  words, such as `["claude"]` or `["codex"]`. Default `null`, a plain shell.
+
+A setting of the wrong type is shown at the top of the popup, and Enter then
+changes nothing. A reinstall that copies the folder again resets the settings.
+
+### Test the app mod
+
+The discovery and picker logic lives in `discover.js` and `picker.js`, which
+import nothing from Herdr, so node runs them. The discovery tests build real
+folders and run the same `find` and `sh` commands the mod runs. They repeat the
+cases of the Rust suite's `tests/discovery.rs`, apart from its debug line,
+which the mod does not have.
+
+```sh
+node --test tests/app-mod/discover.test.mjs tests/app-mod/picker.test.mjs
+herdr-app check mods/project-finder
+```
+
+The check writes `jsconfig.json` and `gpui-kit.d.ts` into the mod folder.
+`.gitignore` keeps them out of the repo.
 
 ## Tests
 

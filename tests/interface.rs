@@ -748,16 +748,16 @@ fn the_haystack_keeps_the_whole_word_worktree_even_though_the_column_says_tree()
 
 #[test]
 fn a_worktree_row_says_which_repository_it_belongs_to() {
-    let row = row_prefix(&worktree_of("tru-data", "feat-x"));
-    assert!(row.starts_with("tru-data/feat-x"), "{}", row);
+    let row = row_prefix(&worktree_of("sky-mill", "feat-x"));
+    assert!(row.starts_with("sky-mill/feat-x"), "{}", row);
 }
 
 #[test]
 fn the_repository_is_a_prefix_of_its_own_and_the_branch_stands_apart_from_it() {
-    let cells = row_cells(&worktree_of("tru-data", "feat-x"));
-    assert_eq!(cells.repo, "tru-data/");
+    let cells = row_cells(&worktree_of("sky-mill", "feat-x"));
+    assert_eq!(cells.repo, "sky-mill/");
     assert!(cells.name.starts_with("feat-x"), "{}", cells.name);
-    assert!(!cells.name.contains("tru-data"), "{}", cells.name);
+    assert!(!cells.name.contains("sky-mill"), "{}", cells.name);
 }
 
 #[test]
@@ -770,17 +770,17 @@ fn a_repository_row_carries_no_prefix_at_all() {
 #[test]
 fn a_prefixed_row_is_exactly_as_wide_as_an_unprefixed_one() {
     let plain = row_prefix(&entry("feat-x", Kind::Worktree, "3m ago", None, false));
-    let prefixed = row_prefix(&worktree_of("tru-data", "feat-x"));
-    let long = row_prefix(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    let prefixed = row_prefix(&worktree_of("sky-mill", "feat-x"));
+    let long = row_prefix(&worktree_of("copper-kettle-brewing", "fix-cache-gaps"));
     assert_eq!(plain.chars().count(), prefixed.chars().count());
     assert_eq!(plain.chars().count(), long.chars().count());
 }
 
 #[test]
 fn a_prefix_too_long_for_the_row_is_cut_at_its_end_and_the_branch_survives_whole() {
-    let row = row_prefix(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    let row = row_prefix(&worktree_of("copper-kettle-brewing", "fix-cache-gaps"));
     assert!(
-        row.starts_with("laravel-model-cach…/fix-cache-gaps"),
+        row.starts_with("copper-kettle-brew…/fix-cache-gaps"),
         "{}",
         row
     );
@@ -792,7 +792,7 @@ fn a_prefix_too_long_for_the_row_is_cut_at_its_end_and_the_branch_survives_whole
 
 #[test]
 fn a_cut_prefix_keeps_the_separator_after_the_mark_so_the_branch_still_stands_apart() {
-    let cells = row_cells(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
+    let cells = row_cells(&worktree_of("copper-kettle-brewing", "fix-cache-gaps"));
     assert!(cells.repo.ends_with("…/"), "{}", cells.repo);
     assert_eq!(cells.repo.matches('…').count(), 1, "{}", cells.repo);
     assert!(cells.name.starts_with("fix-cache-gaps"), "{}", cells.name);
@@ -800,15 +800,15 @@ fn a_cut_prefix_keeps_the_separator_after_the_mark_so_the_branch_still_stands_ap
 
 #[test]
 fn a_cut_prefix_keeps_the_head_of_the_repository_name_rather_than_its_tail() {
-    let cells = row_cells(&worktree_of("laravel-model-caching", "fix-cache-gaps"));
-    assert!(cells.repo.starts_with("laravel-model-"), "{}", cells.repo);
-    assert!(!cells.repo.contains("caching"), "{}", cells.repo);
+    let cells = row_cells(&worktree_of("copper-kettle-brewing", "fix-cache-gaps"));
+    assert!(cells.repo.starts_with("copper-kettle-"), "{}", cells.repo);
+    assert!(!cells.repo.contains("brewing"), "{}", cells.repo);
 }
 
 #[test]
 fn a_prefix_with_one_column_to_spend_is_the_mark_alone() {
     let branch = "b".repeat(LABEL_WIDTH - 1);
-    let cells = row_cells(&worktree_of("tru-data", &branch));
+    let cells = row_cells(&worktree_of("sky-mill", &branch));
     assert_eq!(cells.repo, "…");
     assert!(cells.name.starts_with(&branch), "{}", cells.name);
 }
@@ -822,7 +822,7 @@ fn a_multibyte_repository_name_is_cut_by_character_not_by_byte() {
 
 #[test]
 fn the_kind_cell_stands_on_its_own_so_it_can_be_styled_apart_from_the_row() {
-    let tree = row_cells(&worktree_of("tru-data", "feat-x"));
+    let tree = row_cells(&worktree_of("sky-mill", "feat-x"));
     let repo = row_cells(&entry("alpha", Kind::Repo, "3m ago", None, false));
     assert_eq!(tree.kind, "tree");
     assert_eq!(repo.kind, "repo");
@@ -833,7 +833,7 @@ fn the_kind_cell_stands_on_its_own_so_it_can_be_styled_apart_from_the_row() {
 #[test]
 fn a_branch_that_fills_the_label_leaves_the_prefix_no_room_rather_than_losing_a_character() {
     let branch = "b".repeat(LABEL_WIDTH);
-    let row = row_prefix(&worktree_of("tru-data", &branch));
+    let row = row_prefix(&worktree_of("sky-mill", &branch));
     assert!(row.starts_with(&branch), "{}", row);
     assert!(!row.contains('…'), "{}", row);
 }
@@ -841,7 +841,7 @@ fn a_branch_that_fills_the_label_leaves_the_prefix_no_room_rather_than_losing_a_
 #[test]
 fn a_branch_longer_than_the_label_is_still_cut_from_the_right() {
     let branch = "b".repeat(LABEL_WIDTH + 10);
-    let row = row_prefix(&worktree_of("tru-data", &branch));
+    let row = row_prefix(&worktree_of("sky-mill", &branch));
     assert!(
         row.starts_with(&format!("{}…", "b".repeat(LABEL_WIDTH - 1))),
         "{}",
@@ -852,16 +852,16 @@ fn a_branch_longer_than_the_label_is_still_cut_from_the_right() {
 #[test]
 fn the_repository_prefix_is_never_matched_on_because_it_is_only_drawn() {
     let rows = vec![
-        worktree_of("tru-data", "feat-x"),
+        worktree_of("sky-mill", "feat-x"),
         entry("other", Kind::Repo, "1m ago", None, false),
     ];
     assert!(
-        !rows[0].haystack().contains("tru-data"),
+        !rows[0].haystack().contains("sky-mill"),
         "{}",
         rows[0].haystack()
     );
     let mut picker = Picker::new(rows);
-    type_in(&mut picker, "tru-data");
+    type_in(&mut picker, "sky-mill");
     assert!(shown(&picker).is_empty(), "{:?}", shown(&picker));
 }
 
@@ -1132,11 +1132,11 @@ fn drawn_styles(picker: &Picker, width: u16, row: u16) -> Vec<(String, ratatui::
 fn the_drawn_row_leads_with_the_repository_and_dims_it_against_the_branch() {
     use ratatui::style::Modifier;
 
-    let picker = Picker::new(vec![worktree_of("tru-data", "feat-x")]);
+    let picker = Picker::new(vec![worktree_of("sky-mill", "feat-x")]);
     let cells = drawn_styles(&picker, 160, 5);
     let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
-    assert!(text.trim_start().starts_with("tru-data/feat-x"), "{}", text);
-    let prefix_at = text.find("tru-data").unwrap();
+    assert!(text.trim_start().starts_with("sky-mill/feat-x"), "{}", text);
+    let prefix_at = text.find("sky-mill").unwrap();
     let branch_at = text.find("feat-x").unwrap();
     assert!(cells[prefix_at].1.add_modifier.contains(Modifier::DIM));
     assert!(cells[prefix_at + 8].1.add_modifier.contains(Modifier::DIM));
@@ -1145,10 +1145,10 @@ fn the_drawn_row_leads_with_the_repository_and_dims_it_against_the_branch() {
 
 #[test]
 fn the_repository_prefix_is_dimmed_by_the_modifier_rather_than_by_a_palette_colour() {
-    let picker = Picker::new(vec![worktree_of("tru-data", "feat-x")]);
+    let picker = Picker::new(vec![worktree_of("sky-mill", "feat-x")]);
     let cells = drawn_styles(&picker, 160, 5);
     let text: String = cells.iter().map(|(s, _)| s.as_str()).collect();
-    let prefix_at = text.find("tru-data").unwrap();
+    let prefix_at = text.find("sky-mill").unwrap();
     assert_eq!(cells[prefix_at].1.fg, Some(ratatui::style::Color::Reset));
 }
 
@@ -1161,7 +1161,7 @@ fn a_worktree_kind_cell_is_drawn_in_the_accent_and_a_repository_one_is_left_alon
     let theme = resolve_theme(&HerdrConfig::default(), &|_| false);
     let accent = ratatui_colour(theme.accent);
     let tree = drawn_styles(
-        &Picker::new(vec![worktree_of("tru-data", "feat-x")]),
+        &Picker::new(vec![worktree_of("sky-mill", "feat-x")]),
         160,
         5,
     );

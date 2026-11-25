@@ -123,6 +123,19 @@ jobs:
       - name: Lint with warnings denied
         run: cargo clippy --all-targets --locked -- -D warnings
 
+  app-mod:
+    name: App mod tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.20.0
+
+      - name: Run the app mod tests
+        run: node --test 'tests/app-mod/*.test.mjs'
+
   build:
     name: ${{ matrix.platform }}
     needs: kit-gates

@@ -3,3 +3,7 @@
 
 # The kit's developer override: its presence forces a source build.
 /BUILD_FROM_SOURCE
+
+# Written by `herdr-app check` into the app mod folder; never shipped.
+/mods/project-finder/jsconfig.json
+/mods/project-finder/*.d.ts
