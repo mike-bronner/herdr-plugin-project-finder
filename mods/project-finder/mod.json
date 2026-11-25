@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "title": "Project Finder",
+  "overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 780, "height": 0.8 },
+  "palette": [
+    { "title": "Find projects", "command": "mod.open", "args": { "name": "project-finder" }, "words": "projects repositories repos worktrees open close" }
+  ],
+  "settings": { "root": "~", "agent": null }
+}
