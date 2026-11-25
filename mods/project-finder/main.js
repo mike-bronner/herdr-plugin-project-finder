@@ -1,8 +1,8 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle, Scrollbar } from "gpui-base";
-import { spaces, panes, run, exec, home, appHome, theme, props, closeOverlay, readTextFile, notify, checking } from "herdr";
-import { discover } from "./discover.js";
-import { HELD_NOTE, KIND_CELL, ROW_HEIGHT, applySelection, buildEntries, filtered, held, heldCount, listHeight, nameMarks, openSpaces, readSettings, rowCells, setAll, toggle } from "./picker.js";
+import { spaces, panes, machines, run, exec, home, appHome, theme, props, closeOverlay, readTextFile, notify, checking } from "herdr";
+import { HELD_NOTE, KIND_CELL, ROW_HEIGHT, applySelection, discoverAll, filtered, held, heldCount, listHeight, machineCell, nameMarks, openSpaces, rowCells, searchPlan, setAll, skipNote, toggle } from "./picker.js";
+import { CACHE_KEY, cacheText, cachedView, mergeResult, readCache, refreshed } from "./cache.js";
 
 const NAME = "project-finder";
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -15,6 +15,10 @@ export default class ProjectFinder extends View {
     this.query = "";
     this.error = "";
     this.problems = [];
+    this.notes = [];
+    this.homes = {};
+    this.records = [];
+    this.refreshing = false;
     this.applying = false;
     this.inputFocused = true;
     this.input = InputState.new({ placeholder: "filter projects" });
@@ -37,35 +41,61 @@ export default class ProjectFinder extends View {
     cx.timer.after(600, () => this.input.focus());
     cx.spawn(async (cx) => {
       try {
-        await this.load();
+        await this.load(cx);
       } catch (error) {
         this.error = String(error?.message ?? error);
       }
+      this.refreshing = false;
       cx.notify();
       this.input.focus();
     });
   }
 
-  async load() {
-    const userHome = home();
+  async load(cx) {
     const [modJson, appSettings] = await Promise.all([
       readTextFile(`${appHome()}/mods/${NAME}/mod.json`).catch(() => null),
       readTextFile(`${appHome()}/settings.json`).catch(() => undefined),
     ]);
-    const settings = readSettings(modJson, appSettings, userHome);
-    this.problems = settings.problems;
-    this.agent = settings.agent;
-    const isDir = await exec("test", ["-d", settings.root]).then((r) => r.code === 0, () => false);
-    this.root = isDir ? settings.root : userHome;
-    const { rows } = await discover({ root: this.root, dirs: settings.dirs, roots: settings.roots }, (command, args) => exec(command, args, { timeout: 120_000 }));
-    if (!rows.length) {
-      this.error = `No git repositories found under ${this.root}`;
-      this.entries = [];
-      return;
+    const listed = machines();
+    const setup = { machines: listed, modJson, appSettings, home: home() };
+    const plan = searchPlan(setup);
+    this.problems = plan.problems;
+    this.agent = plan.agent;
+    this.notes = plan.notes;
+    this.records = readCache(localStorage.getItem(CACHE_KEY), listed) ?? [];
+    const cached = this.records.length > 0;
+    if (cached) {
+      this.refreshing = true;
+      this.show(listed);
+      cx.notify();
     }
-    const open = openSpaces(spaces(), panes(), rows.map((r) => r.path));
-    this.entries = buildEntries(rows, open, Math.floor(Date.now() / 1000));
-    this.refilter();
+    const failures = [];
+    const found = await discoverAll(setup, exec, (result) => {
+      if (result.failed !== undefined) failures.push(skipNote(result.machine, result.failed));
+      else {
+        this.records = mergeResult(this.records, result);
+        localStorage.setItem(CACHE_KEY, cacheText(this.records));
+      }
+      this.notes = [...plan.notes, ...failures];
+      if (cached) {
+        this.show(listed);
+        cx.notify();
+      }
+    });
+    this.refreshing = false;
+    this.notes = found.notes;
+    this.show(listed);
+    if (!this.entries.length && found.searched.length) this.error = `No git repositories found under ${found.searched.join(", ")}`;
+  }
+
+  show(listed) {
+    const { rows, homes } = cachedView(this.records, listed);
+    this.homes = homes;
+    const next = refreshed(this, rows, openSpaces(spaces(), panes(), rows), Math.floor(Date.now() / 1000), this.query);
+    this.entries = next.entries;
+    this.shown = next.shown;
+    this.at = next.at;
+    this.scroll.scroll_to_item(this.at);
   }
 
   refilter() {
@@ -96,7 +126,7 @@ export default class ProjectFinder extends View {
       return;
     }
     this.applying = true;
-    const state = { entries: this.entries, spaces: spaces(), panes: panes(), home: home(), agent: this.agent };
+    const state = { entries: this.entries, spaces: spaces(), panes: panes(), home: home(), homes: this.homes, agent: this.agent };
     this.close();
     const refused = applySelection(state, run);
     if (refused.length) notify({ title: "Project Finder", body: refused.join("\n"), level: "warning" });
@@ -167,6 +197,7 @@ export default class ProjectFinder extends View {
       })
       .child(div().w(14).flex_none().text_color(t.accent).child(entry.selected ? "✓" : ""))
       .child(this.name(t, entry, shownRow.marks))
+      .child(div().w(96).flex_none().text_color(t.dim).child(machineCell(entry)))
       .when(isHeld, (el) => el.child(div().w(240).flex_none().text_size(12).text_color(t.dim).child(HELD_NOTE)))
       .when(!isHeld, (el) =>
         el
@@ -200,6 +231,7 @@ export default class ProjectFinder extends View {
           .items_center()
           .gap(8)
           .child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Projects"))
+          .when(this.refreshing, (el) => el.child(h_flex().gap(4).text_size(11).text_color(t.dim).child(div().frames(SPINNER, 90)).child("refreshing")))
           .child(div().text_size(11).text_color(t.dim).child(summary))
           .child(div().id("pf-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => this.close()).child("Esc")),
       )
@@ -207,6 +239,7 @@ export default class ProjectFinder extends View {
         Input.new(this.input).h(32).flex_none().px(10).items_center().rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground),
       )
       .when(this.problems.length > 0, (el) => el.children(this.problems.map((p) => div().text_color(t.blocked).child(`Setting: ${p}`))))
+      .when(this.notes.length > 0, (el) => el.children(this.notes.map((n) => div().text_color(t.muted).child(n))))
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
       .when(this.entries === undefined && !this.error, (el) => el.child(h_flex().gap(6).text_color(t.muted).child(div().frames(SPINNER, 90)).child("Finding projects…")))
       .when(entries.length > 0, (el) =>
@@ -215,6 +248,7 @@ export default class ProjectFinder extends View {
             h_flex().px(10).gap(10).text_size(11).text_color(t.dim)
               .child(div().w(14).flex_none())
               .child(heading("PROJECT"))
+              .child(heading("MACHINE", 96))
               .child(heading("KIND", 40))
               .child(heading("TOUCHED", 72))
               .child(heading("AGENT STATUS", 112)),
@@ -237,12 +271,11 @@ export default class ProjectFinder extends View {
           ),
       )
       .child(
-        v_flex()
-          .items_end()
+        h_flex()
+          .justify_center()
           .text_size(11)
           .text_color(t.dim)
-          .child("↵ apply · tab toggle · ctrl-a all · ctrl-d none · esc cancel")
-          .child("checked = open · unchecked open projects close on ↵"),
+          .child("↵ apply: checked open, unchecked close · tab toggle · ctrl-a all · ctrl-d none · esc cancel"),
       );
   }
 }

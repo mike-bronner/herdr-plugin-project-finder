@@ -1050,9 +1050,11 @@ herdr-app check ~/.config/herdr-app/mods/project-finder
 Keep the folder name `project-finder`, because the mod reads its settings from
 its own `mod.json` there.
 
-The mod runs `find`, `sh`, `stat`, `awk` and `test` on this computer to find the
-projects. It reads only the root, the worktree folders, its own `mod.json` and
-the app's `settings.json`, and it reaches no network.
+The mod runs `find`, `sh`, `stat`, `awk` and `test` to find the projects, on
+this computer and, through herdr-core, on every remote machine connected to the
+app. It reads only each machine's root and worktree folders, its own `mod.json`
+and the app's `settings.json`. It reaches no network apart from the app's own
+connections to those machines.
 
 ### Open it
 
@@ -1070,14 +1072,54 @@ unchecked open projects close, worktrees before their repositories, and newly
 checked ones open as spaces in their folders. A held repository and the `~`
 space follow the same rules as in the TUI.
 
-Three things differ, because the app works differently:
+The popup also lists the projects on every remote machine whose layout is
+ready, in the same list:
+
+- **The `MACHINE` column** is blank for this computer and names the machine for
+  a remote row. The filter matches machine names, so typing a machine's name
+  lists its projects.
+- **Enter** opens a checked remote project as a space on its machine, in its
+  folder, and closes an unchecked one's spaces on that machine. Worktrees close
+  first, held repositories stay open, and each machine's `~` space and any
+  space with a terminal at that machine's home are never closed.
+- **A project is open** only when a space on the same machine is in its
+  folder, so the same folder on two machines makes two rows.
+- **A machine that cannot be searched** is skipped: it is unavailable, still
+  connecting, or its search fails. A line such as `Skipped devbox: unavailable`
+  says so, and the other machines' rows still load.
+
+The popup keeps the last list it found. The first open searches every machine
+and shows `Finding projects…` until the rows are in. Every later open shows the
+last list at once, with a small `refreshing` spinner beside the summary, and
+searches again in the background:
+
+- **Each machine's rows** are replaced as soon as that machine's search ends,
+  with new projects added, gone ones removed and `TOUCHED` updated. A slower
+  machine does not hold the others back.
+- **Your work in the popup stays:** rows you checked or unchecked, the filter
+  text, and the highlighted row while it is still listed. Open state and agent
+  status are always read live, not kept. Enter during a refresh acts on the
+  rows you see.
+- **A machine that is skipped** keeps its last rows, shown under its `Skipped`
+  line. The rows of a machine removed from the app drop out of the list.
+- **Closing the popup** during a refresh, with Enter or Esc, stops it waiting
+  for the searches still running and drops their results. Commands already
+  started finish on their own. A machine whose search had not finished keeps
+  its earlier rows until a later open's search of it finishes.
+- **The list lives** in the mod's `localStorage`, which the app saves under
+  `~/.config/herdr-app/data/project-finder/`, so it lasts across app restarts.
+  A list that cannot be read is ignored, and the popup loads as on the first
+  open.
+
+Three things differ from the TUI, because the app works differently:
 
 - **A project is open** when a space's first terminal is inside its folder.
   Spaces are matched by folder, not by name, and new spaces stay unnamed so
   they follow their folder and nest under their repository.
 - **Worktree folders** come from the app's `worktrees.directory` in
   `~/.config/herdr-app/settings.json`, not from the TUI's config. Without that
-  setting, the app's default `~/.herdr/worktrees` is searched.
+  setting, the app's default `~/.herdr/worktrees` is searched. On a remote
+  machine, `~` in it is that machine's home.
 - **A new space** is a plain shell in the project folder, or an agent when you
   set one. The TUI's layout command and its update offer have no app version.
 
@@ -1088,12 +1130,15 @@ Edit the `settings` object in the installed
 save.
 
 ```json
-"settings": { "root": "~/Developer", "agent": ["claude"] }
+"settings": { "root": "~/Developer", "machineRoots": { "devbox": "~/code" }, "agent": ["claude"] }
 ```
 
-- `root`: where to look for git repos, three levels deep. An absolute path or
-  one that starts with `~`. Default `~`. A folder that does not exist falls
-  back to home.
+- `root`: where to look for git repos, three levels deep, on every machine. An
+  absolute path or one that starts with `~`, which is each machine's own home.
+  Default `~`. A folder that does not exist on a machine falls back to that
+  machine's home.
+- `machineRoots`: optional. A root for one remote machine, by its name, in
+  place of `root` there. Each value follows the rules of `root`.
 - `agent`: the program each new space starts in its first tab, as a list of
   words, such as `["claude"]` or `["codex"]`. Default `null`, a plain shell.
 
@@ -1102,16 +1147,20 @@ changes nothing. A reinstall that copies the folder again resets the settings.
 
 ### Test the app mod
 
-The discovery and picker logic lives in `discover.js` and `picker.js`, which
-import nothing from Herdr, so node runs them. The discovery tests build real
+The discovery, picker and cache logic lives in `discover.js`, `picker.js` and
+`cache.js`, which import nothing from Herdr, so node runs them. The discovery tests build real
 folders and run the same `find` and `sh` commands the mod runs. They repeat the
 cases of the Rust suite's `tests/discovery.rs`, apart from its debug line,
 which the mod does not have.
 
 ```sh
-node --test tests/app-mod/discover.test.mjs tests/app-mod/picker.test.mjs
+node --test tests/app-mod/discover.test.mjs tests/app-mod/picker.test.mjs tests/app-mod/remote.test.mjs tests/app-mod/cache.test.mjs
 herdr-app check mods/project-finder
 ```
+
+The remote tests stand in for herdr-core with an `exec` that runs each
+command on this computer against a folder that plays the remote machine's
+home.
 
 The check writes `jsconfig.json` and `gpui-kit.d.ts` into the mod folder.
 `.gitignore` keeps them out of the repo.
